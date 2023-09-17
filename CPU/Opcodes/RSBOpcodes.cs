@@ -4,10 +4,48 @@
   {
     public static Dictionary<byte, GBOpcode> X8opcodes = new Dictionary<byte, GBOpcode>()
     {
-      {0x07, new GBOpcode(0x07, "RLCA", 1,4, null)},
-      {0x0F, new GBOpcode(0x0F, "RRCA",1,4,null)},
-      {0x17, new GBOpcode(0x17, "RLA",1,4,null)},
-      {0x1F, new GBOpcode(0x1F, "RRA",1,4,null)},
+      {0x07, new GBOpcode(0x07, "RLCA", 1,4, new Step[] {
+        (Gameboy gb) => {
+					gb.A = (byte)((gb.A << 1) | (gb.A >> 7));
+          gb.Z = false;
+          gb.N = false;
+          gb.HC = false;
+          gb.CF = (gb.A & 0x01) == 1;
+					return true;
+        }
+      })},
+      {0x0F, new GBOpcode(0x0F, "RRCA",1,4,new Step[] {
+				(Gameboy gb) => {
+					gb.Z = false;
+					gb.N = false;
+					gb.HC = false;
+					gb.CF = (gb.A & 0x01) > 0;
+					gb.A = (byte)((gb.A >> 1) | (gb.A << 7));
+					return true;
+				}
+			})},
+      {0x17, new GBOpcode(0x17, "RLA",1,4,new Step[] {
+				(Gameboy gb) => {
+					var currentCarry = gb.CF;
+					gb.Z = false;
+					gb.N = false;
+					gb.HC = false;
+					gb.CF = (gb.A & 0x80) > 0;
+					gb.A = (byte)((gb.A << 1) | (currentCarry ? 1 : 0));
+					return true;
+				}
+			})},
+      {0x1F, new GBOpcode(0x1F, "RRA",1,4,new Step[] {
+				(Gameboy gb) => {
+					var val = gb.A;
+					gb.A = (byte)((gb.A >> 1) | (gb.CF ? 128 : 0));
+					gb.Z = false;
+					gb.N = false;
+					gb.HC = false;
+					gb.CF = (val & 1) == 1;
+					return true;
+				}
+			})},
     };
 
     public static Dictionary<byte, GBOpcode> CBOpcodes = new Dictionary<byte, GBOpcode>()
