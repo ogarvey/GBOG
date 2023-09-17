@@ -9,16 +9,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Serilog" Version="3.0.1" />
+    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
     <PackageReference Include="SFML.Net" Version="2.5.1" />
   </ItemGroup>
 
   <ItemGroup>
     <Folder Include="Audio\" />
-    <Folder Include="Graphics\" />
-    <Folder Include="Memory\" />
-    <Folder Include="CPU\" />
     <Folder Include="Timer\" />
-    <Folder Include="Utils\" />
   </ItemGroup>
 
 </Project>
