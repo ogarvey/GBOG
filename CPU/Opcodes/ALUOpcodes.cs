@@ -762,46 +762,6 @@
 			gb.CF = result < 0;
 			gb.A = (byte)result;
 		}
-
-		private static byte Rlc(Gameboy gb, byte value)
-		{
-			var result = (byte)((value << 1) | (value >> 7));
-			gb.Z = result == 0;
-			gb.N = false;
-			gb.HC = false;
-			gb.CF = (value & 0x80) == 0x80;
-			return result;
-		}
-
-		private static byte Rrc(Gameboy gb, byte value)
-		{
-			var result = (byte)((value >> 1) | (value << 7));
-			gb.Z = result == 0;
-			gb.N = false;
-			gb.HC = false;
-			gb.CF = (value & 0x01) == 0x01;
-			return result;
-		}
-
-		private static byte Rl(Gameboy gb, byte value)
-		{
-			var result = (byte)((value << 1) | (gb.CF ? 1 : 0));
-			gb.Z = result == 0;
-			gb.N = false;
-			gb.HC = false;
-			gb.CF = (value & 0x80) == 0x80;
-			return result;
-		}
-
-		private static byte Rr(Gameboy gb, byte value)
-		{
-			var result = (byte)((value >> 1) | (gb.CF ? 0x80 : 0x00));
-			gb.Z = result == 0;
-			gb.N = false;
-			gb.HC = false;
-			gb.CF = (value & 0x01) == 0x01;
-			return result;
-		}
 		
 		private static int Dec(Gameboy gb, byte val)
 		{
