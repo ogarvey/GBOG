@@ -1,8 +1,11 @@
 ﻿namespace GBOG.CPU.Opcodes
 {
   public class LSMOpcodes
-  {
-    public static Dictionary<byte, GBOpcode> X8opcodes = new Dictionary<byte, GBOpcode>()
+	{
+		private static int value;
+		private static ushort address;
+		
+		public static Dictionary<byte, GBOpcode> X8opcodes = new Dictionary<byte, GBOpcode>()
         {
             {0x02, new GBOpcode(0x02, "LD (BC),A", 1,8, null)},
             {0x06, new GBOpcode(0x06, "LD B,u8",2,8,null)},
@@ -91,23 +94,222 @@
             {0xFA, new GBOpcode(0xFA, "LD A,(u16)",3,16,null)}
         };
     public static Dictionary<byte, GBOpcode> X16opcodes = new Dictionary<byte, GBOpcode>()
-        {
-            {0x01, new GBOpcode(0x01, "LD BC,u16",3,12, new Step[] {
-
-            })},
-            {0x08, new GBOpcode(0x08, "LD (u16),SP",3,20,null)},
-            {0x11, new GBOpcode(0x11, "LD DE,u16",3,12,null)},
-            {0x21, new GBOpcode(0x21, "LD HL,u16",3,12,null)},
-            {0x31, new GBOpcode(0x31, "LD SP,u16",3,12,null)},
-            {0xC1, new GBOpcode(0xC1, "POP BC",1,12,null)},
-            {0xC5, new GBOpcode(0xC5, "PUSH BC",1,16,null)},
-            {0xD1, new GBOpcode(0xD1, "POP DE",1,12,null)},
-            {0xD5, new GBOpcode(0xD5, "PUSH DE",1,16,null)},
-            {0xE1, new GBOpcode(0xE1, "POP HL",1,12,null)},
-            {0xE5, new GBOpcode(0xE5, "PUSH HL",1,16,null)},
-            {0xF1, new GBOpcode(0xF1, "POP AF",1,12,null)},
-            {0xF5, new GBOpcode(0xF5, "PUSH AF",1,16,null)},
-            {0xF9, new GBOpcode(0xF9, "LD SP,HL",1,8,null)}
-        };
+    {
+      {0x01, new GBOpcode(0x01, "LD BC,u16",3,12, new Step[] {
+				(Gameboy gb) => {
+					value = gb._memory.ReadUShort(gb.PC++);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.PC += 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.BC = (ushort)value;
+					return true;
+				},
+			})},
+      {0x08, new GBOpcode(0x08, "LD (u16),SP",3,20,new Step[] {
+				(Gameboy gb) => {
+					address = gb._memory.ReadUShort(gb.PC);
+					return true;
+				},
+				(Gameboy gb) => {
+					value = gb.SP;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.PC += 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.PC += 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb._memory.WriteUShort(address, (ushort)value);
+					return true;
+				},
+			})},
+      {0x11, new GBOpcode(0x11, "LD DE,u16",3,12,new Step[] {
+				(Gameboy gb) => {
+					value = gb._memory.ReadUShort(gb.PC++);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.PC += 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.DE = (ushort)value;
+					return true;
+				},
+			})},
+      {0x21, new GBOpcode(0x21, "LD HL,u16",3,12,new Step[] {
+					(Gameboy gb) => {
+					value = gb._memory.ReadUShort(gb.PC++);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.PC += 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.HL = (ushort)value;
+					return true;
+				},
+			})},
+      {0x31, new GBOpcode(0x31, "LD SP,u16",3,12,new Step[] {
+					(Gameboy gb) => {
+					value = gb._memory.ReadUShort(gb.PC++);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.PC += 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP = (ushort)value;
+					return true;
+				},
+			})},
+      {0xC1, new GBOpcode(0xC1, "POP BC",1,12,new Step[] {
+				(Gameboy gb) => {
+					value = gb._memory.ReadUShort(gb.SP++);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP +=1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.BC = (ushort)value;
+					return true;
+				},
+			})},
+      {0xC5, new GBOpcode(0xC5, "PUSH BC",1,16,new Step[] {
+				(Gameboy gb) => {
+					value = gb.BC;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP -= 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP -= 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb._memory.WriteUShort(gb.SP, (ushort)value);
+					return true;
+				},
+			})},
+      {0xD1, new GBOpcode(0xD1, "POP DE",1,12,new Step[] {
+				(Gameboy gb) => {
+					value = gb._memory.ReadUShort(gb.SP++);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP +=1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.DE = (ushort)value;
+					return true;
+				},
+			})},
+      {0xD5, new GBOpcode(0xD5, "PUSH DE",1,16,new Step[] {
+				(Gameboy gb) => {
+					value = gb.DE;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP -= 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP -= 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb._memory.WriteUShort(gb.SP, (ushort)value);
+					return true;
+				},
+			})},
+      {0xE1, new GBOpcode(0xE1, "POP HL",1,12,new Step[] {
+				(Gameboy gb) => {
+					value = gb._memory.ReadUShort(gb.SP++);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP +=1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.HL = (ushort)value;
+					return true;
+				},
+			})},
+      {0xE5, new GBOpcode(0xE5, "PUSH HL",1,16,new Step[] {
+				(Gameboy gb) => {
+					value = gb.HL;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP -= 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP -= 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb._memory.WriteUShort(gb.SP, (ushort)value);
+					return true;
+				},
+			})},
+      {0xF1, new GBOpcode(0xF1, "POP AF",1,12,new Step[] {
+				(Gameboy gb) => {
+					value = gb._memory.ReadUShort(gb.SP++);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP +=1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.AF = (ushort)value;
+					return true;
+				},
+			})},
+      {0xF5, new GBOpcode(0xF5, "PUSH AF",1,16,new Step[] {
+				(Gameboy gb) => {
+					value = gb.AF;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP -= 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP -= 1;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb._memory.WriteUShort(gb.SP, (ushort)value);
+					return true;
+				},
+			})},
+      {0xF9, new GBOpcode(0xF9, "LD SP,HL",1,8,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.SP = gb.HL;
+					return true;
+				},
+			})}
+    };
   }
 }

@@ -4,7 +4,7 @@
 	{
 		private static int value;
 		private static ushort address;
-		private static bool currentCarry;
+		
 		public static Dictionary<byte, GBOpcode> MiscOpcodes = new Dictionary<byte, GBOpcode>()
 		{
 			{ 0x00, new GBOpcode(0x00, "NOP", 1, 4, new Step[] {(Gameboy gb) =>{ return true;}}) },
