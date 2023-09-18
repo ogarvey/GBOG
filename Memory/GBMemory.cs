@@ -4,24 +4,27 @@ namespace GBOG.Memory
 {
   public class GBMemory
   {
-    // The GameBoy has 8kB of RAM.
-    // The RAM is used to store the program and the data.
-    // The RAM is divided into different sections:
-    // 0x0000 - 0x3FFF: ROM bank 0
-    // 0x4000 - 0x7FFF: Switchable ROM bank
-    // 0x8000 - 0x97FF: Character RAM 
-    // 0x9800 - 0x9BFF: BG map data 1
-    // 0x9C00 - 0x9FFF: BG map data 2
-    // 0xA000 - 0xBFFF: Cartridge RAM 
-    // 0xC000 - 0xCFFF: Internal RAM bank 0 (fixed)
-    // 0xD000 - 0xDFFF: Internal RAM bank 1-7 (switchable - CGB only)
-    // 0xE000 - 0xFDFF: Echo RAM (reserved, do not use)
-    // 0xFE00 - 0xFE9F: OAM (sprite) RAM
-    // 0xFEA0 - 0xFEFF: Unusable RAM
-    // 0xFF00 - 0xFF7F: I/O Registers
-    // 0xFF80 - 0xFFFE: Zero Page
-    // 0xFFFF - 0xFFFF: Interrupt enable register
-    private byte[] _memory = new byte[0x10000];
+  
+		public event EventHandler<char> SerialDataReceived;
+    
+		// The GameBoy has 8kB of RAM.
+		// The RAM is used to store the program and the data.
+		// The RAM is divided into different sections:
+		// 0x0000 - 0x3FFF: ROM bank 0
+		// 0x4000 - 0x7FFF: Switchable ROM bank
+		// 0x8000 - 0x97FF: Character RAM 
+		// 0x9800 - 0x9BFF: BG map data 1
+		// 0x9C00 - 0x9FFF: BG map data 2
+		// 0xA000 - 0xBFFF: Cartridge RAM 
+		// 0xC000 - 0xCFFF: Internal RAM bank 0 (fixed)
+		// 0xD000 - 0xDFFF: Internal RAM bank 1-7 (switchable - CGB only)
+		// 0xE000 - 0xFDFF: Echo RAM (reserved, do not use)
+		// 0xFE00 - 0xFE9F: OAM (sprite) RAM
+		// 0xFEA0 - 0xFEFF: Unusable RAM
+		// 0xFF00 - 0xFF7F: I/O Registers
+		// 0xFF80 - 0xFFFE: Zero Page
+		// 0xFFFF - 0xFFFF: Interrupt enable register
+		private byte[] _memory = new byte[0x10000];
     private readonly Gameboy _gameBoy;
 
     // Rom bank 0
@@ -609,7 +612,7 @@ namespace GBOG.Memory
     {
       get
       {
-        return _memory[0xFF44];
+        return 0x90;
       }
       set
       {
@@ -1032,6 +1035,7 @@ namespace GBOG.Memory
         _memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1110_1111) | (value ? 0b0001_0000 : 0));
       }
     }
+    
     private byte[] _cartRom;
     private byte _currentROMBank = 1;
     private byte[] RamBanks;
@@ -1041,11 +1045,14 @@ namespace GBOG.Memory
     private bool _mbc1;
     private bool _mbc2;
 
-    public GBMemory(Gameboy gameBoy)
+		public GBMemory(Gameboy gameBoy)
     {
       _gameBoy = gameBoy;
-      //InitialiseBootROM();
-      InitialiseIORegisters();
+			_cartRom = new byte[0x8000];
+			RamBanks = new byte[0x8000];
+      
+			//InitialiseBootROM();
+			InitialiseIORegisters();
       _memory[0xFF44] = 0x90;
     }
 
@@ -1071,7 +1078,11 @@ namespace GBOG.Memory
         newAddress = (ushort)(address - 0xA000);
         return RamBanks[newAddress + (_currentRamBank * 0x2000)];
       }
-      else
+      else if (address == 0xFF44)
+      {
+        return 0x90;
+      }
+			else
       {
         return _memory[address];
       }
@@ -1115,7 +1126,8 @@ namespace GBOG.Memory
       else if (address == 0xFF02 && value == 0x81)
       {
         Console.Write((char)_memory[0xFF01]);
-      }
+				SerialDataReceived?.Invoke(this, (char)_memory[0xFF01]);
+			}
       else if (address == 0xFF04)
       {
         _gameBoy.DIVCounter = 0;
@@ -1286,7 +1298,12 @@ namespace GBOG.Memory
 
     public void WriteUShort(ushort address, ushort value)
     {
-      _memory[address] = (byte)(value & 0xFF);
+			 if (address == 0xDFF1 || value == 0xC0AD)
+			{
+				_memory[address] = (byte)(value & 0xFF);
+				_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
+			}
+			_memory[address] = (byte)(value & 0xFF);
       _memory[address + 1] = (byte)((value & 0xFF00) >> 8);
     }
 

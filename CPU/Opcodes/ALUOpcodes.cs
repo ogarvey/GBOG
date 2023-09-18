@@ -10,61 +10,61 @@
     {
 			{0x04, new GBOpcode(0x04, "INC B",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.B++;
+					gb.B = Inc(gb, gb.B);
 					return true;
 				},
 			})},
 			{0x05, new GBOpcode(0x05, "DEC B",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.B--;
+					gb.B = Dec(gb, gb.B);
 					return true;
 				},
 			})},
 			{0x0C, new GBOpcode(0x0C, "INC C",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.C++;
+					gb.C = Inc(gb, gb.C);
 					return true;
 				},
 			})},
 			{0x0D, new GBOpcode(0x0D, "DEC C",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.C--;
+					gb.C = Dec(gb, gb.C);
 					return true;
 				},
 			})},
 			{0x14, new GBOpcode(0x14, "INC D",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.D++;
+					gb.D = Inc(gb, gb.D);
 					return true;
 				},
 			})},
 			{0x15, new GBOpcode(0x15, "DEC D",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.D--;
+					gb.D = Dec(gb, gb.D);
 					return true;
 				},
 			})},
 			{0x1C, new GBOpcode(0x1C, "INC E",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.E++;
+					gb.E = Inc(gb, gb.E);
 					return true;
 				},
 			})},
 			{0x1D, new GBOpcode(0x1D, "DEC E",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.E--;
+					gb.E = Dec(gb, gb.E);
 					return true;
 				},
 			})},
 			{0x24, new GBOpcode(0x24, "INC H",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.H++;
+					gb.H = Inc(gb, gb.H);
 					return true;
 				},
 			})},
 			{0x25, new GBOpcode(0x25, "DEC H",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.H--;
+					gb.H = Dec(gb, gb.H);
 					return true;
 				},
 			})},
@@ -105,13 +105,13 @@
 			})},
 			{0x2C, new GBOpcode(0x2C, "INC L",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.L++;
+					gb.L = Inc(gb, gb.L);
 					return true;
 				},
 			})},
 			{0x2D, new GBOpcode(0x2D, "DEC L",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.L--;
+					gb.L = Dec(gb, gb.L);
 					return true;
 				},
 			})},
@@ -161,13 +161,13 @@
 			})},
 			{0x3C, new GBOpcode(0x3C, "INC A",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.A++;
+					gb.A = Inc(gb, gb.A);
 					return true;
 				},
 			})},
 			{0x3D, new GBOpcode(0x3D, "DEC A",1,4,new Step[] {
 				(Gameboy gb) => {
-					gb.A--;
+					gb.A = Dec(gb, gb.A);
 					return true;
 				},
 			})},
@@ -624,9 +624,11 @@
 			})},
 			{0xD6, new GBOpcode(0xD6, "SUB {0:x2}",2,8,new Step[] {
 				(Gameboy gb) => {
+					value = gb._memory.ReadByte(gb.PC++);
 					return true;
 				},
 				(Gameboy gb) => {
+					Sub(gb, (byte)value);
 					return true;
 				},
 			})},
@@ -688,99 +690,7 @@
 				},
 			})},
 		};
-
-		private static void Add(Gameboy gb, byte b)
-		{
-			int result = gb.A + value;
-			gb.Z = (result & 0xFF) == 0;
-			gb.N = false;
-			gb.HC = (result & 0x0F) < (gb.A & 0x0F);
-			gb.CF = result > 0xFF;
-			gb.A = (byte)result;
-		}
-
-		private static void Adc(Gameboy gb, byte value)
-		{
-			int result = gb.A + value + (gb.CF ? 1 : 0);
-			gb.N = false;
-			gb.HC = ((gb.A & 0xF) + (value & 0xF) + (gb.CF ? 1 : 0)) > 0xF;
-			gb.CF = result > 0xFF;
-			gb.A = (byte)result;
-			gb.Z = gb.A == 0;
-		}
-		private static void Sub(Gameboy gb, byte value)
-		{
-			int result = gb.A - value;
-			gb.Z = (result & 0xFF) == 0;
-			gb.N = true;
-			gb.HC = (result & 0x0F) > (gb.A & 0x0F);
-			gb.CF = result < 0;
-			gb.A = (byte)result;
-		}
-
-		private static void And(Gameboy gb, byte value)
-		{
-			gb.A &= value;
-			gb.Z = gb.A == 0;
-			gb.N = false;
-			gb.HC = true;
-			gb.CF = false;
-		}
-
-		private static void Or(Gameboy gb, byte value)
-		{
-			gb.A |= value;
-			gb.Z = gb.A == 0;
-			gb.N = false;
-			gb.HC = false;
-			gb.CF = false;
-		}
-
-		private static void Xor(Gameboy gb, byte value)
-		{
-			gb.A ^= value;
-			gb.Z = gb.A == 0;
-			gb.N = false;
-			gb.HC = false;
-			gb.CF = false;
-		}
-
-		private static void Cp(Gameboy gb, byte value)
-		{
-			int result = gb.A - value;
-			gb.Z = (result & 0xFF) == 0;
-			gb.N = true;
-			gb.HC = (result & 0x0F) > (gb.A & 0x0F);
-			gb.CF = result < 0;
-		}
-		private static void Sbc(Gameboy gb, byte value)
-		{
-			int result = gb.A - value - (gb.CF ? 1 : 0);
-			gb.Z = (result & 0xFF) == 0;
-			gb.N = true;
-			gb.HC = ((gb.A & 0xF) - (value & 0xF) - (gb.CF ? 1 : 0)) < 0;
-			gb.CF = result < 0;
-			gb.A = (byte)result;
-		}
 		
-		private static int Dec(Gameboy gb, byte val)
-		{
-			var result = (byte)(val - 1);
-			gb.Z = result == 0;
-			gb.N = true;
-			gb.HC = (val & 0x0F) == 0x00;
-			return result;
-		}
-
-		private static byte Inc(Gameboy gb, byte val)
-		{
-			var result = (byte)(val + 1);
-			gb.Z = result == 0;
-			gb.N = false;
-			gb.HC = (val & 0x0F) == 0x0F;
-			return result;
-		}
-
 		public static Dictionary<byte, GBOpcode> X16opcodes = new Dictionary<byte, GBOpcode>()
     {
       {0x03, new GBOpcode(0x03, "INC BC",1,8,new Step[] {
@@ -942,5 +852,98 @@
 			gb.CF = a + b > 0xFFFF;
 			return (ushort)(a + b);
 		}
+
+		private static void Add(Gameboy gb, byte val)
+		{
+			int result = gb.A + val;
+			gb.Z = (result & 0xFF) == 0;
+			gb.N = false;
+			gb.HC = (result & 0x0F) < (gb.A & 0x0F);
+			gb.CF = result > 0xFF;
+			gb.A = (byte)result;
+		}
+
+		private static void Adc(Gameboy gb, byte val)
+		{
+			int result = gb.A + val + (gb.CF ? 1 : 0);
+			gb.N = false;
+			gb.HC = ((gb.A & 0xF) + (val & 0xF) + (gb.CF ? 1 : 0)) > 0xF;
+			gb.CF = result > 0xFF;
+			gb.A = (byte)result;
+			gb.Z = gb.A == 0;
+		}
+		private static void Sub(Gameboy gb, byte val)
+		{
+			int result = gb.A - val;
+			gb.Z = (result & 0xFF) == 0;
+			gb.N = true;
+			gb.HC = (result & 0x0F) > (gb.A & 0x0F);
+			gb.CF = result < 0;
+			gb.A = (byte)result;
+		}
+
+		private static void And(Gameboy gb, byte val)
+		{
+			gb.A &= val;
+			gb.Z = gb.A == 0;
+			gb.N = false;
+			gb.HC = true;
+			gb.CF = false;
+		}
+
+		private static void Or(Gameboy gb, byte val)
+		{
+			gb.A |= val;
+			gb.Z = gb.A == 0;
+			gb.N = false;
+			gb.HC = false;
+			gb.CF = false;
+		}
+
+		private static void Xor(Gameboy gb, byte val)
+		{
+			gb.A ^= val;
+			gb.Z = gb.A == 0;
+			gb.N = false;
+			gb.HC = false;
+			gb.CF = false;
+		}
+
+		private static void Cp(Gameboy gb, byte val)
+		{
+			int result = gb.A - val;
+			gb.Z = (result & 0xFF) == 0;
+			gb.N = true;
+			gb.HC = (result & 0x0F) > (gb.A & 0x0F);
+			gb.CF = result < 0;
+		}
+		private static void Sbc(Gameboy gb, byte val)
+		{
+			int result = gb.A - val - (gb.CF ? 1 : 0);
+			gb.Z = (result & 0xFF) == 0;
+			gb.N = true;
+			gb.HC = ((gb.A & 0xF) - (val & 0xF) - (gb.CF ? 1 : 0)) < 0;
+			gb.CF = result < 0;
+			gb.A = (byte)result;
+		}
+
+		private static byte Dec(Gameboy gb, byte val)
+		{
+			var result = (byte)(val - 1);
+			gb.Z = result == 0;
+			gb.N = true;
+			gb.HC = (val & 0x0F) == 0x00;
+			return result;
+		}
+
+		private static byte Inc(Gameboy gb, byte val)
+		{
+			var result = (byte)(val + 1);
+			gb.Z = result == 0;
+			gb.N = false;
+			gb.HC = (val & 0x0F) == 0x0F;
+			return result;
+		}
+
 	}
 }

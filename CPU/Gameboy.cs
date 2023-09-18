@@ -109,32 +109,32 @@ namespace GBOG.CPU
         .CreateLogger();
       _display = new byte[160, 144, 3];
       _pixels = new byte[160 * 144];
-      _window = new RenderWindow(new VideoMode(160, 144), "GameBoy")
-      {
-        Size = new Vector2u(160 * 4, 144 * 4)
-      };
-      _window.Closed += (sender, e) => _window.Close();
-      _window.KeyPressed += (sender, e) =>
-      {
-        switch (e.Code)
-        {
-          case Keyboard.Key.Escape:
-            _window.Close();
-            break;
-          case Keyboard.Key.Space:
-            break;
-          case Keyboard.Key.Left:
-            break;
-          case Keyboard.Key.Right:
-            break;
-          case Keyboard.Key.Up:
-            break;
-          case Keyboard.Key.Down:
-            break;
-        }
-      };
+      //_window = new RenderWindow(new VideoMode(160, 144), "GameBoy")
+      //{
+      //  Size = new Vector2u(160 * 4, 144 * 4)
+      //};
+      //_window.Closed += (sender, e) => _window.Close();
+      //_window.KeyPressed += (sender, e) =>
+      //{
+      //  switch (e.Code)
+      //  {
+      //    case Keyboard.Key.Escape:
+      //      _window.Close();
+      //      break;
+      //    case Keyboard.Key.Space:
+      //      break;
+      //    case Keyboard.Key.Left:
+      //      break;
+      //    case Keyboard.Key.Right:
+      //      break;
+      //    case Keyboard.Key.Up:
+      //      break;
+      //    case Keyboard.Key.Down:
+      //      break;
+      //  }
+      //};
 
-      _bgTexture = new Texture(160, 144);
+      //_bgTexture = new Texture(160, 144);
 
       _opcodeHandler = new OpcodeHandler(this);
       _memory = new GBMemory(this);
@@ -143,7 +143,7 @@ namespace GBOG.CPU
       DE = 0x00D8;
       HL = 0x014D;
       SP = 0xFFFE;
-      PC = 0x0100;
+      PC = 0x0101;
     }
 
     private void DoLoop()
@@ -151,7 +151,7 @@ namespace GBOG.CPU
       const int MAX_CYCLES = 69905;
       var i = 0;
       int cycles = 4;
-      while (i < 300)
+      while (i < 161504)
       {
         int cyclesThisUpdate = 0;
 
@@ -168,7 +168,7 @@ namespace GBOG.CPU
           if (!Halt)
           {
             opcode = _memory.ReadByte(PC++);
-            var op = _opcodeHandler.GetOpcode(opcode);
+            var op = _opcodeHandler.GetOpcode(opcode, opcode == 0xCB);
             var steps = op?.steps;
             if (steps != null)
             {
@@ -178,7 +178,7 @@ namespace GBOG.CPU
                 {
                   cyclesThisUpdate++;
                   UpdateTimer(cycles);
-                  UpdateGraphics(cycles);
+                  //UpdateGraphics(cycles);
                 }
                 else
                 {
@@ -192,19 +192,20 @@ namespace GBOG.CPU
           {
             cyclesThisUpdate++;
             UpdateTimer(cycles);
-            UpdateGraphics(cycles);
+            // UpdateGraphics(cycles);
           }
 
 
 
-          //LogSystemState();
-        }
-        _bgTexture.Update(FlattenDisplayArray());
-        _window.Clear();
-        _window.Draw(new Sprite(_bgTexture));
-        _window.Display();
-      }
-      i++;
+					LogSystemState();
+				}
+				i++;
+				//_bgTexture.Update(FlattenDisplayArray());
+				//_window.Clear();
+				//_window.Draw(new Sprite(_bgTexture));
+				//_window.Display();
+			}
+      MessageBox.Show("Finished Test Rom");
     }
 
     private byte[] FlattenDisplayArray()
@@ -764,7 +765,8 @@ namespace GBOG.CPU
       DoLoop();
     }
 
-    private void LogSystemState()
+		public event EventHandler<string> LogAdded;
+		private void LogSystemState()
     {
 
       // Format A: 01 F: B0 B: 00 C: 13 D: 00 E: D8 H: 01 L: 4D SP: FFFE PC: 00:0100 (00 C3 13 02)
@@ -772,7 +774,11 @@ namespace GBOG.CPU
       // All of the values between A and PC are the hex-encoded values of the corresponding registers. 
       // The final values in brackets (00 C3 13 02) are the 4 bytes stored in the memory locations near PC (ie. the values at pc,pc+1,pc+2,pc+3).
       // The values in brackets are useful for debugging, as they show the next few bytes of the program.
-      Log.Information($"A: {A:X2} F: {F:X2} B: {B:X2} C: {C:X2} D: {D:X2} E: {E:X2} H: {H:X2} L: {L:X2} SP: {SP:X4} PC: 00:{PC:X4} ({_memory.ReadByte(PC):X2} {_memory.ReadByte((ushort)(PC + 1)):X2} {_memory.ReadByte((ushort)(PC + 2)):X2} {_memory.ReadByte((ushort)(PC + 3)):X2})");
-    }
+      var text = $"A: {A:X2} F: {F:X2} B: {B:X2} C: {C:X2} D: {D:X2} E: {E:X2} H: {H:X2} L: {L:X2} SP: {SP:X4} PC: 00:{PC:X4} ({_memory.ReadByte(PC):X2} {_memory.ReadByte((ushort)(PC + 1)):X2} {_memory.ReadByte((ushort)(PC + 2)):X2} {_memory.ReadByte((ushort)(PC + 3)):X2})";
+
+			Log.Information(text);
+
+			LogAdded?.Invoke(this, text);
+		}
   }
 }

@@ -48,10 +48,7 @@
 						gb.PC += (ushort)value;
 						return true;
 					}
-					else
-					{
-						return false;
-					}
+					return false;
 				}
 			})},
 			{0x28, new GBOpcode(0x28, "JR Z, {0:x2}", 2, 12, new Step[] {
@@ -185,6 +182,7 @@
 						gb.SP -= 1;
 						return true;
 					}
+					gb.PC+=2;
 					return false;
 				},
 				(Gameboy gb) => {

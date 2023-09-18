@@ -24,7 +24,11 @@ namespace GBOG.CPU.Opcodes
 
     public GBOpcode? GetOpcode(byte opcode, bool cb = false)
     {
-      return cb ? _cbOpcodes.GetValueOrDefault(opcode) : _opcodes.GetValueOrDefault(opcode);
+      byte cbOp = 0;
+      if (cb) {
+        cbOp = _gb._memory.ReadByte(_gb.PC++);
+			}
+      return cb ? _cbOpcodes.GetValueOrDefault(cbOp) : _opcodes.GetValueOrDefault(opcode);
     }
   }
 }
