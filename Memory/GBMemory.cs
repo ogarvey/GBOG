@@ -1,4 +1,5 @@
 ﻿using GBOG.CPU;
+using System.Diagnostics;
 
 namespace GBOG.Memory
 {
@@ -1068,17 +1069,19 @@ namespace GBOG.Memory
     public byte ReadByte(ushort address)
     {
       ushort newAddress;
-      if ((address >= 0x4000) && (address <= 0x7FFF))
-      {
-        newAddress = (ushort)(address - 0x4000);
-        return _cartRom[newAddress + (_currentROMBank * 0x4000)];
-      }
-      else if ((address >= 0xA000) && (address <= 0xBFFF))
-      {
-        newAddress = (ushort)(address - 0xA000);
-        return RamBanks[newAddress + (_currentRamBank * 0x2000)];
-      }
-      else if (address == 0xFF44)
+      //if ((address >= 0x4000) && (address <= 0x7FFF))
+      //{
+      //  newAddress = (ushort)(address - 0x4000);
+      //  return _cartRom[newAddress + (_currentROMBank * 0x4000)];
+      //}
+      //else if ((address >= 0xA000) && (address <= 0xBFFF))
+      //{
+      //  newAddress = (ushort)(address - 0xA000);
+      //  return RamBanks[newAddress + (_currentRamBank * 0x2000)];
+      //}
+      //else
+      //
+      if (address == 0xFF44)
       {
         return 0x90;
       }
@@ -1094,9 +1097,8 @@ namespace GBOG.Memory
     }
 
     public void WriteByte(ushort address, byte value)
-    {
-      // disable writes to rom
-      if (address < 0x8000)
+		{
+			if (address < 0x8000)
       {
         HandleBanking(address, value);
       }
@@ -1298,11 +1300,6 @@ namespace GBOG.Memory
 
     public void WriteUShort(ushort address, ushort value)
     {
-			 if (address == 0xDFF1 || value == 0xC0AD)
-			{
-				_memory[address] = (byte)(value & 0xFF);
-				_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
-			}
 			_memory[address] = (byte)(value & 0xFF);
       _memory[address + 1] = (byte)((value & 0xFF00) >> 8);
     }

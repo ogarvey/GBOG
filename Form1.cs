@@ -32,7 +32,14 @@ namespace GBOG
 		}
 		private void DisplaySerialData(object? sender, char data)
 		{
-			txtSerialData.Text += data;
+			if (InvokeRequired)
+			{
+				Invoke(new Action(() => DisplaySerialData(sender, data)));
+			}
+			else
+			{
+				txtSerialData.Text += data;
+			}
 		}
 		private void DisplayLogData(object? sender, string data)
 		{

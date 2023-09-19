@@ -148,6 +148,7 @@
 						gb.PC = gb._memory.ReadUShort(gb.PC);
 						return true;
 					}
+					gb.PC+=2;
 					return false;
 				},
 			})},
@@ -187,6 +188,7 @@
 				},
 				(Gameboy gb) => {
 					gb.SP -= 1;
+					gb._memory.WriteUShort(gb.SP, (ushort)(gb.PC+2));
 					return true;
 				},
 				(Gameboy gb) => {
@@ -216,7 +218,7 @@
 						return true;
 				},
 				(Gameboy gb) => {
-					gb._memory.ReadUShort(gb.SP);
+					address = gb._memory.ReadUShort(gb.SP);
 					return true;
 				},
 				(Gameboy gb) => {
@@ -293,6 +295,7 @@
 						gb.SP -= 1;
 						return true;
 					}
+					gb.PC+=2;
 					return false;
 				},
 				(Gameboy gb) => {

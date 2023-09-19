@@ -7,6 +7,7 @@ using Serilog;
 using SFML.Graphics;
 using SFML.System;
 using SFML.Window;
+using System.Diagnostics;
 using Color = System.Drawing.Color;
 using Log = Serilog.Log;
 
@@ -143,7 +144,7 @@ namespace GBOG.CPU
       DE = 0x00D8;
       HL = 0x014D;
       SP = 0xFFFE;
-      PC = 0x0101;
+      PC = 0x0100;
     }
 
     private void DoLoop()
@@ -228,8 +229,8 @@ namespace GBOG.CPU
     private void HandleInterrupts()
     {
       if (InterruptMasterEnabled)
-      {
-        if (_memory.IFVBlank && _memory.IEVBlank)
+			{
+				if (_memory.IFVBlank && _memory.IEVBlank)
         {
           _memory.IFVBlank = false;
           InterruptMasterEnabled = false;
