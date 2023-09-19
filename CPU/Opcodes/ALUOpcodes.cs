@@ -175,7 +175,7 @@
 				(Gameboy gb) => {
 					gb.N = false;
 					gb.HC = false;
-					gb.CF = true;
+					gb.CF = !gb.CF;
 					return true;
 				},
 			})},
@@ -826,9 +826,6 @@
 				(Gameboy gb) => {
 					gb.N = false;
 					gb.Z = false;
-					return true;
-				},
-				(Gameboy gb) => {
 					initial = gb.SP;
 					return true;
 				},

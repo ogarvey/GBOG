@@ -4,7 +4,7 @@
 	{
 		private static int value;
 		private static ushort address;
-		
+
 		public static Dictionary<byte, GBOpcode> MiscOpcodes = new Dictionary<byte, GBOpcode>()
 		{
 			{ 0x00, new GBOpcode(0x00, "NOP", 1, 4, new Step[] {(Gameboy gb) =>{ return true;}}) },
@@ -404,24 +404,24 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP -=1;
+					address = gb._memory.ReadUShort(gb.PC);
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP -=1;
-					return true;
-				},
-				(Gameboy gb) => {
-					gb._memory.WriteUShort(gb.SP, (ushort)(gb.PC + 2));
 					return true;
 				},
 				(Gameboy gb) => {
 					if(!gb.CF) {
-						address = gb._memory.ReadUShort(gb.PC);
+						gb.SP -=1;
 						return true;
 					}
 					gb.PC += 2;
 					return false;
+				},
+				(Gameboy gb) => {
+					gb.SP -=1;
+					gb._memory.WriteUShort(gb.SP, (ushort)(gb.PC + 2));
+					return true;
 				},
 				(Gameboy gb) => {
 					gb.PC = address;
@@ -519,22 +519,22 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP -= 1;
+					address = gb._memory.ReadUShort(gb.PC);
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP -= 1;
 					return true;
 				},
 				(Gameboy gb) => {
 					if (gb.CF) {
-						address = gb._memory.ReadUShort(gb.PC);
+						gb.SP -= 1;
 						return true;
 					}
 					gb.PC += 2;
 					return false;
 				},
 				(Gameboy gb) => {
+					gb.SP -= 1;
 					gb._memory.WriteUShort(gb.SP, (ushort)(gb.PC + 2));
 					return true;
 				},

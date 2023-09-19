@@ -201,6 +201,9 @@ namespace GBOG.CPU
 					LogSystemState();
 				}
 				i++;
+        //if (i % 999 == 0) {
+        //  UpdateFormCounter();
+        //}
 				//_bgTexture.Update(FlattenDisplayArray());
 				//_window.Clear();
 				//_window.Draw(new Sprite(_bgTexture));
@@ -767,6 +770,10 @@ namespace GBOG.CPU
     }
 
 		public event EventHandler<string> LogAdded;
+    private void UpdateFormCounter()
+		{
+			LogAdded?.Invoke(this, "");
+		}
 		private void LogSystemState()
     {
 
@@ -779,7 +786,6 @@ namespace GBOG.CPU
 
 			Log.Information(text);
 
-			LogAdded?.Invoke(this, text);
 		}
   }
 }

@@ -1155,7 +1155,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					Bit(gb, 6, gb.B);
+					Bit(gb, 6, gb.C);
 					return true;
 				},
 			})},
@@ -1230,7 +1230,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					Bit(gb, 7, gb.B);
+					Bit(gb, 7, gb.C);
 					return true;
 				},
 			})},

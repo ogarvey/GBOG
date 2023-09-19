@@ -1069,18 +1069,18 @@ namespace GBOG.Memory
     public byte ReadByte(ushort address)
     {
       ushort newAddress;
-      //if ((address >= 0x4000) && (address <= 0x7FFF))
-      //{
-      //  newAddress = (ushort)(address - 0x4000);
-      //  return _cartRom[newAddress + (_currentROMBank * 0x4000)];
-      //}
-      //else if ((address >= 0xA000) && (address <= 0xBFFF))
-      //{
-      //  newAddress = (ushort)(address - 0xA000);
-      //  return RamBanks[newAddress + (_currentRamBank * 0x2000)];
-      //}
-      //else
-      //
+      if ((address >= 0x4000) && (address <= 0x7FFF))
+      {
+        newAddress = (ushort)(address - 0x4000);
+        return _cartRom[newAddress + (_currentROMBank * 0x4000)];
+      }
+      else if ((address >= 0xA000) && (address <= 0xBFFF))
+      {
+        newAddress = (ushort)(address - 0xA000);
+        return RamBanks[newAddress + (_currentRamBank * 0x2000)];
+      }
+      else
+
       if (address == 0xFF44)
       {
         return 0x90;
@@ -1091,7 +1091,9 @@ namespace GBOG.Memory
       }
     }
 
-    public sbyte ReadSByte(ushort address)
+		public EventHandler<bool> OnGraphicsRAMAccessed;
+
+		public sbyte ReadSByte(ushort address)
     {
       return (sbyte)_memory[address];
     }
@@ -1105,7 +1107,15 @@ namespace GBOG.Memory
       // 0x8000 - 0x97FF
       else if ((address >= 0x8000) && (address < 0x9800))
       {
-        _memory[address] = value;
+				OnGraphicsRAMAccessed?.Invoke(this, true);
+				_memory[address] = value;
+				//_gameBoy.UpdateTile(address, value);
+			}
+			// 0x9800 - 0x9BFF
+			else if ((address >= 0x9800) && (address < 0x9C00))
+			{
+				OnGraphicsRAMAccessed?.Invoke(this, true);
+				_memory[address] = value;
         //_gameBoy.UpdateTile(address, value);
       }
       else if (address >= 0xA000 && address <= 0xBFFF)

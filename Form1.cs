@@ -21,7 +21,7 @@ namespace GBOG
 			};
 			if (openFileDialog1.ShowDialog() == DialogResult.OK)
 			{
-				_gb.LogAdded += DisplayLogData;
+				//_gb.LogAdded += DisplayLogData;
 				_gb._memory.SerialDataReceived += DisplaySerialData;
 				// call _gb.LoadRom on a separate thread from the UI
 				await Task.Run(() =>
