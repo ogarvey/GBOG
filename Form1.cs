@@ -1,4 +1,8 @@
 using GBOG.CPU;
+using GBOG.Graphics.UI;
+using GBOG.Utils;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 
 namespace GBOG
 {
@@ -30,6 +34,7 @@ namespace GBOG
 				});
 			}
 		}
+
 		private void DisplaySerialData(object? sender, char data)
 		{
 			if (InvokeRequired)
@@ -59,28 +64,13 @@ namespace GBOG
 
 		private void btnCompareLog_Click(object sender, EventArgs e)
 		{
-			openFileDialog1 = new OpenFileDialog()
-			{
-				FileName = "Select a Gameboy Rom file",
-				Title = "Open Gameboy Rom file"
-			};
-			if (openFileDialog1.ShowDialog() == DialogResult.OK)
-			{
-				var epiclog = File.ReadAllLines(openFileDialog1.FileName);
-				var log = File.ReadAllLines("log.txt");
-				for (int i = 0; i < log.Length; i++)
-				{
-					if (log[i] != epiclog[i])
-					{
-						var message = $"Line {i} differs" + "\r\n";
-						message += $"log: {log[i]}" + "\r\n";
-						message += $"epiclog: {epiclog[i]}";
-						MessageBox.Show(message);
-						break;
-					}
-				}
 
-			}
+		}
+
+		private void btnViewTileData_Click(object sender, EventArgs e)
+		{
+			var tileDataViewer = new TileDataViewer(_gb);
+			tileDataViewer.Show();
 		}
 	}
 

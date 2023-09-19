@@ -613,8 +613,8 @@ namespace GBOG.Memory
     {
       get
       {
-        return 0x90;
-      }
+				return _memory[0xFF44];
+			}
       set
       {
         _memory[0xFF44] = value;
@@ -1079,19 +1079,12 @@ namespace GBOG.Memory
         newAddress = (ushort)(address - 0xA000);
         return RamBanks[newAddress + (_currentRamBank * 0x2000)];
       }
-      else
-
-      if (address == 0xFF44)
-      {
-        return 0x90;
-      }
 			else
       {
         return _memory[address];
       }
     }
 
-		public EventHandler<bool> OnGraphicsRAMAccessed;
 
 		public sbyte ReadSByte(ushort address)
     {
@@ -1107,17 +1100,9 @@ namespace GBOG.Memory
       // 0x8000 - 0x97FF
       else if ((address >= 0x8000) && (address < 0x9800))
       {
-				OnGraphicsRAMAccessed?.Invoke(this, true);
 				_memory[address] = value;
 				//_gameBoy.UpdateTile(address, value);
 			}
-			// 0x9800 - 0x9BFF
-			else if ((address >= 0x9800) && (address < 0x9C00))
-			{
-				OnGraphicsRAMAccessed?.Invoke(this, true);
-				_memory[address] = value;
-        //_gameBoy.UpdateTile(address, value);
-      }
       else if (address >= 0xA000 && address <= 0xBFFF)
       {
         if (_ramEnabled)
@@ -1391,7 +1376,7 @@ namespace GBOG.Memory
 
     public byte[] GetTileData()
     {
-      // 8000-8FFF
+      // 8000-97FF
       var tileData = new byte[0x1800];
       Array.Copy(_memory, 0x8000, tileData, 0, 0x1800);
       return tileData;

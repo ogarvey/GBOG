@@ -145,9 +145,10 @@ namespace GBOG.CPU
       HL = 0x014D;
       SP = 0xFFFE;
       PC = 0x0100;
-    }
+		}
+		public EventHandler<bool> OnGraphicsRAMAccessed;
 
-    private void DoLoop()
+		private void DoLoop()
     {
       const int MAX_CYCLES = 69905;
       var i = 0;
@@ -179,8 +180,9 @@ namespace GBOG.CPU
                 {
                   cyclesThisUpdate++;
                   UpdateTimer(cycles);
-                  //UpdateGraphics(cycles);
-                }
+									UpdateGraphics(cycles);
+									OnGraphicsRAMAccessed?.Invoke(this, true);
+								}
                 else
                 {
                   break;
@@ -193,7 +195,7 @@ namespace GBOG.CPU
           {
             cyclesThisUpdate++;
             UpdateTimer(cycles);
-            // UpdateGraphics(cycles);
+            UpdateGraphics(cycles);
           }
 
 
@@ -280,6 +282,7 @@ namespace GBOG.CPU
     {
       return (_memory.IF & _memory.InterruptEnableRegister) != 0;
     }
+    
     private void UpdateTimer(int cycles)
     {
       // increment timer
@@ -357,7 +360,7 @@ namespace GBOG.CPU
         }
         else if (currentLine < 144)
         {
-          DrawScanline();
+          //DrawScanline();
         }
       }
     }
@@ -770,10 +773,6 @@ namespace GBOG.CPU
     }
 
 		public event EventHandler<string> LogAdded;
-    private void UpdateFormCounter()
-		{
-			LogAdded?.Invoke(this, "");
-		}
 		private void LogSystemState()
     {
 

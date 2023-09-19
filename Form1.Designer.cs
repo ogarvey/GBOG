@@ -31,18 +31,18 @@
 			btnLoadRom = new Button();
 			openFileDialog1 = new OpenFileDialog();
 			txtSerialData = new TextBox();
-			txtLogData = new TextBox();
-			btnCompareLog = new Button();
-			pictureBox1 = new PictureBox();
-			((System.ComponentModel.ISupportInitialize)pictureBox1).BeginInit();
+			btnViewTileData = new Button();
+			tableLayoutPanel1 = new TableLayoutPanel();
+			tableLayoutPanel2 = new TableLayoutPanel();
+			tableLayoutPanel1.SuspendLayout();
+			tableLayoutPanel2.SuspendLayout();
 			SuspendLayout();
 			// 
 			// btnLoadRom
 			// 
-			btnLoadRom.Location = new Point(782, 536);
-			btnLoadRom.Margin = new Padding(3, 4, 3, 4);
+			btnLoadRom.Location = new Point(3, 46);
 			btnLoadRom.Name = "btnLoadRom";
-			btnLoadRom.Size = new Size(119, 48);
+			btnLoadRom.Size = new Size(104, 36);
 			btnLoadRom.TabIndex = 0;
 			btnLoadRom.Text = "Load Rom File";
 			btnLoadRom.UseVisualStyleBackColor = true;
@@ -54,58 +54,67 @@
 			// 
 			// txtSerialData
 			// 
-			txtSerialData.Location = new Point(14, 473);
-			txtSerialData.Margin = new Padding(3, 4, 3, 4);
+			txtSerialData.Dock = DockStyle.Fill;
+			txtSerialData.Location = new Point(3, 526);
 			txtSerialData.Multiline = true;
 			txtSerialData.Name = "txtSerialData";
-			txtSerialData.Size = new Size(761, 109);
+			txtSerialData.Size = new Size(1158, 87);
 			txtSerialData.TabIndex = 1;
 			// 
-			// txtLogData
+			// btnViewTileData
 			// 
-			txtLogData.Location = new Point(14, 16);
-			txtLogData.Margin = new Padding(3, 4, 3, 4);
-			txtLogData.Multiline = true;
-			txtLogData.Name = "txtLogData";
-			txtLogData.ScrollBars = ScrollBars.Vertical;
-			txtLogData.Size = new Size(761, 448);
-			txtLogData.TabIndex = 2;
+			btnViewTileData.Location = new Point(3, 3);
+			btnViewTileData.Name = "btnViewTileData";
+			btnViewTileData.Size = new Size(104, 36);
+			btnViewTileData.TabIndex = 3;
+			btnViewTileData.Text = "View TileData";
+			btnViewTileData.UseVisualStyleBackColor = true;
+			btnViewTileData.Click += btnViewTileData_Click;
 			// 
-			// btnCompareLog
+			// tableLayoutPanel1
 			// 
-			btnCompareLog.Location = new Point(782, 473);
-			btnCompareLog.Margin = new Padding(3, 4, 3, 4);
-			btnCompareLog.Name = "btnCompareLog";
-			btnCompareLog.Size = new Size(119, 48);
-			btnCompareLog.TabIndex = 3;
-			btnCompareLog.Text = "Compare Log";
-			btnCompareLog.UseVisualStyleBackColor = true;
-			btnCompareLog.Click += btnCompareLog_Click;
+			tableLayoutPanel1.ColumnCount = 2;
+			tableLayoutPanel1.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 90.86651F));
+			tableLayoutPanel1.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 9.13349F));
+			tableLayoutPanel1.Controls.Add(txtSerialData, 0, 1);
+			tableLayoutPanel1.Controls.Add(tableLayoutPanel2, 1, 1);
+			tableLayoutPanel1.Dock = DockStyle.Fill;
+			tableLayoutPanel1.Location = new Point(0, 0);
+			tableLayoutPanel1.Name = "tableLayoutPanel1";
+			tableLayoutPanel1.RowCount = 2;
+			tableLayoutPanel1.RowStyles.Add(new RowStyle(SizeType.Percent, 84.9025955F));
+			tableLayoutPanel1.RowStyles.Add(new RowStyle(SizeType.Percent, 15.0974026F));
+			tableLayoutPanel1.Size = new Size(1281, 616);
+			tableLayoutPanel1.TabIndex = 4;
 			// 
-			// pictureBox1
+			// tableLayoutPanel2
 			// 
-			pictureBox1.Location = new Point(784, 16);
-			pictureBox1.Name = "pictureBox1";
-			pictureBox1.Size = new Size(666, 447);
-			pictureBox1.TabIndex = 4;
-			pictureBox1.TabStop = false;
+			tableLayoutPanel2.ColumnCount = 1;
+			tableLayoutPanel2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+			tableLayoutPanel2.Controls.Add(btnViewTileData, 0, 0);
+			tableLayoutPanel2.Controls.Add(btnLoadRom, 0, 1);
+			tableLayoutPanel2.Dock = DockStyle.Fill;
+			tableLayoutPanel2.Location = new Point(1167, 526);
+			tableLayoutPanel2.Name = "tableLayoutPanel2";
+			tableLayoutPanel2.RowCount = 2;
+			tableLayoutPanel2.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+			tableLayoutPanel2.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+			tableLayoutPanel2.Size = new Size(111, 87);
+			tableLayoutPanel2.TabIndex = 2;
 			// 
 			// Form1
 			// 
-			AutoScaleDimensions = new SizeF(8F, 20F);
+			AutoScaleDimensions = new SizeF(7F, 15F);
 			AutoScaleMode = AutoScaleMode.Font;
-			ClientSize = new Size(1464, 600);
-			Controls.Add(pictureBox1);
-			Controls.Add(btnCompareLog);
-			Controls.Add(txtLogData);
-			Controls.Add(txtSerialData);
-			Controls.Add(btnLoadRom);
-			Margin = new Padding(3, 4, 3, 4);
+			AutoSizeMode = AutoSizeMode.GrowAndShrink;
+			ClientSize = new Size(1281, 616);
+			Controls.Add(tableLayoutPanel1);
 			Name = "Form1";
 			Text = "Form1";
-			((System.ComponentModel.ISupportInitialize)pictureBox1).EndInit();
+			tableLayoutPanel1.ResumeLayout(false);
+			tableLayoutPanel1.PerformLayout();
+			tableLayoutPanel2.ResumeLayout(false);
 			ResumeLayout(false);
-			PerformLayout();
 		}
 
 		#endregion
@@ -114,7 +123,9 @@
 		private OpenFileDialog openFileDialog1;
 		private TextBox txtSerialData;
 		private TextBox txtLogData;
-		private Button btnCompareLog;
-		private PictureBox pictureBox1;
+		private Button btnViewTileData;
+		private TableLayoutPanel tableLayoutPanel1;
+		private TableLayoutPanel tableLayoutPanel2;
+		private PictureBox pbTileData;
 	}
 }
