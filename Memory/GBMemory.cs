@@ -1,4 +1,6 @@
 ﻿using GBOG.CPU;
+using GBOG.Utils;
+using System;
 using System.Diagnostics;
 
 namespace GBOG.Memory
@@ -1079,12 +1081,35 @@ namespace GBOG.Memory
         newAddress = (ushort)(address - 0xA000);
         return RamBanks[newAddress + (_currentRamBank * 0x2000)];
       }
-			else
+      else if (0xFF00 == address)
+        return 0xff;
+      else
       {
         return _memory[address];
       }
     }
+    
+		//private byte GetJoypadState()
+		//{
+		//	byte res = _memory[0xFF00];
+		//	// flip all the bits
+		//	res ^= 0xFF;
 
+		//	// are we interested in the standard buttons?
+		//	if (!res.TestBit(4))
+		//	{
+		//		byte topJoypad = m_JoypadState >> 4;
+		//		topJoypad |= 0xF0; // turn the top 4 bits on
+		//		res &= topJoypad; // show what buttons are pressed
+		//	}
+		//	else if (!res.TestBit(5))//directional buttons
+		//	{
+		//		byte bottomJoypad = m_JoypadState & 0xF;
+		//		bottomJoypad |= 0xF0;
+		//		res &= bottomJoypad;
+		//	}
+		//	return res;
+		//}
 
 		public sbyte ReadSByte(ushort address)
     {

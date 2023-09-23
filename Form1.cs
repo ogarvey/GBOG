@@ -1,8 +1,5 @@
 using GBOG.CPU;
 using GBOG.Graphics.UI;
-using GBOG.Utils;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 
 namespace GBOG
 {
@@ -12,11 +9,10 @@ namespace GBOG
 		private static int _cycles = 0;
 		public Form1()
 		{
-			_gb = new Gameboy();
 			InitializeComponent();
 		}
 
-		private async void btnLoadRom_Click(object sender, EventArgs e)
+		private void btnLoadRom_Click(object sender, EventArgs e)
 		{
 			openFileDialog1 = new OpenFileDialog()
 			{
@@ -25,13 +21,12 @@ namespace GBOG
 			};
 			if (openFileDialog1.ShowDialog() == DialogResult.OK)
 			{
+				_gb = new Gameboy();
 				//_gb.LogAdded += DisplayLogData;
 				_gb._memory.SerialDataReceived += DisplaySerialData;
-				// call _gb.LoadRom on a separate thread from the UI
-				await Task.Run(() =>
-				{
-					_gb.LoadRom(openFileDialog1.FileName);
-				});
+				_gb.LoadRom(openFileDialog1.FileName);
+				btnLoadRom.Enabled = false;
+				btnStartGame.Enabled = true;
 			}
 		}
 
@@ -62,15 +57,32 @@ namespace GBOG
 			}
 		}
 
-		private void btnCompareLog_Click(object sender, EventArgs e)
-		{
-
-		}
-
 		private void btnViewTileData_Click(object sender, EventArgs e)
 		{
 			var tileDataViewer = new TileDataViewer(_gb);
 			tileDataViewer.Show();
+		}
+
+		private void Form1_FormClosed(object sender, FormClosedEventArgs e)
+		{
+			_gb._memory.SerialDataReceived -= DisplaySerialData;
+		}
+
+		private async void btnStartGame_Click(object sender, EventArgs e)
+		{
+			btnViewTileData.Enabled = true;
+			btnQuitGame.Enabled = true;
+			await _gb.RunGame();
+		}
+
+		private void btnQuitGame_Click(object sender, EventArgs e)
+		{
+			_gb.EndGame();
+			_gb = null;
+			btnViewTileData.Enabled = false;
+			btnQuitGame.Enabled = false;
+			btnStartGame.Enabled = true;
+			btnLoadRom.Enabled = true;
 		}
 	}
 

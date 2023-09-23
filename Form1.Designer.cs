@@ -34,13 +34,15 @@
 			btnViewTileData = new Button();
 			tableLayoutPanel1 = new TableLayoutPanel();
 			tableLayoutPanel2 = new TableLayoutPanel();
+			btnStartGame = new Button();
+			btnQuitGame = new Button();
 			tableLayoutPanel1.SuspendLayout();
 			tableLayoutPanel2.SuspendLayout();
 			SuspendLayout();
 			// 
 			// btnLoadRom
 			// 
-			btnLoadRom.Location = new Point(3, 46);
+			btnLoadRom.Location = new Point(3, 60);
 			btnLoadRom.Name = "btnLoadRom";
 			btnLoadRom.Size = new Size(104, 36);
 			btnLoadRom.TabIndex = 0;
@@ -55,14 +57,15 @@
 			// txtSerialData
 			// 
 			txtSerialData.Dock = DockStyle.Fill;
-			txtSerialData.Location = new Point(3, 526);
+			txtSerialData.Location = new Point(3, 385);
 			txtSerialData.Multiline = true;
 			txtSerialData.Name = "txtSerialData";
-			txtSerialData.Size = new Size(1158, 87);
+			txtSerialData.Size = new Size(1158, 228);
 			txtSerialData.TabIndex = 1;
 			// 
 			// btnViewTileData
 			// 
+			btnViewTileData.Enabled = false;
 			btnViewTileData.Location = new Point(3, 3);
 			btnViewTileData.Name = "btnViewTileData";
 			btnViewTileData.Size = new Size(104, 36);
@@ -82,25 +85,51 @@
 			tableLayoutPanel1.Location = new Point(0, 0);
 			tableLayoutPanel1.Name = "tableLayoutPanel1";
 			tableLayoutPanel1.RowCount = 2;
-			tableLayoutPanel1.RowStyles.Add(new RowStyle(SizeType.Percent, 84.9025955F));
-			tableLayoutPanel1.RowStyles.Add(new RowStyle(SizeType.Percent, 15.0974026F));
+			tableLayoutPanel1.RowStyles.Add(new RowStyle(SizeType.Percent, 62.0129852F));
+			tableLayoutPanel1.RowStyles.Add(new RowStyle(SizeType.Percent, 37.9870148F));
 			tableLayoutPanel1.Size = new Size(1281, 616);
 			tableLayoutPanel1.TabIndex = 4;
 			// 
 			// tableLayoutPanel2
 			// 
 			tableLayoutPanel2.ColumnCount = 1;
-			tableLayoutPanel2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+			tableLayoutPanel2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+			tableLayoutPanel2.Controls.Add(btnQuitGame, 0, 3);
+			tableLayoutPanel2.Controls.Add(btnStartGame, 0, 2);
 			tableLayoutPanel2.Controls.Add(btnViewTileData, 0, 0);
 			tableLayoutPanel2.Controls.Add(btnLoadRom, 0, 1);
 			tableLayoutPanel2.Dock = DockStyle.Fill;
-			tableLayoutPanel2.Location = new Point(1167, 526);
+			tableLayoutPanel2.Location = new Point(1167, 385);
 			tableLayoutPanel2.Name = "tableLayoutPanel2";
-			tableLayoutPanel2.RowCount = 2;
-			tableLayoutPanel2.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-			tableLayoutPanel2.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-			tableLayoutPanel2.Size = new Size(111, 87);
+			tableLayoutPanel2.RowCount = 4;
+			tableLayoutPanel2.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
+			tableLayoutPanel2.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
+			tableLayoutPanel2.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
+			tableLayoutPanel2.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
+			tableLayoutPanel2.Size = new Size(111, 228);
 			tableLayoutPanel2.TabIndex = 2;
+			// 
+			// btnStartGame
+			// 
+			btnStartGame.Enabled = false;
+			btnStartGame.Location = new Point(3, 117);
+			btnStartGame.Name = "btnStartGame";
+			btnStartGame.Size = new Size(104, 36);
+			btnStartGame.TabIndex = 4;
+			btnStartGame.Text = "Start Game";
+			btnStartGame.UseVisualStyleBackColor = true;
+			btnStartGame.Click += btnStartGame_Click;
+			// 
+			// btnQuitGame
+			// 
+			btnQuitGame.Enabled = false;
+			btnQuitGame.Location = new Point(3, 174);
+			btnQuitGame.Name = "btnQuitGame";
+			btnQuitGame.Size = new Size(104, 36);
+			btnQuitGame.TabIndex = 5;
+			btnQuitGame.Text = "End Game";
+			btnQuitGame.UseVisualStyleBackColor = true;
+			btnQuitGame.Click += btnQuitGame_Click;
 			// 
 			// Form1
 			// 
@@ -111,6 +140,7 @@
 			Controls.Add(tableLayoutPanel1);
 			Name = "Form1";
 			Text = "Form1";
+			FormClosed += Form1_FormClosed;
 			tableLayoutPanel1.ResumeLayout(false);
 			tableLayoutPanel1.PerformLayout();
 			tableLayoutPanel2.ResumeLayout(false);
@@ -127,5 +157,7 @@
 		private TableLayoutPanel tableLayoutPanel1;
 		private TableLayoutPanel tableLayoutPanel2;
 		private PictureBox pbTileData;
+		private Button btnStartGame;
+		private Button btnQuitGame;
 	}
 }

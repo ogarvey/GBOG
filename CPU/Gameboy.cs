@@ -1,5 +1,6 @@
 ﻿using GBOG.CPU.Opcodes;
 using GBOG.Graphics;
+using GBOG.Graphics.MonoGame;
 using GBOG.Memory;
 using GBOG.Utils;
 using Microsoft.VisualBasic.Logging;
@@ -8,6 +9,7 @@ using SFML.Graphics;
 using SFML.System;
 using SFML.Window;
 using System.Diagnostics;
+using System.Windows.Forms.Design.Behavior;
 using Color = System.Drawing.Color;
 using Log = Serilog.Log;
 
@@ -108,34 +110,8 @@ namespace GBOG.CPU
         .WriteTo.File("log.txt",
         outputTemplate: "{Message:lj}{NewLine}{Exception}")
         .CreateLogger();
-      _display = new byte[160, 144, 3];
-      _pixels = new byte[160 * 144];
-      //_window = new RenderWindow(new VideoMode(160, 144), "GameBoy")
-      //{
-      //  Size = new Vector2u(160 * 4, 144 * 4)
-      //};
-      //_window.Closed += (sender, e) => _window.Close();
-      //_window.KeyPressed += (sender, e) =>
-      //{
-      //  switch (e.Code)
-      //  {
-      //    case Keyboard.Key.Escape:
-      //      _window.Close();
-      //      break;
-      //    case Keyboard.Key.Space:
-      //      break;
-      //    case Keyboard.Key.Left:
-      //      break;
-      //    case Keyboard.Key.Right:
-      //      break;
-      //    case Keyboard.Key.Up:
-      //      break;
-      //    case Keyboard.Key.Down:
-      //      break;
-      //  }
-      //};
-
-      //_bgTexture = new Texture(160, 144);
+      _display = new byte[160, 144, 4];
+      _pixels = new byte[160 * 144 * 4];
 
       _opcodeHandler = new OpcodeHandler(this);
       _memory = new GBMemory(this);
@@ -147,88 +123,71 @@ namespace GBOG.CPU
       PC = 0x0100;
 		}
 		public EventHandler<bool> OnGraphicsRAMAccessed;
+		private bool _exit = false;
 
-		private void DoLoop()
+		private async Task<bool> DoLoop()
     {
       const int MAX_CYCLES = 69905;
       var i = 0;
       int cycles = 4;
-      while (i < 161504)
+      await Task.Run(() =>
       {
-        int cyclesThisUpdate = 0;
-
-        while (cyclesThisUpdate < MAX_CYCLES)
+				while (!_exit && true)
         {
+          int cyclesThisUpdate = 0;
 
-          byte opcode;
+          while (cyclesThisUpdate < MAX_CYCLES)
+          {
 
-          if (IsInterruptRequested())
-          {
-            Halt = false;
-            HandleInterrupts();
-          }
-          if (!Halt)
-          {
-            opcode = _memory.ReadByte(PC++);
-            var op = _opcodeHandler.GetOpcode(opcode, opcode == 0xCB);
-            var steps = op?.steps;
-            if (steps != null)
+            byte opcode;
+
+            if (IsInterruptRequested())
             {
-              foreach (var step in steps)
+              Halt = false;
+              HandleInterrupts();
+            }
+            if (!Halt)
+            {
+              opcode = _memory.ReadByte(PC++);
+              var op = _opcodeHandler.GetOpcode(opcode, opcode == 0xCB);
+              var steps = op?.steps;
+              if (steps != null)
               {
-                if (step(this))
+                foreach (var step in steps)
                 {
-                  cyclesThisUpdate++;
-                  UpdateTimer(cycles);
-									UpdateGraphics(cycles);
-									OnGraphicsRAMAccessed?.Invoke(this, true);
-								}
-                else
-                {
-                  break;
+                  if (step(this))
+                  {
+                    cyclesThisUpdate++;
+                    UpdateTimer(cycles);
+                    UpdateGraphics(cycles);
+                    OnGraphicsRAMAccessed?.Invoke(this, true);
+                  }
+                  else
+                  {
+                    break;
+                  }
                 }
               }
+              //cycles = _opcodeHandler.HandleOpcode(opcode);
             }
-            //cycles = _opcodeHandler.HandleOpcode(opcode);
+            else
+            {
+              cyclesThisUpdate++;
+              UpdateTimer(cycles);
+              UpdateGraphics(cycles);
+            }
+            
+            LogSystemState();
           }
-          else
-          {
-            cyclesThisUpdate++;
-            UpdateTimer(cycles);
-            UpdateGraphics(cycles);
-          }
-
-
-
-					LogSystemState();
-				}
-				i++;
-        //if (i % 999 == 0) {
-        //  UpdateFormCounter();
-        //}
-				//_bgTexture.Update(FlattenDisplayArray());
-				//_window.Clear();
-				//_window.Draw(new Sprite(_bgTexture));
-				//_window.Display();
-			}
-      MessageBox.Show("Finished Test Rom");
+          i++;
+        }
+      });
+      return true;
     }
 
-    private byte[] FlattenDisplayArray()
+    public byte[] GetDisplayArray()
     {
-      var flattened = new byte[160 * 144 * 4];
-      for (int i = 0; i < 160; i++)
-      {
-        for (int j = 0; j < 144; j++)
-        {
-          flattened[(i * 144 + j) * 4] = _display[i, j, 0];
-          flattened[(i * 144 + j) * 4 + 1] = _display[i, j, 1];
-          flattened[(i * 144 + j) * 4 + 2] = _display[i, j, 2];
-          flattened[(i * 144 + j) * 4 + 3] = 255;
-        }
-      }
-
-      return flattened;
+      return _pixels;
     }
 
     private void HandleInterrupts()
@@ -331,7 +290,8 @@ namespace GBOG.CPU
 
     public void UpdateGraphics(int cycles)
     {
-      SetLCDStatus();
+			// during each scanline, the STAT interrupt can be called multiple times for each mode, but make sure it only fires once and only once per scanline,
+			SetLCDStatus();
 
       if (_memory.LCD)
       {
@@ -360,7 +320,7 @@ namespace GBOG.CPU
         }
         else if (currentLine < 144)
         {
-          //DrawScanline();
+          DrawScanline();
         }
       }
     }
@@ -375,8 +335,8 @@ namespace GBOG.CPU
       if (_memory.SpriteDisplay)
       {
         DrawSprites();
-      }
-    }
+			}
+		}
 
     private void DrawSprites()
     {
@@ -432,6 +392,7 @@ namespace GBOG.CPU
             int red = 0;
             int green = 0;
             int blue = 0;
+            byte alpha = 255;
 
             switch (color)
             {
@@ -439,6 +400,7 @@ namespace GBOG.CPU
                 red = 255;
                 green = 255;
                 blue = 255;
+                alpha = 0;
                 break;
               case Color color2 when color2 == Color.LightGray:
                 red = 0xCC;
@@ -470,12 +432,13 @@ namespace GBOG.CPU
             _display[pixel, scanline, 0] = (byte)red;
             _display[pixel, scanline, 1] = (byte)green;
             _display[pixel, scanline, 2] = (byte)blue;
+						_display[pixel, scanline, 3] = alpha;
 
-            // alternatively, use the colorNum directly in a 160*144 array to represent the pixel
-            // use pixel and finalY to determine the position in the array
-            _pixels[pixel + scanline * 160] = (byte)colorNum;
-          }
-        }
+						// alternatively, use the colorNum directly in a 160*144 array to represent the pixel
+						// use pixel and finalY to determine the position in the array
+					}
+					_pixels = Flatten(_display);
+				}
       }
     }
 
@@ -635,14 +598,34 @@ namespace GBOG.CPU
         _display[pixel, finalY, 0] = (byte)red;
         _display[pixel, finalY, 1] = (byte)green;
         _display[pixel, finalY, 2] = (byte)blue;
+				_display[pixel, finalY, 3] = 0xFF;
 
-        // alternatively, use the colorNum directly in a 160*144 array to represent the pixel
-        // use pixel and finalY to determine the position in the array
-        _pixels[pixel + finalY * 160] = (byte)colorNum;
-      }
-    }
 
-    private Color GetColor(byte colorNum, ushort address)
+				// alternatively, use the colorNum directly in a 160*144 array to represent the pixel
+				// use pixel and finalY to determine the position in the array
+				//_pixels[pixel + finalY * 160] = (byte)colorNum;
+			}
+			_pixels = Flatten(_display);
+		}
+
+		private byte[] Flatten(byte[,,] display)
+		{
+      byte[] pixels = new byte[160 * 144 * 4];
+			int index = 0;
+			for (int y = 0; y < 144; y++)
+			{
+				for (int x = 0; x < 160; x++)
+				{
+					pixels[index++] = display[x, y, 0];
+					pixels[index++] = display[x, y, 1];
+					pixels[index++] = display[x, y, 2];
+          pixels[index++] = display[x, y, 3];
+				}
+			}
+			return pixels;
+		}
+
+		private Color GetColor(byte colorNum, ushort address)
     {
       byte palette = _memory.ReadByte(address);
       byte hi = 0;
@@ -768,8 +751,17 @@ namespace GBOG.CPU
       // Create a buffer to hold the contents
       // Read the file into the buffer
       _memory.InitialiseGame(rom);
-      LogSystemState();
-      DoLoop();
+		}
+
+    public async Task<bool> RunGame()
+		{
+			LogSystemState();
+			return await DoLoop();
+    }
+
+    public void EndGame()
+    {
+      _exit = true;
     }
 
 		public event EventHandler<string> LogAdded;

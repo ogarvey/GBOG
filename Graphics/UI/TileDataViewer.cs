@@ -1,4 +1,5 @@
 ﻿using GBOG.CPU;
+using GBOG.Graphics.MonoGame;
 using GBOG.Utils;
 using System;
 using System.Collections.Generic;
@@ -22,6 +23,34 @@ namespace GBOG.Graphics.UI
 			InitializeComponent();
 			_gb = gb;
 			DisplayTileData();
+		}
+
+		private void DisplayScreenData()
+		{
+			byte[] screenData = _gb.GetDisplayArray();
+			// screenData contains a 160*144 byte array where each byte is a color index
+			// representing the color of a pixel on the screen.
+			// We need to convert this to a bitmap to display it.
+			// The bitmap will be 160*144 pixels, each pixel will be 4 bytes (ARGB)
+
+			int screenWidth = 160; // Width of the screen
+			int screenHeight = 144; // Height of the screen
+
+			Bitmap bmp = new Bitmap(screenWidth, screenHeight, PixelFormat.Format32bppArgb);
+
+			for (int row = 0; row < screenHeight; row++)
+			{
+				for (int col = 0; col < screenWidth; col++)
+				{
+					byte colorIndex = screenData[row * screenWidth + col];
+					Color color = GraphicUtils.GetColor(colorIndex);
+					bmp.SetPixel(col, row, color);
+				}
+			}
+
+			var scaled = GraphicUtils.Scale4(bmp);
+
+			pbTileData.Image = scaled;
 		}
 
 		private void DisplayTileData()
@@ -60,6 +89,14 @@ namespace GBOG.Graphics.UI
 		private void btnRefreshData_Click(object sender, EventArgs e)
 		{
 			DisplayTileData();
+		}
+
+		private void btnDisplayScreenData_Click(object sender, EventArgs e)
+		{
+			DisplayScreenData();
+
+			using var gbGame = new GameboyGame(_gb);
+			gbGame.Run();
 		}
 	}
 }
