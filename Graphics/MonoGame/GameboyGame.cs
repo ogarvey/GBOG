@@ -45,11 +45,24 @@ namespace GBOG.Graphics.MonoGame
 
 		protected override void Update(GameTime gameTime)
 		{
-			if (GamePad.GetState(PlayerIndex.One).Buttons.Back == ButtonState.Pressed || Keyboard.GetState().IsKeyDown(Keys.Escape))
+			if (GamePad.GetState(PlayerIndex.One).Buttons.BigButton == ButtonState.Pressed || Keyboard.GetState().IsKeyDown(Keys.Escape))
 			{
 				_gb.EndGame();
 				Exit();
 			}
+
+			KeyboardState keyboardState = Keyboard.GetState();
+			GamePadState gamePadState = GamePad.GetState(PlayerIndex.One);
+
+			// inputs
+			_gb._memory._joyPadKeys[0] = keyboardState.IsKeyDown(Keys.Right) || gamePadState.IsButtonDown(Buttons.DPadRight);
+			_gb._memory._joyPadKeys[1] = keyboardState.IsKeyDown(Keys.Left) || gamePadState.IsButtonDown(Buttons.DPadLeft);
+			_gb._memory._joyPadKeys[2] = keyboardState.IsKeyDown(Keys.Up) || gamePadState.IsButtonDown(Buttons.DPadUp);
+			_gb._memory._joyPadKeys[3] = keyboardState.IsKeyDown(Keys.Down) || gamePadState.IsButtonDown(Buttons.DPadDown);
+			_gb._memory._joyPadKeys[4] = keyboardState.IsKeyDown(Keys.S) || gamePadState.IsButtonDown(Buttons.A);
+			_gb._memory._joyPadKeys[5] = keyboardState.IsKeyDown(Keys.A) || gamePadState.IsButtonDown(Buttons.B);
+			_gb._memory._joyPadKeys[6] = keyboardState.IsKeyDown(Keys.Space) || gamePadState.IsButtonDown(Buttons.Start);
+			_gb._memory._joyPadKeys[7] = keyboardState.IsKeyDown(Keys.Enter) || gamePadState.IsButtonDown(Buttons.Back);
 
 			// TODO: Add your update logic here
 			_backbuffer = _gb.GetDisplayArray();

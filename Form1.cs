@@ -23,7 +23,7 @@ namespace GBOG
 			{
 				_gb = new Gameboy();
 				//_gb.LogAdded += DisplayLogData;
-				_gb._memory.SerialDataReceived += DisplaySerialData;
+				//_gb._memory.SerialDataReceived += DisplaySerialData;
 				_gb.LoadRom(openFileDialog1.FileName);
 				btnLoadRom.Enabled = false;
 				btnStartGame.Enabled = true;
@@ -67,7 +67,7 @@ namespace GBOG
 		{
 			if (_gb != null)
 			{
-				_gb._memory.SerialDataReceived -= DisplaySerialData;
+				// _gb._memory.SerialDataReceived -= DisplaySerialData;
 			}
 		}
 

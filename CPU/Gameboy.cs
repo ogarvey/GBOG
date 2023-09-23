@@ -177,7 +177,7 @@ namespace GBOG.CPU
               UpdateGraphics(cycles);
             }
             
-            LogSystemState();
+            //LogSystemState();
           }
           i++;
         }
@@ -757,7 +757,7 @@ namespace GBOG.CPU
 
     public async Task<bool> RunGame()
 		{
-			LogSystemState();
+			//LogSystemState();
 			return await DoLoop();
     }
 

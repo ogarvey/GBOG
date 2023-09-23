@@ -22,5 +22,20 @@ namespace GBOG.Utils
     {
       return (b & (1 << bit)) != 0;
     }
-  }
+    
+		public static byte GetLSB(ushort inputByte)
+		{
+			// Use a bitwise AND operation with 1 to extract the LSB.
+			byte lsb = (byte)(inputByte & 0b_0000_0000_1111_1111);
+			return lsb;
+		}
+		public static byte BitReset(byte value, int bitPosition)
+		{
+			return (byte)(value & ~(0b_0000_0001 << bitPosition));
+		}
+		public static bool IsBitSet(byte value, int bitPosition)
+		{
+			return ((value >> bitPosition) & 0b_0000_0001) == 1;
+		}
+	}
 }

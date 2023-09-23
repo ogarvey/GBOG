@@ -822,6 +822,9 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					Bit(gb, 1, gb._memory.ReadByte(gb.HL));
 					return true;
 				},
@@ -890,6 +893,9 @@
 				},
 			})},
       {0x56, new GBOpcode(0x56, "BIT 2,(HL)",2,12,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					return true;
 				},
@@ -966,6 +972,9 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					Bit(gb, 3, gb._memory.ReadByte(gb.HL));
 					return true;
 				},
@@ -1034,6 +1043,9 @@
 				},
 			})},
       {0x66, new GBOpcode(0x66, "BIT 4,(HL)",2,12,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					return true;
 				},
@@ -1110,6 +1122,9 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					Bit(gb, 5, gb._memory.ReadByte(gb.HL));
 					return true;
 				},
@@ -1182,6 +1197,9 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					Bit(gb, 6, gb._memory.ReadByte(gb.HL));
 					return true;
 				},
@@ -1250,6 +1268,9 @@
 				},
 			})},
       {0x7E, new GBOpcode(0x7E, "BIT 7,(HL)",2,12,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					return true;
 				},
