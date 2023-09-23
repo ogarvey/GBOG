@@ -65,7 +65,10 @@ namespace GBOG
 
 		private void Form1_FormClosed(object sender, FormClosedEventArgs e)
 		{
-			_gb._memory.SerialDataReceived -= DisplaySerialData;
+			if (_gb != null)
+			{
+				_gb._memory.SerialDataReceived -= DisplaySerialData;
+			}
 		}
 
 		private async void btnStartGame_Click(object sender, EventArgs e)
@@ -77,11 +80,12 @@ namespace GBOG
 
 		private void btnQuitGame_Click(object sender, EventArgs e)
 		{
+			_gb._memory.SerialDataReceived -= DisplaySerialData;
 			_gb.EndGame();
 			_gb = null;
 			btnViewTileData.Enabled = false;
 			btnQuitGame.Enabled = false;
-			btnStartGame.Enabled = true;
+			btnStartGame.Enabled = false;
 			btnLoadRom.Enabled = true;
 		}
 	}

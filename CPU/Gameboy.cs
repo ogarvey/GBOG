@@ -505,7 +505,6 @@ namespace GBOG.CPU
         yPos = (byte)(scrollY + _memory.LY);
       }
 
-      ushort tileRow = (ushort)((yPos / 8) * 32);
 
       for (int pixel = 0; pixel < 160; pixel++)
       {
@@ -519,11 +518,15 @@ namespace GBOG.CPU
           }
         }
 
-        ushort tileCol = (ushort)(xPos / 8);
-        int tileNum;
+				ushort tileRow = (ushort)((yPos / 8) * 32);
+				ushort tileCol = (ushort)(xPos / 8);
+        // tileData memory location to use
+				ushort tileLocation = tileData;
+        // backroundMemory = tilemap to use
         ushort tileAddress = (ushort)(backgroundMemory + tileRow + tileCol);
+				int tileNum;
 
-        if (unsigned)
+				if (unsigned)
         {
           tileNum = _memory.ReadByte(tileAddress);
         }
@@ -532,7 +535,6 @@ namespace GBOG.CPU
           tileNum = (sbyte)_memory.ReadByte(tileAddress);
         }
 
-        ushort tileLocation = tileData;
 
         if (unsigned)
         {
