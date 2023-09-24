@@ -2,6 +2,7 @@
 using GBOG.Utils;
 using System;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace GBOG.Memory
 {
@@ -249,6 +250,11 @@ namespace GBOG.Memory
 			}
 		}
 
+		private byte _JOYP
+		{
+			get { return _memory[0xFF00]; } set { _memory[0xFF00] = value; }
+		}
+
 		public byte Joypad
 		{
 			get
@@ -261,39 +267,40 @@ namespace GBOG.Memory
 				{
 					Console.WriteLine($"Encountered exception: {ex}");
 				}
-				return _memory[0xFF00];
+				return _JOYP;
 			}
 			set
 			{
-				_memory[0xFF00] = value;
+				_JOYP = value;
 			}
 		}
 
 		private void SetJoypadState()
 		{
-			bool isDirection = Extensions.IsBitSet(Joypad, 4);
-			bool isButton = Extensions.IsBitSet(Joypad, 5);
+			bool isDirection = Extensions.IsBitSet(_JOYP, 4);
+			bool isButton = Extensions.IsBitSet(_JOYP, 5);
 
 			byte newJoypad = 0;
-			byte previousJoypad = Joypad;
+			byte previousJoypad = _JOYP;
 
 			if (isDirection || isButton)
 			{
 				if (!isDirection)
 				{
 					newJoypad = 0b_0000_1111;
-					if (_joyPadKeys[0]) newJoypad = Extensions.BitReset(newJoypad,0);
-					if (_joyPadKeys[1]) newJoypad = Extensions.BitReset(newJoypad,1);
-					if (_joyPadKeys[2]) newJoypad = Extensions.BitReset(newJoypad,2);
-					if (_joyPadKeys[3]) newJoypad = Extensions.BitReset(newJoypad,3);
+					if (_joyPadKeys[0]) newJoypad = Extensions.BitReset(newJoypad, 0);
+					if (_joyPadKeys[1]) newJoypad = Extensions.BitReset(newJoypad, 1);
+					if (_joyPadKeys[2]) newJoypad = Extensions.BitReset(newJoypad, 2);
+					if (_joyPadKeys[3]) newJoypad = Extensions.BitReset(newJoypad, 3);
 				}
-				else {
+				else
+				{
 					if (!isButton)
 					{
 						newJoypad = 0b_0000_1111;
-						if (_joyPadKeys[4]) newJoypad = Extensions.BitReset(newJoypad,0);
-						if (_joyPadKeys[5]) newJoypad = Extensions.BitReset(newJoypad,1);
-						if (_joyPadKeys[6]) newJoypad = Extensions.BitReset(newJoypad,2);
+						if (_joyPadKeys[4]) newJoypad = Extensions.BitReset(newJoypad, 0);
+						if (_joyPadKeys[5]) newJoypad = Extensions.BitReset(newJoypad, 1);
+						if (_joyPadKeys[6]) newJoypad = Extensions.BitReset(newJoypad, 2);
 						if (_joyPadKeys[7]) newJoypad = Extensions.BitReset(newJoypad, 3);
 					}
 				}
@@ -308,11 +315,11 @@ namespace GBOG.Memory
 
 				if ((temp & 0x30) == 0x10 || (temp & 0x30) == 0x20)
 				{
-					Joypad = (byte)temp;
+					_JOYP = (byte)temp;
 				}
 				else
 				{
-					Joypad = 0xff;
+					_JOYP = 0xff;
 				}
 			}
 		}
@@ -1139,6 +1146,7 @@ namespace GBOG.Memory
 			Array.Copy(rom, 0, _memory, 0, 0x100);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public byte ReadByte(ushort address)
 		{
 			ushort newAddress;
@@ -1160,33 +1168,13 @@ namespace GBOG.Memory
 			}
 		}
 
-		//private byte GetJoypadState()
-		//{
-		//	byte res = _memory[0xFF00];
-		//	// flip all the bits
-		//	res ^= 0xFF;
-
-		//	// are we interested in the standard buttons?
-		//	if (!res.TestBit(4))
-		//	{
-		//		byte topJoypad = m_JoypadState >> 4;
-		//		topJoypad |= 0xF0; // turn the top 4 bits on
-		//		res &= topJoypad; // show what buttons are pressed
-		//	}
-		//	else if (!res.TestBit(5))//directional buttons
-		//	{
-		//		byte bottomJoypad = m_JoypadState & 0xF;
-		//		bottomJoypad |= 0xF0;
-		//		res &= bottomJoypad;
-		//	}
-		//	return res;
-		//}
-
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public sbyte ReadSByte(ushort address)
 		{
 			return (sbyte)_memory[address];
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public void WriteByte(ushort address, byte value)
 		{
 			if (address < 0x8000)
@@ -1214,7 +1202,7 @@ namespace GBOG.Memory
 			}
 			else if (address == 0xFF00)
 			{
-				_memory[address] = (byte)((_memory[address] & 0b1111_0000) | (value & 0b0000_1111));
+				Joypad = value;
 			}
 			else if (address == 0xFF02 && value == 0x81)
 			{
@@ -1265,6 +1253,7 @@ namespace GBOG.Memory
 
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private void HandleBanking(ushort address, byte value)
 		{
 			switch (address)
@@ -1303,6 +1292,7 @@ namespace GBOG.Memory
 			}
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private void RomRamModeSelect(ushort address, byte value)
 		{
 			var newData = (byte)(value & 0x01);
@@ -1384,6 +1374,7 @@ namespace GBOG.Memory
 			}
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public ushort ReadUShort(ushort address)
 		{
 			return (ushort)((_memory[address + 1] << 8) | _memory[address]);

@@ -61,8 +61,8 @@ namespace GBOG.Graphics.MonoGame
 			_gb._memory._joyPadKeys[3] = keyboardState.IsKeyDown(Keys.Down) || gamePadState.IsButtonDown(Buttons.DPadDown);
 			_gb._memory._joyPadKeys[4] = keyboardState.IsKeyDown(Keys.S) || gamePadState.IsButtonDown(Buttons.A);
 			_gb._memory._joyPadKeys[5] = keyboardState.IsKeyDown(Keys.A) || gamePadState.IsButtonDown(Buttons.B);
-			_gb._memory._joyPadKeys[6] = keyboardState.IsKeyDown(Keys.Space) || gamePadState.IsButtonDown(Buttons.Start);
-			_gb._memory._joyPadKeys[7] = keyboardState.IsKeyDown(Keys.Enter) || gamePadState.IsButtonDown(Buttons.Back);
+			_gb._memory._joyPadKeys[6] = keyboardState.IsKeyDown(Keys.Space) || gamePadState.IsButtonDown(Buttons.Back);
+			_gb._memory._joyPadKeys[7] = keyboardState.IsKeyDown(Keys.Enter) || gamePadState.IsButtonDown(Buttons.Start);
 
 			// TODO: Add your update logic here
 			_backbuffer = _gb.GetDisplayArray();

@@ -5,10 +5,8 @@ using GBOG.Memory;
 using GBOG.Utils;
 using Microsoft.VisualBasic.Logging;
 using Serilog;
-using SFML.Graphics;
-using SFML.System;
-using SFML.Window;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Windows.Forms.Design.Behavior;
 using Color = System.Drawing.Color;
 using Log = Serilog.Log;
@@ -26,8 +24,6 @@ namespace GBOG.CPU
     private int _scanlineCounter;
     private byte[,,] _display;
     private byte[] _pixels;
-    private RenderWindow _window;
-    private Texture _bgTexture;
 
     public GBMemory _memory { get; }
     private int _mClockCount { get; set; }
@@ -325,7 +321,8 @@ namespace GBOG.CPU
       }
     }
 
-    private void DrawScanline()
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private void DrawScanline()
     {
       if (_memory.BGDisplay)
       {
@@ -338,7 +335,8 @@ namespace GBOG.CPU
 			}
 		}
 
-    private void DrawSprites()
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private void DrawSprites()
     {
       bool use8x16 = _memory.OBJSize;
 
@@ -442,7 +440,8 @@ namespace GBOG.CPU
       }
     }
 
-    private void DrawBackground()
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private void DrawBackground()
     {
       ushort tileData = 0;
       ushort backgroundMemory = 0;
@@ -627,6 +626,7 @@ namespace GBOG.CPU
 			return pixels;
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private Color GetColor(byte colorNum, ushort address)
     {
       byte palette = _memory.ReadByte(address);
@@ -673,7 +673,8 @@ namespace GBOG.CPU
       return Color.Black;
     }
 
-    private void SetLCDStatus()
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private void SetLCDStatus()
     {
       byte status = _memory.STAT;
 
