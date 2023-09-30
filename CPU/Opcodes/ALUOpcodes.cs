@@ -143,10 +143,10 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					value = Dec(gb, (byte)initial);
 					return true;
 				},
 				(Gameboy gb) => {
+					value = Dec(gb, (byte)initial);
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},

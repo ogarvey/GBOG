@@ -549,9 +549,6 @@
       {0xE0, new GBOpcode(0xE0, "LD (FF00+u8),A",2,12,new Step[] {
 				(Gameboy gb) => {
 					address = (ushort)(0xFF00 + gb._memory.ReadByte(gb.PC++));
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(address, gb.A);
 					return true;
 				},

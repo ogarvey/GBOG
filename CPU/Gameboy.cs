@@ -3,11 +3,8 @@ using GBOG.Graphics;
 using GBOG.Graphics.MonoGame;
 using GBOG.Memory;
 using GBOG.Utils;
-using Microsoft.VisualBasic.Logging;
 using Serilog;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Windows.Forms.Design.Behavior;
 using Color = System.Drawing.Color;
 using Log = Serilog.Log;
 
@@ -123,7 +120,7 @@ namespace GBOG.CPU
 
 		private async Task<bool> DoLoop()
     {
-      const int MAX_CYCLES = 69905;
+      const int MAX_CYCLES = 70224;
       var i = 0;
       int cycles = 4;
       await Task.Run(() =>

@@ -1,8 +1,11 @@
 ﻿using GBOG.CPU;
 using GBOG.Utils;
+using Serilog.Core;
 using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 
 namespace GBOG.Memory
 {
@@ -252,7 +255,8 @@ namespace GBOG.Memory
 
 		private byte _JOYP
 		{
-			get { return _memory[0xFF00]; } set { _memory[0xFF00] = value; }
+			get { return _memory[0xFF00]; }
+			set { _memory[0xFF00] = value; }
 		}
 
 		public byte Joypad
@@ -722,7 +726,7 @@ namespace GBOG.Memory
 		{
 			get
 			{
-				return _memory[0xFF46];
+				return 0xff;
 			}
 			set
 			{
@@ -1124,12 +1128,15 @@ namespace GBOG.Memory
 		private bool _ramEnabled;
 		private bool _mbc1;
 		private bool _mbc2;
+		private bool _mbc3;
+		private bool _mbc5;
+		private int _romBankSize;
+		private int _ramBankSize;
 
 		public GBMemory(Gameboy gameBoy)
 		{
 			_gameBoy = gameBoy;
 			_cartRom = new byte[0x8000];
-			RamBanks = new byte[0x8000];
 			_joyPadKeys = new bool[8];
 
 			//InitialiseBootROM();
@@ -1258,25 +1265,47 @@ namespace GBOG.Memory
 		{
 			switch (address)
 			{
-				case < 0x2000:
-					if (_mbc1 || _mbc2)
+				case < 0x2000 when !_mbc2:
+					if (_mbc1 || _mbc3 || _mbc5)
 					{
 						RamBankEnable(address, value);
 					}
 					break;
-				case < 0x4000:
-					if (_mbc1 || _mbc2)
+				case < 0x4000 when !_mbc2:
+					if (_mbc1 || _mbc3)
+					{
+						LowRomBankSelect(address, value);
+					}
+					if (_mbc5)
+					{
+						if (address < 0x3000) { LowRomBankSelect(address, value); }
+						else if (address < 0x4000)
+						{
+							HighRomBankSelect(address, value);
+						}
+					}
+					break;
+				case < 0x4000 when _mbc2:
+					if (Extensions.TestBit((byte)address, 7))
+					{
+						RamBankEnable(address, value);
+					}
+					else
 					{
 						LowRomBankSelect(address, value);
 					}
 					break;
 				case < 0x6000:
-					if (_mbc1)
+					if (_mbc1 && _romBankingMode)
 					{
-						if (_romBankingMode)
+						HighRomBankSelect(address, value);
+					}
+					else
+					{
+						if(_mbc3 && (value >= 0x08 && value <= 0x0c))
 						{
-							HighRomBankSelect(address, value);
-						}
+							// Map RTC Register
+						} 
 						else
 						{
 							RamBankSelect(address, value);
@@ -1287,6 +1316,10 @@ namespace GBOG.Memory
 					if (_mbc1)
 					{
 						RomRamModeSelect(address, value);
+					} 
+					else if (_mbc3)
+					{
+						// RTC Data Latch
 					}
 					break;
 			}
@@ -1322,6 +1355,9 @@ namespace GBOG.Memory
 			if (_mbc1)
 			{
 				_currentRamBank = (byte)(value & 0x03);
+			}  else if (_mbc3)
+			{
+
 			}
 		}
 
@@ -1343,6 +1379,19 @@ namespace GBOG.Memory
 				{
 					_currentROMBank = 1;
 				}
+			}
+			else if (_mbc3)
+			{
+				_currentROMBank = (byte)(value & 0x7F);
+				if (_currentROMBank == 0)
+				{
+					_currentROMBank = 1;
+				}
+			}
+			else if (_mbc5)
+			{
+				_currentROMBank = value;
+
 			}
 			else
 			{
@@ -1440,6 +1489,8 @@ namespace GBOG.Memory
 			switch (rom[0x147])
 			{
 				case 0:
+				case 8:
+				case 9:
 				// ROM only
 				case 1:
 				// MBC1
@@ -1458,7 +1509,119 @@ namespace GBOG.Memory
 					Array.Copy(rom, 0x0000, _memory, 0x0000, 0x4000);
 					Array.Copy(rom, 0x4000, _memory, 0x4000, 0x4000);
 					break;
+				case 0x0F:
+				// MBC3+TIMER+BATTERY
+				case 0x10:
+				// MBC3+TIMER+RAM+BATTERY
+				case 0x11:
+				// MBC3
+				case 0x12:
+				// MBC3+RAM
+				case 0x13:
+					// MBC3+RAM+BATTERY
+					_mbc3 = true;
+					break;
+				case 0x19:
+				// MBC5
+				case 0x1A:
+				// MBC5+RAM
+				case 0x1B:
+				// MBC5+RAM+BATTERY
+				case 0x1C:
+				// MBC5+RUMBLE
+				case 0x1D:
+				// MBC5+RUMBLE+RAM
+				case 0x1E:
+					// MBC5+RUMBLE+RAM+BATTERY
+					_mbc5 = true;
+					break;
 			}
+
+			switch (rom[0x148])
+			{
+				case 0x00:
+					// 32KByte (no ROM banking)
+					_romBankSize = 0x8000;
+					break;
+				case 0x01:
+					// 64KByte (4 banks)
+					_romBankSize = 0x10000;
+					break;
+				case 0x02:
+					// 128KByte (8 banks)
+					_romBankSize = 0x20000;
+					break;
+				case 0x03:
+					// 256KByte (16 banks)
+					_romBankSize = 0x40000;
+					break;
+				case 0x04:
+					// 512KByte (32 banks)
+					_romBankSize = 0x80000;
+					break;
+				case 0x05:
+					// 1MByte (64 banks)  -  only 63 banks used by MBC1
+					_romBankSize = 0x100000;
+					break;
+				case 0x06:
+					// 2MByte (128 banks) - only 125 banks used by MBC1
+					_romBankSize = 0x200000;
+					break;
+				case 0x07:
+					// 4MByte (256 banks)
+					_romBankSize = 0x400000;
+					break;
+				case 0x08:
+					// 8MByte (512 banks)
+					_romBankSize = 0x800000;
+					break;
+				case 0x52:
+					// 1.1MByte (72 banks)
+					_romBankSize = 0x120000;
+					break;
+				case 0x53:
+					// 1.2MByte (80 banks)
+					_romBankSize = 0x140000;
+					break;
+				case 0x54:
+					// 1.5MByte (96 banks)
+					_romBankSize = 0x180000;
+					break;
+
+			}
+
+			switch (rom[0x149])
+			{
+				case 0x00:
+					// None
+					_ramBankSize = 0;
+					break;
+				case 0x01:
+					// 2 KBytes
+					_ramBankSize = 0x800;
+					break;
+				case 0x02:
+					// 8 Kbytes
+					_ramBankSize = 0x2000;
+					break;
+				case 0x03:
+					// 32 KBytes (4 banks of 8KBytes each)
+					_ramBankSize = 0x8000;
+					break;
+				case 0x04:
+					// 128 KBytes (16 banks of 8KBytes each)
+					_ramBankSize = 0x20000;
+					break;
+				case 0x05:
+					// 64 KBytes (8 banks of 8KBytes each)
+					_ramBankSize = 0x10000;
+					break;
+				default:
+					// Unknown
+					_ramBankSize = 0;
+					break;
+			}
+
 		}
 
 		public byte[] GetTileData()
