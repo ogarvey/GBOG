@@ -4,6 +4,7 @@ using GBOG.Graphics.MonoGame;
 using GBOG.Memory;
 using GBOG.Utils;
 using Serilog;
+using System;
 using System.Runtime.CompilerServices;
 using Color = System.Drawing.Color;
 using Log = Serilog.Log;
@@ -23,7 +24,8 @@ namespace GBOG.CPU
     private byte[] _pixels;
 
     public GBMemory _memory { get; }
-    private int _mClockCount { get; set; }
+		public PPU _ppu { get; }
+		private int _mClockCount { get; set; }
 
     // The registers can be accessed individually:
     public byte A { get => _registers[0]; set => _registers[0] = value; }
@@ -108,6 +110,7 @@ namespace GBOG.CPU
 
       _opcodeHandler = new OpcodeHandler(this);
       _memory = new GBMemory(this);
+      _ppu = new PPU(this);
       AF = 0x01B0;
       BC = 0x0013;
       DE = 0x00D8;
@@ -152,7 +155,8 @@ namespace GBOG.CPU
                   {
                     cyclesThisUpdate++;
                     UpdateTimer(cycles);
-                    UpdateGraphics(cycles);
+                    //UpdateGraphics(cycles);
+                    _ppu.Step(cycles);
                     OnGraphicsRAMAccessed?.Invoke(this, true);
                   }
                   else
@@ -167,8 +171,9 @@ namespace GBOG.CPU
             {
               cyclesThisUpdate++;
               UpdateTimer(cycles);
-              UpdateGraphics(cycles);
-            }
+							//UpdateGraphics(cycles);
+							_ppu.Step(cycles);
+						}
             
             //LogSystemState();
           }
@@ -286,7 +291,7 @@ namespace GBOG.CPU
 			// during each scanline, the STAT interrupt can be called multiple times for each mode, but make sure it only fires once and only once per scanline,
 			SetLCDStatus();
 
-      if (_memory.LCD)
+      if (_memory.LCDEnabled)
       {
         _scanlineCounter -= cycles;
       }
@@ -317,7 +322,12 @@ namespace GBOG.CPU
         }
       }
     }
-
+		public void RequestInterrupt(Interrupt interrupt)
+		{
+			byte req = (byte)(_memory.IF | 0xE0);
+			_memory.IF = (byte)(req | 1 << (int)interrupt);
+		}
+    
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private void DrawScanline()
     {
@@ -673,15 +683,15 @@ namespace GBOG.CPU
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private void SetLCDStatus()
     {
-      byte status = _memory.STAT;
+      byte status = _memory.LCDStatus;
 
-      if (!_memory.LCD)
+      if (!_memory.LCDEnabled)
       {
         _scanlineCounter = 456;
         _memory.LY = 0;
         status &= 0b1111_1100;
         status |= 0b01;
-        _memory.STAT = status;
+        _memory.LCDStatus = status;
         return;
       }
 
@@ -692,7 +702,7 @@ namespace GBOG.CPU
 
       if (currentLine >= 144)
       {
-        mode = (byte)GraphicsMode.OAM_access;
+        mode = 0;
         status |= 0b01;
         reqInt = status.TestBit(4);
       }
@@ -703,18 +713,18 @@ namespace GBOG.CPU
 
         if (_scanlineCounter >= mode2Bounds)
         {
-          mode = (byte)GraphicsMode.HBlank;
+          mode = (byte)2;
           status |= 0b10;
           reqInt = status.TestBit(5);
         }
         else if (_scanlineCounter >= mode3Bounds)
         {
-          mode = (byte)GraphicsMode.VBlank;
+          mode = (byte)3;
           status |= 0b11;
         }
         else
         {
-          mode = (byte)GraphicsMode.OAM_access;
+          mode = (byte)0;
           status &= 0b1111_1100;
           reqInt = status.TestBit(3);
         }
@@ -740,7 +750,7 @@ namespace GBOG.CPU
         status &= 0b1111_1011;
       }
 
-      _memory.STAT = status;
+      _memory.LCDStatus = status;
     }
 
     public void LoadRom(string path)

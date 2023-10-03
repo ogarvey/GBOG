@@ -525,7 +525,7 @@ namespace GBOG.Memory
 		// The LCDC register is mapped to the memory address 0xFF40.
 		// LCD Control
 		// Bit 7 - LCD Display Enable             (0=Off, 1=On)
-		public bool LCD
+		public bool LCDEnabled
 		{
 			get
 			{
@@ -647,7 +647,7 @@ namespace GBOG.Memory
 		//           1: During V-Blank
 		//           2: During Searching OAM
 		//           3: During Transfering Data to LCD Driver
-		public byte STAT
+		public byte LCDStatus
 		{
 			get
 			{
@@ -1132,11 +1132,11 @@ namespace GBOG.Memory
 		private bool _mbc5;
 		private int _romBankSize;
 		private int _ramBankSize;
+		private bool _RTCEnabled;
 
 		public GBMemory(Gameboy gameBoy)
 		{
 			_gameBoy = gameBoy;
-			_cartRom = new byte[0x8000];
 			_joyPadKeys = new bool[8];
 
 			//InitialiseBootROM();
@@ -1159,13 +1159,12 @@ namespace GBOG.Memory
 			ushort newAddress;
 			if ((address >= 0x4000) && (address <= 0x7FFF))
 			{
-				newAddress = (ushort)(address - 0x4000);
-				return _cartRom[newAddress + (_currentROMBank * 0x4000)];
+				newAddress = (ushort)(address - 0x4000 + (_currentROMBank * 0x4000));
+				return _cartRom[newAddress];
 			}
 			else if ((address >= 0xA000) && (address <= 0xBFFF))
 			{
-				newAddress = (ushort)(address - 0xA000);
-				return RamBanks[newAddress + (_currentRamBank * 0x2000)];
+				return ReadRam(address);
 			}
 			else if (0xFF00 == address)
 				return Joypad;
@@ -1175,12 +1174,94 @@ namespace GBOG.Memory
 			}
 		}
 
+		private byte ReadRam(ushort address)
+		{
+			if (_mbc1)
+			{
+				if (_ramEnabled)
+				{
+					if (_romBankingMode)
+					{
+						return RamBanks[address - 0xA000 + (_currentRamBank * 0x2000)];
+					}
+					else
+					{
+						return RamBanks[(address - 0xA000) % 0x2000];
+					}
+				}
+				else
+				{
+					return 0xFF;
+				}
+			}
+			else if (_mbc2)
+			{
+				if (_ramEnabled)
+				{
+					return RamBanks[address - 0xA000];
+				}
+				else
+				{
+					return 0xFF;
+				}
+			}
+			else if (_mbc3)
+			{
+				if (_romBankingMode)
+				{
+					return RamBanks[address - 0xA000];
+				}
+				else
+				{
+					return RamBanks[address - 0xA000 + (_currentRamBank * 0x2000)];
+				}
+			}
+			else if (_mbc5)
+			{
+				if (_romBankingMode)
+				{
+					return RamBanks[address - 0xA000];
+				}
+				else
+				{
+					return RamBanks[address - 0xA000 + (_currentRamBank * 0x2000)];
+				}
+			}
+			else
+			{
+				return 0xFF;
+			}
+		}
+
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public sbyte ReadSByte(ushort address)
 		{
 			return (sbyte)_memory[address];
 		}
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public ushort ReadUShort(ushort address)
+		{
+			return (ushort)((_memory[address + 1] << 8) | _memory[address]);
+		}
 
+		public void WriteUShort(ushort address, ushort value)
+		{
+			if (address >= _memory.Length || address + 1 >= _memory.Length)
+			{
+				Debugger.Break();
+			}
+			else if (address >= 0xFE00 && address < 0xFEA0)
+			{
+				_gameBoy._ppu.OAM[address - 0xFE00] = (byte)(value & 0xFF);
+				_gameBoy._ppu.OAM[address - 0xFE00+1] = (byte)((value & 0xFF00) >> 8);
+				_memory[address] = (byte)(value & 0xFF);
+				_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
+			}
+			else {
+				_memory[address] = (byte)(value & 0xFF);
+				_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
+			}
+		}
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public void WriteByte(ushort address, byte value)
 		{
@@ -1189,23 +1270,28 @@ namespace GBOG.Memory
 				HandleBanking(address, value);
 			}
 			// 0x8000 - 0x97FF
-			else if ((address >= 0x8000) && (address < 0x9800))
+			else if ((address >= 0x8000) && (address < 0x9FFF))
 			{
 				_memory[address] = value;
+				_gameBoy._ppu.VideoRam[address - 0x8000] = value;
 				//_gameBoy.UpdateTile(address, value);
 			}
 			else if (address >= 0xA000 && address <= 0xBFFF)
 			{
 				if (_ramEnabled)
 				{
-					var newAddress = (ushort)(address - 0xA000);
-					RamBanks[newAddress + (_currentRamBank * 0x2000)] = value;
+					WriteRam(address, value);
 				}
 			}
 			else if ((address >= 0xE000) && (address < 0xFE00))
 			{
 				_memory[address] = value;
 				_memory[address - 0x2000] = value;
+			}
+			else if (address >= 0xFE00 && address < 0xFEA0)
+			{
+				_gameBoy._ppu.OAM[address - 0xFE00] = value;
+				_memory[address] = value;
 			}
 			else if (address == 0xFF00)
 			{
@@ -1251,6 +1337,7 @@ namespace GBOG.Memory
 				for (int i = 0; i < 0xA0; i++)
 				{
 					_memory[0xFE00 + i] = _memory[sourceAddress + i];
+					_gameBoy._ppu.OAM[i] = _memory[sourceAddress + i];
 				}
 			}
 			else
@@ -1258,6 +1345,52 @@ namespace GBOG.Memory
 				_memory[address] = value;
 			}
 
+		}
+
+		private void WriteRam(ushort address, byte value)
+		{
+			if (_mbc1)
+			{
+				if (!_ramEnabled) return;
+				if (RamBanks.Length == 0x2000)
+				{
+					RamBanks[(address - 0xA000) % RamBanks.Length] = value;
+				}
+				else
+				{
+					if (_romBankingMode && RamBanks.Length == 0x8000)
+					{
+						RamBanks[(address - 0xA000) + (_currentRamBank * 0x2000)] = value;
+					}
+					else
+					{
+						RamBanks[(address - 0xA000) ] = value;
+					}
+				}
+			}
+			if (_mbc2)
+			{
+				ushort newAddress = address;
+				if (address >= 0xa000 && address <= 0xA1FF) newAddress = (ushort)(address & 0x1FF);
+				RamBanks[newAddress + (_currentRamBank * 0x2000)] = (byte)(value & 0x0F);
+			}
+			if (_mbc3)
+			{
+				if (_ramEnabled)
+				{
+					RamBanks[0x2000 * _currentRamBank + (address - 0xA000)] = value;
+				} else if (_RTCEnabled)
+				{
+					Debugger.Break();
+				}
+			}
+			if (_mbc5)
+			{
+				if (_ramEnabled)
+				{
+					RamBanks[0x2000 * _currentRamBank + (address - 0xA000)] = value;
+				}
+			}
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1302,10 +1435,11 @@ namespace GBOG.Memory
 					}
 					else
 					{
-						if(_mbc3 && (value >= 0x08 && value <= 0x0c))
+						if (_mbc3 && (value >= 0x08 && value <= 0x0c))
 						{
 							// Map RTC Register
-						} 
+							_RTCEnabled = true;
+						}
 						else
 						{
 							RamBankSelect(address, value);
@@ -1316,7 +1450,7 @@ namespace GBOG.Memory
 					if (_mbc1)
 					{
 						RomRamModeSelect(address, value);
-					} 
+					}
 					else if (_mbc3)
 					{
 						// RTC Data Latch
@@ -1355,9 +1489,19 @@ namespace GBOG.Memory
 			if (_mbc1)
 			{
 				_currentRamBank = (byte)(value & 0x03);
-			}  else if (_mbc3)
-			{
 
+			}
+			else if (_mbc2)
+			{
+				_currentRamBank = (byte)(value & 0x0F);
+			}
+			else if (_mbc3)
+			{
+				_currentRamBank = value;
+			}
+			else if (_mbc5)
+			{
+				_currentRamBank = value;
 			}
 		}
 
@@ -1423,18 +1567,6 @@ namespace GBOG.Memory
 			}
 		}
 
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		public ushort ReadUShort(ushort address)
-		{
-			return (ushort)((_memory[address + 1] << 8) | _memory[address]);
-		}
-
-		public void WriteUShort(ushort address, ushort value)
-		{
-			_memory[address] = (byte)(value & 0xFF);
-			_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
-		}
-
 		private void InitialiseIORegisters()
 		{
 			// The I/O registers are used to control the GameBoy.
@@ -1484,9 +1616,8 @@ namespace GBOG.Memory
 
 		public void InitialiseGame(byte[] rom)
 		{
-			_cartRom = rom;
-			// Load the ROM into the memory at the right location
-			switch (rom[0x147])
+			var type = rom[0x147];
+			switch (type)
 			{
 				case 0:
 				case 8:
@@ -1499,15 +1630,12 @@ namespace GBOG.Memory
 				case 3:
 					// MBC1+RAM+BATTERY
 					_mbc1 = true;
-					Array.Copy(rom, 0x0000, _memory, 0x0000, 0x8000);
 					break;
 				case 5:
 				// MBC2
 				case 6:
 					// MBC2+RAM
 					_mbc2 = true;
-					Array.Copy(rom, 0x0000, _memory, 0x0000, 0x4000);
-					Array.Copy(rom, 0x4000, _memory, 0x4000, 0x4000);
 					break;
 				case 0x0F:
 				// MBC3+TIMER+BATTERY
@@ -1537,7 +1665,9 @@ namespace GBOG.Memory
 					break;
 			}
 
-			switch (rom[0x148])
+			// ROM bank size
+			var romBankSize = rom[0x148];
+			switch (romBankSize)
 			{
 				case 0x00:
 					// 32KByte (no ROM banking)
@@ -1587,41 +1717,50 @@ namespace GBOG.Memory
 					// 1.5MByte (96 banks)
 					_romBankSize = 0x180000;
 					break;
-
 			}
 
-			switch (rom[0x149])
+			// Load the ROM into the memory at the right location
+			_cartRom = new byte[_romBankSize];
+			Array.Copy(rom, 0, _cartRom, 0, rom.Length);
+			Array.Copy(rom, 0, _memory, 0, 0x8000);
+
+			var ramSize = rom[0x149];
+			switch (ramSize)
 			{
 				case 0x00:
 					// None
-					_ramBankSize = 0;
+					_ramBankSize = 1;
 					break;
 				case 0x01:
 					// 2 KBytes
-					_ramBankSize = 0x800;
+					_ramBankSize = 1;
 					break;
 				case 0x02:
 					// 8 Kbytes
-					_ramBankSize = 0x2000;
+					_ramBankSize = 1;
 					break;
 				case 0x03:
 					// 32 KBytes (4 banks of 8KBytes each)
-					_ramBankSize = 0x8000;
+					_ramBankSize = 4;
 					break;
 				case 0x04:
 					// 128 KBytes (16 banks of 8KBytes each)
-					_ramBankSize = 0x20000;
+					_ramBankSize = 16;
 					break;
 				case 0x05:
 					// 64 KBytes (8 banks of 8KBytes each)
-					_ramBankSize = 0x10000;
+					_ramBankSize = 8;
 					break;
 				default:
 					// Unknown
-					_ramBankSize = 0;
+					_ramBankSize = 1;
 					break;
 			}
-
+			RamBanks = new byte[_ramBankSize * 0x2000];
+			for (var i = 0; i < RamBanks.Length; i++)
+			{
+				RamBanks[i] = 0xff;
+			}
 		}
 
 		public byte[] GetTileData()

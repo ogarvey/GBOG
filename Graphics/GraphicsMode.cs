@@ -2,8 +2,8 @@
 
 public enum GraphicsMode : byte
 {
-  OAM_access = 0,
-  VRAM_access = 1,
-  HBlank = 2,
-  VBlank = 3
+	Mode0_HBlank,
+	Mode1_VBlank,
+	Mode2_OAMRead,
+	Mode3_VRAMReadWrite
 }

@@ -16,6 +16,7 @@ namespace GBOG.Graphics.MonoGame
 		private Gameboy _gb;
 		private Texture2D _gameboyBuffer;
 		private byte[] _backbuffer;
+		private byte[] _altBackbuffer;
 
 		public GameboyGame(Gameboy gb)
 		{
@@ -65,12 +66,14 @@ namespace GBOG.Graphics.MonoGame
 			_gb._memory._joyPadKeys[7] = keyboardState.IsKeyDown(Keys.Enter) || gamePadState.IsButtonDown(Buttons.Start);
 
 			// TODO: Add your update logic here
-			_backbuffer = _gb.GetDisplayArray();
+			//_backbuffer = _gb.GetDisplayArray();
+			_altBackbuffer = _gb._ppu.Screen.GetBuffer();
 
-			if (_backbuffer != null)
+			if (_altBackbuffer != null)
 			{
-				_gameboyBuffer.SetData(_backbuffer);
+				_gameboyBuffer.SetData(_altBackbuffer);
 			}
+			
 			base.Update(gameTime);
 		}
 

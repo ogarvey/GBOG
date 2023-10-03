@@ -57,7 +57,10 @@ namespace GBOG.Graphics.UI
 		{
 
 			byte[] tiledata = _gb._memory.GetTileData();
+			byte[] tiledata2 = _gb._ppu.GetTileData();
+
 			List<byte[]> tileList = GraphicUtils.ConvertGBTileData(tiledata);
+			List<byte[]> tileList2 = GraphicUtils.ConvertGBTileData(tiledata2);
 
 			int tileWidth = 8; // Width of each tile
 			int tileHeight = 8; // Height of each tile
@@ -65,6 +68,7 @@ namespace GBOG.Graphics.UI
 			int tilesPerColumn = tileList.Count / tilesPerRow;
 
 			Bitmap bmp = new Bitmap(tileWidth * tilesPerRow, tileHeight * tilesPerColumn, PixelFormat.Format32bppArgb);
+			Bitmap bmp2 = new Bitmap(tileWidth * tilesPerRow, tileHeight * tilesPerColumn, PixelFormat.Format32bppArgb);
 
 			for (int i = 0; i < tileList.Count; i++)
 			{
@@ -78,11 +82,15 @@ namespace GBOG.Graphics.UI
 						byte colorIndex = tileList[i][row * tileWidth + col];
 						Color color = GraphicUtils.GetColor(colorIndex);
 						bmp.SetPixel(x + col, y + row, color);
+						colorIndex = tileList2[i][row * tileWidth + col];
+						color = GraphicUtils.GetColor(colorIndex);
+						bmp2.SetPixel(x + col, y + row, color);
 					}
 				}
 			}
 
 			pbTileData.Image = bmp;
+			pbTileData2.Image = bmp2;
 
 		}
 
