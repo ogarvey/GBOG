@@ -7,14 +7,12 @@ namespace GBOG.Graphics
 	// The PPU (which stands for Picture Processing Unit) is the part of the Gameboy that’s responsible for everything you see on screen.
 	public class PPU
 	{
-		private int _scanlineCounter; // Holds the number of cycles spent in the current mode.
-		private GraphicsMode _mode; // Holds the current GPU mode.
-		private Gameboy _gb;
+		private int _scanlineCounter;
+		private readonly Gameboy _gb;
 
-		private static int prevLy = 0;
-		private static int lcdMode2Bounds = 456 - 80;
-		private int lcdMode3Bounds = lcdMode2Bounds - 172;
-		private int spritePriorityOffset = 100;
+		private static int _prevLy = 0;
+		private static readonly int _lcdMode2Bounds = 456 - 80;
+		private readonly int _lcdMode3Bounds = _lcdMode2Bounds - 172;
 		
 		public int Scanline { get; private set; } // Represents the current scanline being processed.
 		public int WindowScanline { get; private set; } // Represents the current window scanline being processed.
@@ -29,7 +27,6 @@ namespace GBOG.Graphics
 			OAM = new byte[0xA0];
 			Screen = new Screen();
 			Scanline = 0;
-			_mode = GraphicsMode.Mode2_OAMRead;
 			_scanlineCounter = 0;
 		}
 
@@ -44,14 +41,7 @@ namespace GBOG.Graphics
 		// Reads a byte from a memory address within the GPU's address space.
 		public byte ReadByte(ushort address)
 		{
-			// Implementation
 			return VideoRam[address - 0x8000];
-		}
-
-		// Writes a byte to a memory address within the GPU's address space.
-		public void WriteByte(ushort address, byte value)
-		{
-			// Implementation
 		}
 
 		// Steps the GPU a given number of cycles, performing rendering tasks.
@@ -87,10 +77,13 @@ namespace GBOG.Graphics
 		private void RenderScanline()
 		{
 			// Clear the current scanline on the screen
-			Screen.ClearScanline(Scanline);
+			//Screen.ClearScanline(Scanline);
 
 			// Render the background tiles to the screen
-			RenderBackground();
+			if (_gb._memory.BGDisplay)
+			{
+				RenderBackground();
+			}
 
 			// Render the window tiles to the screen if the window is enabled
 			if (_gb._memory.WindowDisplayEnable)
@@ -170,10 +163,10 @@ namespace GBOG.Graphics
 		{
 			return colorBits switch
 			{
-				0 => Color.White,
-				1 => Color.LightGray,
-				2 => Color.DarkGray,
-				3 => Color.Black,
+				0 => Color.FromArgb(255, 0x9B, 0xBC, 0x0F),
+				1 => Color.FromArgb(255, 0x8B, 0xAC, 0x0F),
+				2 => Color.FromArgb(255, 0x30, 0x62, 0x30),
+				3 => Color.FromArgb(255,0x0F, 0x38, 0x0F),
 				_ => Color.Aquamarine
 			};
 		}
@@ -271,6 +264,9 @@ namespace GBOG.Graphics
 
 			// Fetch the tile data
 			ushort tileNumber = sprite.TileNumber;
+			bool xFlip = sprite.XFlip;
+			bool yFlip = sprite.YFlip;
+			var priority = sprite.Priority;
 
 			if (use8x16)
 			{
@@ -295,6 +291,7 @@ namespace GBOG.Graphics
 			for (int row = 0; row < height; row++)
 			{
 				int yPos = sprite.YPosition + row;
+
 				if (yPos < 0 || yPos >= 144) continue; // Skip rows outside the screen
 
 				// Skip rows outside the sprite
@@ -305,11 +302,30 @@ namespace GBOG.Graphics
 					int xPos = sprite.XPosition + col;
 					if (xPos < 0 || xPos >= 160) continue; // Skip columns outside the screen
 
+					// check priority
+
 					// Get the color number from the tile data
-					int colorNum = tile.GetPixel(col, row);
+					int colorNum;
+
+					if (xFlip && yFlip)
+					{
+						colorNum = tile.GetPixel(8 - col-1, height - row-1);
+					}
+					else if (xFlip)
+					{
+						colorNum = tile.GetPixel(8 - col-1, row);
+					}
+					else if (yFlip)
+					{
+						colorNum = tile.GetPixel(col, height - row-1);
+					}
+					else {
+						colorNum = tile.GetPixel(col, row);
+					}
 
 					// Map the color number to actual color using the sprite's palette
 					int colorBits = (palette >> (colorNum * 2)) & 0x03;
+
 					Color actualColor = MapColor(colorBits);
 
 					// Draw the pixel to the screen
@@ -404,13 +420,13 @@ namespace GBOG.Graphics
 				reqInt = lcdStatus.TestBit(4);
 				WindowScanline = 0;
 			}
-			else if (_scanlineCounter >= lcdMode2Bounds)
+			else if (_scanlineCounter >= _lcdMode2Bounds)
 			{
 				mode = (int)GraphicsMode.Mode2_OAMRead;
 				lcdStatus &= 0b1111_1100;
 				reqInt = lcdStatus.TestBit(5);
 			}
-			else if (_scanlineCounter >= lcdMode3Bounds)
+			else if (_scanlineCounter >= _lcdMode3Bounds)
 			{
 				mode = (int)GraphicsMode.Mode3_VRAMReadWrite;
 				lcdStatus |= 0b11;
@@ -426,7 +442,7 @@ namespace GBOG.Graphics
 				reqInt = lcdStatus.TestBit(3);
 			}
 
-			if (reqInt && mode != currentMode && prevLy != Scanline)
+			if (reqInt && mode != currentMode && _prevLy != Scanline)
 			{
 				_gb.RequestInterrupt(Interrupt.LCDStat);
 			}
@@ -434,7 +450,7 @@ namespace GBOG.Graphics
 			if (Scanline == _gb._memory.LYC)
 			{
 				lcdStatus |= 0b100;
-				if (lcdStatus.TestBit(6) && prevLy != Scanline)
+				if (lcdStatus.TestBit(6) && _prevLy != Scanline)
 				{
 					_gb.RequestInterrupt(Interrupt.LCDStat);
 				}
@@ -444,9 +460,9 @@ namespace GBOG.Graphics
 				lcdStatus &= 0b1111_1011;
 			}
 
-			if (prevLy != Scanline)
+			if (_prevLy != Scanline)
 			{
-				prevLy = Scanline;
+				_prevLy = Scanline;
 			}
 			
 			_gb._memory.LCDStatus = lcdStatus;

@@ -137,7 +137,8 @@ namespace GBOG.CPU
 
             byte opcode;
 
-            if (IsInterruptRequested())
+						//LogSystemState();
+						if (IsInterruptRequested())
             {
               Halt = false;
               HandleInterrupts();
@@ -152,16 +153,18 @@ namespace GBOG.CPU
                 foreach (var step in steps)
                 {
                   if (step(this))
-                  {
-                    cyclesThisUpdate++;
+									{
+										Log.Information($"Executing::: {op}");
+										cyclesThisUpdate++;
                     UpdateTimer(cycles);
                     //UpdateGraphics(cycles);
                     _ppu.Step(cycles);
                     OnGraphicsRAMAccessed?.Invoke(this, true);
                   }
                   else
-                  {
-                    break;
+									{
+										Log.Information($"Executing::: {op}");
+										break;
                   }
                 }
               }
@@ -175,7 +178,6 @@ namespace GBOG.CPU
 							_ppu.Step(cycles);
 						}
             
-            //LogSystemState();
           }
           i++;
         }

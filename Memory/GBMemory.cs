@@ -1131,6 +1131,7 @@ namespace GBOG.Memory
 		private bool _mbc3;
 		private bool _mbc5;
 		private int _romBankSize;
+		private int _romBankCount;
 		private int _ramBankSize;
 		private bool _RTCEnabled;
 
@@ -1156,11 +1157,37 @@ namespace GBOG.Memory
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public byte ReadByte(ushort address)
 		{
-			ushort newAddress;
-			if ((address >= 0x4000) && (address <= 0x7FFF))
+			int newAddress;
+			if (address < 0x4000)
 			{
-				newAddress = (ushort)(address - 0x4000 + (_currentROMBank * 0x4000));
-				return _cartRom[newAddress];
+				if (_mbc1)
+				{
+					var bank = _currentRamBank << 5;
+					bank %= _romBankCount;
+					newAddress = (bank * 0x4000) + address;
+					return _cartRom[newAddress];
+				}
+				return _cartRom[address];
+			}
+			else if ((address >= 0x4000) && (address <= 0x7FFF))
+			{
+				if (_mbc1)
+				{
+					int bank = _currentROMBank;
+					if (bank % 0x20 == 0)
+					{
+						bank++;
+					}
+					if (_romBankingMode)
+					{
+						bank &= 0b0001_1111;
+						bank |= (_currentRamBank << 5);
+					}
+					bank %= _romBankCount;
+					newAddress = (ushort)(address - 0x4000 + (bank * 0x4000));
+					return _cartRom[newAddress];
+				}
+				return _memory[address];
 			}
 			else if ((address >= 0xA000) && (address <= 0xBFFF))
 			{
@@ -1176,23 +1203,20 @@ namespace GBOG.Memory
 
 		private byte ReadRam(ushort address)
 		{
+			address = (ushort)(address - 0xA000);
+			ushort newAddress;
 			if (_mbc1)
 			{
 				if (_ramEnabled)
 				{
 					if (_romBankingMode)
 					{
-						return RamBanks[address - 0xA000 + (_currentRamBank * 0x2000)];
+						newAddress = (ushort)((_currentRamBank % _ramBankSize) * 0x2000 + address);
+						return RamBanks[newAddress];
 					}
-					else
-					{
-						return RamBanks[(address - 0xA000) % 0x2000];
-					}
+					return RamBanks[address];
 				}
-				else
-				{
-					return 0xFF;
-				}
+				return 0xFF;
 			}
 			else if (_mbc2)
 			{
@@ -1253,11 +1277,12 @@ namespace GBOG.Memory
 			else if (address >= 0xFE00 && address < 0xFEA0)
 			{
 				_gameBoy._ppu.OAM[address - 0xFE00] = (byte)(value & 0xFF);
-				_gameBoy._ppu.OAM[address - 0xFE00+1] = (byte)((value & 0xFF00) >> 8);
+				_gameBoy._ppu.OAM[address - 0xFE00 + 1] = (byte)((value & 0xFF00) >> 8);
 				_memory[address] = (byte)(value & 0xFF);
 				_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
 			}
-			else {
+			else
+			{
 				_memory[address] = (byte)(value & 0xFF);
 				_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
 			}
@@ -1287,11 +1312,16 @@ namespace GBOG.Memory
 			{
 				_memory[address] = value;
 				_memory[address - 0x2000] = value;
+				WriteRam((ushort)(address - 0x2000), value);
 			}
 			else if (address >= 0xFE00 && address < 0xFEA0)
 			{
 				_gameBoy._ppu.OAM[address - 0xFE00] = value;
 				_memory[address] = value;
+			}
+			else if (address >= 0xFEA0 && address <= 0xFEFF) 
+			{
+				return; 
 			}
 			else if (address == 0xFF00)
 			{
@@ -1352,21 +1382,16 @@ namespace GBOG.Memory
 			if (_mbc1)
 			{
 				if (!_ramEnabled) return;
-				if (RamBanks.Length == 0x2000)
+
+				if (_romBankingMode)
 				{
-					RamBanks[(address - 0xA000) % RamBanks.Length] = value;
+					RamBanks[(address - 0xA000) + (_currentRamBank % _ramBankSize) * 0x2000] = value;
 				}
 				else
 				{
-					if (_romBankingMode && RamBanks.Length == 0x8000)
-					{
-						RamBanks[(address - 0xA000) + (_currentRamBank * 0x2000)] = value;
-					}
-					else
-					{
-						RamBanks[(address - 0xA000) ] = value;
-					}
+					RamBanks[(address - 0xA000)] = value;
 				}
+
 			}
 			if (_mbc2)
 			{
@@ -1379,7 +1404,8 @@ namespace GBOG.Memory
 				if (_ramEnabled)
 				{
 					RamBanks[0x2000 * _currentRamBank + (address - 0xA000)] = value;
-				} else if (_RTCEnabled)
+				}
+				else if (_RTCEnabled)
 				{
 					Debugger.Break();
 				}
@@ -1429,22 +1455,16 @@ namespace GBOG.Memory
 					}
 					break;
 				case < 0x6000:
-					if (_mbc1 && _romBankingMode)
+					if (_mbc3 && (value >= 0x08 && value <= 0x0c))
 					{
-						HighRomBankSelect(address, value);
+						// Map RTC Register
+						_RTCEnabled = true;
 					}
 					else
 					{
-						if (_mbc3 && (value >= 0x08 && value <= 0x0c))
-						{
-							// Map RTC Register
-							_RTCEnabled = true;
-						}
-						else
-						{
-							RamBankSelect(address, value);
-						}
+						RamBankSelect(address, value);
 					}
+
 					break;
 				case < 0x8000:
 					if (_mbc1)
@@ -1489,7 +1509,6 @@ namespace GBOG.Memory
 			if (_mbc1)
 			{
 				_currentRamBank = (byte)(value & 0x03);
-
 			}
 			else if (_mbc2)
 			{
@@ -1507,10 +1526,16 @@ namespace GBOG.Memory
 
 		private void HighRomBankSelect(ushort address, byte value)
 		{
-			_currentROMBank = (byte)((_currentROMBank & 0x1F) | ((value & 0x03) << 5));
-			if (_currentROMBank == 0)
+
+			if (value == 0)
 			{
 				_currentROMBank = 1;
+			}
+			else
+			{
+				_currentROMBank = (byte)(value & 0x1F);
+				if (_currentROMBank == 0)
+					_currentROMBank = 1;
 			}
 		}
 
@@ -1539,7 +1564,26 @@ namespace GBOG.Memory
 			}
 			else
 			{
-				_currentROMBank = (byte)(value & 0x1F);
+				switch (_romBankSize)
+				{
+					case 0x200000:
+					case 0x100000:
+					case 0x80000:
+						_currentROMBank = (byte)(value & 0x1F);
+						break;
+					case 0x40000:
+						_currentROMBank = (byte)(value & 0x0F);
+						break;
+					case 0x20000:
+						_currentROMBank = (byte)(value & 0x07);
+						break;
+					case 0x10000:
+						_currentROMBank = (byte)(value & 0x03);
+						break;
+					case 0x8000:
+						_currentROMBank = (byte)(value & 0x01);
+						break;
+				}
 				if (_currentROMBank == 0)
 				{
 					_currentROMBank = 1;
@@ -1622,7 +1666,8 @@ namespace GBOG.Memory
 				case 0:
 				case 8:
 				case 9:
-				// ROM only
+					// ROM only
+					break;
 				case 1:
 				// MBC1
 				case 2:
@@ -1672,38 +1717,47 @@ namespace GBOG.Memory
 				case 0x00:
 					// 32KByte (no ROM banking)
 					_romBankSize = 0x8000;
+					_romBankCount = 2;
 					break;
 				case 0x01:
 					// 64KByte (4 banks)
 					_romBankSize = 0x10000;
+					_romBankCount = 4;
 					break;
 				case 0x02:
 					// 128KByte (8 banks)
 					_romBankSize = 0x20000;
+					_romBankCount = 8;
 					break;
 				case 0x03:
 					// 256KByte (16 banks)
 					_romBankSize = 0x40000;
+					_romBankCount = 16;
 					break;
 				case 0x04:
 					// 512KByte (32 banks)
 					_romBankSize = 0x80000;
+					_romBankCount = 32;
 					break;
 				case 0x05:
 					// 1MByte (64 banks)  -  only 63 banks used by MBC1
 					_romBankSize = 0x100000;
+					_romBankCount = 64;
 					break;
 				case 0x06:
 					// 2MByte (128 banks) - only 125 banks used by MBC1
 					_romBankSize = 0x200000;
+					_romBankCount = 128;
 					break;
 				case 0x07:
 					// 4MByte (256 banks)
 					_romBankSize = 0x400000;
+					_romBankCount = 256;
 					break;
 				case 0x08:
 					// 8MByte (512 banks)
 					_romBankSize = 0x800000;
+					_romBankCount = 512;
 					break;
 				case 0x52:
 					// 1.1MByte (72 banks)

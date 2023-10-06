@@ -26,6 +26,9 @@ namespace GBOG.Graphics.MonoGame
 			IsMouseVisible = true;
 			_graphics.PreferredBackBufferWidth = 800;
 			_graphics.PreferredBackBufferHeight = 720;
+			_graphics.SynchronizeWithVerticalRetrace = false; //Vsync
+			IsFixedTimeStep = true;
+			TargetElapsedTime = TimeSpan.FromMilliseconds(1000.0f / 60);
 			_graphics.ApplyChanges();
 		}
 
