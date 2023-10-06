@@ -1121,9 +1121,9 @@ namespace GBOG.Memory
 		}
 
 		private byte[] _cartRom;
-		private byte _currentROMBank = 1;
+		private byte _currentRomBank = 1;
 		private byte[] RamBanks;
-		private bool _romBankingMode;
+		private byte _romBankingMode;
 		private byte _currentRamBank = 0;
 		private bool _ramEnabled;
 		private bool _mbc1;
@@ -1134,6 +1134,7 @@ namespace GBOG.Memory
 		private int _romBankCount;
 		private int _ramBankSize;
 		private bool _RTCEnabled;
+		private bool _multicart = false;
 
 		public GBMemory(Gameboy gameBoy)
 		{
@@ -1173,17 +1174,31 @@ namespace GBOG.Memory
 			{
 				if (_mbc1)
 				{
-					int bank = _currentROMBank;
-					if (bank % 0x20 == 0)
+					// Reading from a memory address between $4000 and $7FFF, no matter what state the Mode Flag is in,
+					// always returns the byte at 0x4000 * HIGH_BANK_NUMBER + (ADDRESS - 0x4000) of the ROM file.
+					int bank = _currentRomBank;
+					
+					switch (_romBankCount)
 					{
-						bank++;
+						case <= 32:
+							bank &= 0x1f;
+							break;
+						case <= 64:
+							bank &= 0x1f;
+							// Clear bit 5 of bank
+							bank &= ~(1 << 5);
+							// Set bit 5 of bank to the lower bit of currentRamBank
+							bank |= (_currentRamBank & 0x01) << 5;
+							break;
+						case <= 128:
+							bank &= 0x1f;
+							// Clear bits 5 and 6 of bank
+							bank &= ~((1 << 5) | (1 << 6));
+							// Set bits 5 and 6 of bank to the lower two bits of currentRamBank
+							bank |= (_currentRamBank & 0x03) << 5;
+							break;
 					}
-					if (_romBankingMode)
-					{
-						bank &= 0b0001_1111;
-						bank |= (_currentRamBank << 5);
-					}
-					bank %= _romBankCount;
+					if (bank == 0) bank = 1;
 					newAddress = (ushort)(address - 0x4000 + (bank * 0x4000));
 					return _cartRom[newAddress];
 				}
@@ -1209,7 +1224,7 @@ namespace GBOG.Memory
 			{
 				if (_ramEnabled)
 				{
-					if (_romBankingMode)
+					if (_romBankingMode == 1)
 					{
 						newAddress = (ushort)((_currentRamBank % _ramBankSize) * 0x2000 + address);
 						return RamBanks[newAddress];
@@ -1231,7 +1246,7 @@ namespace GBOG.Memory
 			}
 			else if (_mbc3)
 			{
-				if (_romBankingMode)
+				if (_romBankingMode == 1)
 				{
 					return RamBanks[address - 0xA000];
 				}
@@ -1242,7 +1257,7 @@ namespace GBOG.Memory
 			}
 			else if (_mbc5)
 			{
-				if (_romBankingMode)
+				if (_romBankingMode == 1)
 				{
 					return RamBanks[address - 0xA000];
 				}
@@ -1319,9 +1334,9 @@ namespace GBOG.Memory
 				_gameBoy._ppu.OAM[address - 0xFE00] = value;
 				_memory[address] = value;
 			}
-			else if (address >= 0xFEA0 && address <= 0xFEFF) 
+			else if (address >= 0xFEA0 && address <= 0xFEFF)
 			{
-				return; 
+				return;
 			}
 			else if (address == 0xFF00)
 			{
@@ -1383,7 +1398,7 @@ namespace GBOG.Memory
 			{
 				if (!_ramEnabled) return;
 
-				if (_romBankingMode)
+				if (_romBankingMode == 1)
 				{
 					RamBanks[(address - 0xA000) + (_currentRamBank % _ramBankSize) * 0x2000] = value;
 				}
@@ -1459,17 +1474,28 @@ namespace GBOG.Memory
 					{
 						// Map RTC Register
 						_RTCEnabled = true;
+						// do stuff ?
 					}
 					else
 					{
-						RamBankSelect(address, value);
+						if (_romBankingMode == 1)
+						{
+							var bank = _currentRomBank & 0x1F;
+							bank |= ((value & 0x03) << 5);
+							_currentRomBank = (byte)bank;
+						}
+						else
+						{
+							RamBankSelect(address, value);
+						}
+
 					}
 
 					break;
 				case < 0x8000:
 					if (_mbc1)
 					{
-						RomRamModeSelect(address, value);
+						RomRamModeSelect(value);
 					}
 					else if (_mbc3)
 					{
@@ -1479,29 +1505,15 @@ namespace GBOG.Memory
 			}
 		}
 
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void RomRamModeSelect(ushort address, byte value)
+		private void RomRamModeSelect(byte value)
 		{
 			var newData = (byte)(value & 0x01);
 			if (_mbc1)
 			{
-				// if bit 4 of address is set, ignore
-				if ((address & 0x10) == 0x10)
-				{
-					return;
-				}
+				_romBankingMode = newData;
+				return;
 			}
-			if (newData == 0x00)
-			{
-				// ROM banking mode
-				_romBankingMode = true;
-				_currentRamBank = 0;
-			}
-			else
-			{
-				// RAM banking mode
-				_currentRamBank = _currentROMBank;
-			}
+			return;
 		}
 
 		private void RamBankSelect(ushort address, byte value)
@@ -1529,13 +1541,13 @@ namespace GBOG.Memory
 
 			if (value == 0)
 			{
-				_currentROMBank = 1;
+				_currentRomBank = 1;
 			}
 			else
 			{
-				_currentROMBank = (byte)(value & 0x1F);
-				if (_currentROMBank == 0)
-					_currentROMBank = 1;
+				_currentRomBank = (byte)(value & 0x1F);
+				if (_currentRomBank == 0)
+					_currentRomBank = 1;
 			}
 		}
 
@@ -1543,51 +1555,35 @@ namespace GBOG.Memory
 		{
 			if (_mbc2)
 			{
-				_currentROMBank = (byte)(value & 0x0F);
-				if (_currentROMBank == 0)
+				_currentRomBank = (byte)(value & 0x0F);
+				if (_currentRomBank == 0)
 				{
-					_currentROMBank = 1;
+					_currentRomBank = 1;
 				}
 			}
 			else if (_mbc3)
 			{
-				_currentROMBank = (byte)(value & 0x7F);
-				if (_currentROMBank == 0)
+				_currentRomBank = (byte)(value & 0x7F);
+				if (_currentRomBank == 0)
 				{
-					_currentROMBank = 1;
+					_currentRomBank = 1;
 				}
 			}
 			else if (_mbc5)
 			{
-				_currentROMBank = value;
+				_currentRomBank = value;
 
 			}
 			else
 			{
-				switch (_romBankSize)
+				if (value == 0)
 				{
-					case 0x200000:
-					case 0x100000:
-					case 0x80000:
-						_currentROMBank = (byte)(value & 0x1F);
-						break;
-					case 0x40000:
-						_currentROMBank = (byte)(value & 0x0F);
-						break;
-					case 0x20000:
-						_currentROMBank = (byte)(value & 0x07);
-						break;
-					case 0x10000:
-						_currentROMBank = (byte)(value & 0x03);
-						break;
-					case 0x8000:
-						_currentROMBank = (byte)(value & 0x01);
-						break;
+					_currentRomBank = 1;
+					return;
 				}
-				if (_currentROMBank == 0)
-				{
-					_currentROMBank = 1;
-				}
+				var bank = _currentRomBank & 0b0110_0000;
+				bank |= (value & 0b00011111);
+				_currentRomBank = (byte)bank;			
 			}
 		}
 
@@ -1776,7 +1772,7 @@ namespace GBOG.Memory
 			// Load the ROM into the memory at the right location
 			_cartRom = new byte[_romBankSize];
 			Array.Copy(rom, 0, _cartRom, 0, rom.Length);
-			Array.Copy(rom, 0, _memory, 0, 0x8000);
+			Array.Copy(rom, 0, _memory, 0, Math.Min(0x8000, rom.Length));
 
 			var ramSize = rom[0x149];
 			switch (ramSize)
