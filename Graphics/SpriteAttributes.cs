@@ -17,9 +17,9 @@
 			YPosition = yPosition;
 			TileNumber = tileNumber;
 			Flags = flags;
-			Priority = (flags & 0x80) == 0x80;
-			YFlip = (flags & 0x40) == 0x40;
-			XFlip = (flags & 0x20) == 0x20;
+			Priority = (flags & 0x80) != 0;
+			YFlip = (flags & 0x40)  != 0;
+			XFlip = (flags & 0x20) != 0;
 			PaletteNumber = (byte)(flags & 0x10);
 		}
 	}

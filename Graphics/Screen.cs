@@ -3,13 +3,13 @@
 namespace GBOG.Graphics
 {
 	public class Screen
-	{ 
+	{
 		// Constants representing the screen dimensions
 		private const int Width = 160;
 		private const int Height = 144;
 
 		// 2D array representing the pixel buffer
-		private Color[,] buffer;
+		public Color[,] buffer;
 
 		public Screen()
 		{
@@ -23,6 +23,11 @@ namespace GBOG.Graphics
 			if (x >= 0 && x < Width && y >= 0 && y < Height)
 				buffer[x, y] = color;
 		}
+
+		public Color GetPixel(int x, int y)
+		{
+      return buffer[x, y];
+    }
 
 		public void ClearScanline(int y)
 		{

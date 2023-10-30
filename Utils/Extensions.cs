@@ -44,5 +44,17 @@ namespace GBOG.Utils
 		{
 			return ((value >> bitPosition) & 0b_0000_0001) == 1;
 		}
-	}
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static byte SetBit(this byte value, int bitPosition)
+    {
+      return (byte)(value | (0b_0000_0001 << bitPosition));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public static byte UnsetBit(this byte value, int bitPosition)
+		{
+      return (byte)(value & (~(0x01 << bitPosition)));
+    }
+  }
 }

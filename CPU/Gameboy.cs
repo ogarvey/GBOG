@@ -5,6 +5,7 @@ using GBOG.Memory;
 using GBOG.Utils;
 using Serilog;
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Color = System.Drawing.Color;
 using Log = Serilog.Log;
@@ -109,8 +110,9 @@ namespace GBOG.CPU
       _pixels = new byte[160 * 144 * 4];
 
       _opcodeHandler = new OpcodeHandler(this);
-      _memory = new GBMemory(this);
       _ppu = new PPU(this);
+      _memory = new GBMemory(this, _ppu);
+
       AF = 0x01B0;
       BC = 0x0013;
       DE = 0x00D8;
@@ -123,20 +125,21 @@ namespace GBOG.CPU
 
 		private async Task<bool> DoLoop()
     {
-      const int MAX_CYCLES = 70224;
+      const int MAX_CYCLES = 702240;
       var i = 0;
       int cycles = 4;
+      bool vBlank = false;
       await Task.Run(() =>
       {
 				while (!_exit && true)
         {
           int cyclesThisUpdate = 0;
 
-          while (cyclesThisUpdate < MAX_CYCLES)
+          while (cyclesThisUpdate < MAX_CYCLES && !vBlank)
           {
 
             byte opcode;
-
+            
 						//LogSystemState();
 						if (IsInterruptRequested())
             {
@@ -150,20 +153,19 @@ namespace GBOG.CPU
               var steps = op?.steps;
               if (steps != null)
               {
+                //Log.Information($"Executing::: {op} at PC: {(PC-1).ToString("x4")}");
                 foreach (var step in steps)
                 {
                   if (step(this))
 									{
-										Log.Information($"Executing::: {op}");
-										cyclesThisUpdate++;
+										cyclesThisUpdate+=4;
                     UpdateTimer(cycles);
-                    //UpdateGraphics(cycles);
                     _ppu.Step(cycles);
+                    //vBlank = _ppu.Tick(cycles);
                     OnGraphicsRAMAccessed?.Invoke(this, true);
                   }
                   else
 									{
-										Log.Information($"Executing::: {op}");
 										break;
                   }
                 }
@@ -172,9 +174,8 @@ namespace GBOG.CPU
             }
             else
             {
-              cyclesThisUpdate++;
+              cyclesThisUpdate+=4;
               UpdateTimer(cycles);
-							//UpdateGraphics(cycles);
 							_ppu.Step(cycles);
 						}
             
@@ -685,7 +686,7 @@ namespace GBOG.CPU
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private void SetLCDStatus()
     {
-      byte status = _memory.LCDStatus;
+      byte status = _memory.ReadByte(0xFF40);
 
       if (!_memory.LCDEnabled)
       {
@@ -693,7 +694,7 @@ namespace GBOG.CPU
         _memory.LY = 0;
         status &= 0b1111_1100;
         status |= 0b01;
-        _memory.LCDStatus = status;
+        _memory.WriteByte(0xFF40, status);
         return;
       }
 
@@ -752,7 +753,7 @@ namespace GBOG.CPU
         status &= 0b1111_1011;
       }
 
-      _memory.LCDStatus = status;
+      _memory.WriteByte(0xFF40, status);
     }
 
     public void LoadRom(string path)
