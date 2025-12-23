@@ -1,5 +1,6 @@
 using GBOG;
 using GBOG.CPU;
+using System.Text;
 
 namespace GBOG
 {
@@ -63,37 +64,140 @@ namespace GBOG
             // Console.Write(data); 
           };
 
-          var cts = new CancellationTokenSource();
-          cts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+          var timeout = TimeSpan.FromSeconds(timeoutSeconds);
+          var start = DateTime.UtcNow;
 
-          try
+          var task = gb.RunGame();
+
+          int lastTextLen = 0;
+          byte lastStatus = 0x80;
+
+          while (!task.IsCompleted)
           {
-            // RunGame is async, we wait for it or the timeout
-            // Since RunGame doesn't accept a CancellationToken, we just wait on the task
-            // and rely on the process terminating or the user killing it if it hangs,
-            // but here we use Wait(timeout) to exit the wrapper.
-            var task = gb.RunGame();
-            task.Wait(cts.Token);
+            if (TryReadTestStatus(gb, out byte status))
+            {
+              lastTextLen += ReadNewTestText(gb, startOffset: lastTextLen, writer);
+
+              lastStatus = status;
+              if (status != 0x80)
+              {
+                gb.EndGame();
+                break;
+              }
+            }
+
+            if ((DateTime.UtcNow - start) > timeout)
+            {
+              Console.WriteLine("\nTimeout reached. Terminating emulation.");
+              break;
+            }
+
+            Thread.Sleep(5);
           }
-          catch (OperationCanceledException)
+
+          // Give the emulation loop a moment to observe EndGame/timeout.
+          if (!task.Wait(TimeSpan.FromSeconds(2)))
           {
-            Console.WriteLine("\nTimeout reached. Terminating emulation.");
-      ushort pc = gb.PC;
-      byte b0 = gb._memory.ReadByte(pc);
-      byte b1 = gb._memory.ReadByte((ushort)(pc + 1));
-      byte b2 = gb._memory.ReadByte((ushort)(pc + 2));
-      byte b3 = gb._memory.ReadByte((ushort)(pc + 3));
-      Console.WriteLine($"PC=0x{pc:X4} SP=0x{gb.SP:X4} DoubleSpeed={(gb.DoubleSpeed ? 1 : 0)} KEY1=0x{gb._memory.ReadByte(0xFF4D):X2} OPC={b0:X2} {b1:X2} {b2:X2} {b3:X2}");
-      Console.WriteLine($"Serial: SC writes={gb._memory.SerialControlWrites} starts={gb._memory.SerialTransferStarts}");
-      Console.WriteLine($"ExitCode(A000)=0x{gb._memory.ReadByte(0xA000):X2}");
+            Console.WriteLine("\nEmulation did not exit promptly.");
           }
+
+          if (TryReadTestOutput(gb, out byte finalStatus, out string finalText))
+          {
+            Console.WriteLine($"\nExitCode(A000)=0x{finalStatus:X2}");
+          }
+          else
+          {
+            Console.WriteLine($"\nExitCode(A000)=0x{gb._memory.ReadByte(0xA000):X2}");
+          }
+
+          ushort pc = gb.PC;
+          byte b0 = gb._memory.ReadByte(pc);
+          byte b1 = gb._memory.ReadByte((ushort)(pc + 1));
+          byte b2 = gb._memory.ReadByte((ushort)(pc + 2));
+          byte b3 = gb._memory.ReadByte((ushort)(pc + 3));
+          Console.WriteLine($"PC=0x{pc:X4} SP=0x{gb.SP:X4} DoubleSpeed={(gb.DoubleSpeed ? 1 : 0)} KEY1=0x{gb._memory.ReadByte(0xFF4D):X2} OPC={b0:X2} {b1:X2} {b2:X2} {b3:X2}");
+          Console.WriteLine($"Serial: SC writes={gb._memory.SerialControlWrites} starts={gb._memory.SerialTransferStarts}");
         }
       }
       catch (Exception ex)
       {
-        Console.WriteLine($"\nAn error occurred: {ex.Message}");
-        Console.WriteLine(ex.StackTrace);
+        if (ex is AggregateException agg)
+        {
+          agg = agg.Flatten();
+          Console.WriteLine($"\nAn error occurred: {agg.Message}");
+          foreach (var inner in agg.InnerExceptions)
+          {
+            Console.WriteLine(inner.ToString());
+          }
+        }
+        else
+        {
+          Console.WriteLine($"\nAn error occurred: {ex.Message}");
+          Console.WriteLine(ex.ToString());
+        }
       }
+    }
+
+    private static bool TryReadTestStatus(Gameboy gb, out byte status)
+    {
+      status = 0x80;
+
+      // Signature at A001-A003: DE B0 61
+      if (gb._memory.ReadByte(0xA001) != 0xDE || gb._memory.ReadByte(0xA002) != 0xB0 || gb._memory.ReadByte(0xA003) != 0x61)
+      {
+        return false;
+      }
+
+      status = gb._memory.ReadByte(0xA000);
+      return true;
+    }
+
+    private static int ReadNewTestText(Gameboy gb, int startOffset, TextWriter writer)
+    {
+      // Precondition: signature already verified.
+      // Read newly appended bytes from $A004 onward until we hit the current terminator.
+      const int maxChunk = 1024;
+      int bytesRead = 0;
+      ushort addr = (ushort)(0xA004 + startOffset);
+      for (int i = 0; i < maxChunk; i++)
+      {
+        byte b = gb._memory.ReadByte(addr++);
+        if (b == 0)
+        {
+          break;
+        }
+        writer.Write((char)b);
+        bytesRead++;
+      }
+      return bytesRead;
+    }
+
+    // Kept for final summary output (reads full text once at the end).
+    private static bool TryReadTestOutput(Gameboy gb, out byte status, out string text)
+    {
+      status = 0x80;
+      text = string.Empty;
+
+      if (!TryReadTestStatus(gb, out status))
+      {
+        return false;
+      }
+
+      var sb = new StringBuilder(capacity: 256);
+      ushort addr = 0xA004;
+      const int maxChars = 256 * 1024;
+      for (int i = 0; i < maxChars; i++)
+      {
+        byte b = gb._memory.ReadByte(addr++);
+        if (b == 0)
+        {
+          break;
+        }
+        sb.Append((char)b);
+      }
+
+      text = sb.ToString();
+      return true;
     }
   }
 }

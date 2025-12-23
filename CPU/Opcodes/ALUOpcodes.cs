@@ -704,6 +704,7 @@
           return true;
         },
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.BC);
           gb.BC++;
 					return true;
 				},
@@ -722,6 +723,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.BC);
           gb.BC--;
 					return true;
 				},
@@ -731,6 +733,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.DE);
 				  gb.DE++;
 					return true;
 				},
@@ -749,6 +752,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.DE);
 					gb.DE--;
 					return true;
 				},
@@ -758,6 +762,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.HL);
 				  gb.HL++;
 					return true;
 				},
@@ -776,6 +781,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.HL);
 				  gb.HL--;
 					return true;
 				},
@@ -785,6 +791,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.SP);
 					gb.SP++;
 					return true;
 				},
@@ -803,6 +810,7 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.SP);
 				  gb.SP--;
 					return true;
 				},

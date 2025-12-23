@@ -21,6 +21,14 @@ namespace GBOG.CPU
 
     public class Gameboy
     {
+        [Flags]
+        internal enum OamAccessKind
+        {
+            None = 0,
+            Read = 1,
+            Write = 2,
+        }
+
         #region Registers
         // The CPU has eight 8-bit registers.
         // These registers are named A, B, C, D, E, F, H and L.
@@ -40,6 +48,9 @@ namespace GBOG.CPU
         private int _apuCh1ActiveBaseCyclesRemaining;
         private int _mClockCount;
         private int _timerPeriod = 1024;
+
+        internal OamAccessKind CurrentMCycleOamAccess { get; private set; } = OamAccessKind.None;
+        internal bool CurrentMCycleIduInOamRange { get; private set; } = false;
 
         // The registers can be accessed individually:
         public byte A { get => _registers[0]; set => _registers[0] = value; }
@@ -196,8 +207,10 @@ namespace GBOG.CPU
                             {
                                 foreach (var step in steps)
                                 {
+                                    BeginMCycle();
                                     if (step(this))
                                     {
+                                        ApplyOamBugIfNeeded();
                                 int baseCycles = GetBaseCyclesFromCpuCycles(cycles);
                                 cyclesThisUpdate += baseCycles;
                                 UpdateTimer(cycles);
@@ -218,6 +231,10 @@ namespace GBOG.CPU
                         }
                         else
                         {
+                            BeginMCycle();
+                            // HALT: no CPU bus activity in our model, but still allow any pending
+                            // OAM bug triggers from previous access to be applied (should be none).
+                            ApplyOamBugIfNeeded();
                             int baseCycles = GetBaseCyclesFromCpuCycles(cycles);
                             cyclesThisUpdate += baseCycles;
                             UpdateTimer(cycles);
@@ -233,6 +250,77 @@ namespace GBOG.CPU
                 }
             });
             return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void BeginMCycle()
+        {
+            CurrentMCycleOamAccess = OamAccessKind.None;
+            CurrentMCycleIduInOamRange = false;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void MarkOamRead()
+        {
+            CurrentMCycleOamAccess |= OamAccessKind.Read;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void MarkOamWrite()
+        {
+            CurrentMCycleOamAccess |= OamAccessKind.Write;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void MarkIdu(ushort valueBefore)
+        {
+            if (valueBefore >= 0xFE00 && valueBefore <= 0xFEFF)
+            {
+                CurrentMCycleIduInOamRange = true;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void ApplyOamBugIfNeeded()
+        {
+            // DMG-only OAM corruption bug. CGB does not exhibit it.
+            if (_memory.IsCgb)
+            {
+                return;
+            }
+
+            if (CurrentMCycleOamAccess == OamAccessKind.None && !CurrentMCycleIduInOamRange)
+            {
+                return;
+            }
+
+            // Only relevant during visible scanlines while LCD is on and PPU is in Mode 2 (OAM scan).
+            int row = _ppu.GetOamScanRowForCurrentMCycle();
+            if (row < 0)
+            {
+                return;
+            }
+
+            bool read = (CurrentMCycleOamAccess & OamAccessKind.Read) != 0;
+            bool write = (CurrentMCycleOamAccess & OamAccessKind.Write) != 0;
+
+            if (read && CurrentMCycleIduInOamRange)
+            {
+                _ppu.ApplyOamCorruptionReadDuringIncDec(row);
+            }
+            else if (write)
+            {
+                // Write during IDU behaves like a single write.
+                _ppu.ApplyOamCorruptionWrite(row);
+            }
+            else if (read)
+            {
+                _ppu.ApplyOamCorruptionRead(row);
+            }
+            else if (CurrentMCycleIduInOamRange)
+            {
+                _ppu.ApplyOamCorruptionWrite(row);
+            }
         }
 
         private int GetBaseCyclesFromCpuCycles(int cpuCycles)

@@ -1233,6 +1233,10 @@ namespace GBOG.Memory
 		public byte ReadByte(ushort address)
 		{
 			int newAddress;
+			if (address >= 0xFE00 && address <= 0xFEFF)
+			{
+				_gameBoy.MarkOamRead();
+			}
 			if (address == 0xFF4D)
 			{
 				return _isCgb ? BuildKey1Value() : (byte)0xFF;
@@ -1407,15 +1411,18 @@ namespace GBOG.Memory
 			{
 				_memory[address] = value;
 				_memory[address - 0x2000] = value;
-				WriteRam((ushort)(address - 0x2000), value);
+				// Echo RAM mirrors WRAM; it is not cartridge RAM.
 			}
 			else if (address >= 0xFE00 && address < 0xFEA0)
 			{
+				_gameBoy.MarkOamWrite();
 				_gameBoy._ppu.OAM[address - 0xFE00] = value;
 				_memory[address] = value;
 			}
 			else if (address >= 0xFEA0 && address <= 0xFEFF)
 			{
+				// Unusable region, but *attempted* access still participates in OAM corruption.
+				_gameBoy.MarkOamWrite();
 				return;
 			}
 			else if (address == 0xFF00)
@@ -1445,6 +1452,10 @@ namespace GBOG.Memory
 					// When LCD is disabled, LY is reset and STAT mode becomes 0.
 					_memory[0xFF44] = 0;
 					_memory[0xFF41] = (byte)(_memory[0xFF41] & 0b1111_1100);
+				}
+				else if (!oldEnabled && newEnabled)
+				{
+					_gameBoy._ppu.OnLcdEnabled();
 				}
 			}
 			else if (address == 0xFF4D)
@@ -1780,7 +1791,9 @@ namespace GBOG.Memory
 		public void InitialiseGame(byte[] rom)
 		{
 			// CGB support flag at 0x0143: 0x80 = supports CGB, 0xC0 = CGB only.
-			_isCgb = rom.Length > 0x143 && (rom[0x143] == 0x80 || rom[0x143] == 0xC0);
+			// A real DMG runs *everything* in DMG mode; a real CGB runs 0x80 carts in CGB mode by default.
+			// For our emulator/test harness, default to DMG behavior unless the ROM is CGB-only.
+			_isCgb = rom.Length > 0x143 && rom[0x143] == 0xC0;
 			_key1PrepareSpeedSwitch = false;
 			_memory[0xFF4D] = _isCgb ? BuildKey1Value() : (byte)0xFF;
 
@@ -1943,6 +1956,16 @@ namespace GBOG.Memory
 			var tileMap = new byte[0x400];
 			Array.Copy(_memory, 0x9800, tileMap, 0, 0x400);
 			return tileMap;
+		}
+
+		internal void WriteOamByteDirect(int oamIndex, byte value)
+		{
+			if ((uint)oamIndex >= 0xA0u)
+			{
+				return;
+			}
+			_memory[0xFE00 + oamIndex] = value;
+			_gameBoy._ppu.OAM[oamIndex] = value;
 		}
 	}
 }

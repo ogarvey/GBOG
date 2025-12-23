@@ -29,6 +29,137 @@ namespace GBOG.Graphics
 			_scanlineCounter = 456;
 		}
 
+		internal int GetOamScanRowForCurrentMCycle()
+		{
+			if (!_gb._memory.LCDEnabled)
+			{
+				return -1;
+			}
+			// Visible scanlines only.
+			if (_gb._memory.LY >= 144)
+			{
+				return -1;
+			}
+			// Mode 2 is the first 80 t-cycles of the scanline (20 M-cycles).
+			if (_scanlineCounter <= _lcdMode2Bounds)
+			{
+				return -1;
+			}
+			int tCyclesIntoLine = 456 - _scanlineCounter;
+			if (tCyclesIntoLine < 0 || tCyclesIntoLine >= 80)
+			{
+				return -1;
+			}
+			return tCyclesIntoLine / 4; // 0..19
+		}
+
+		internal void ApplyOamCorruptionWrite(int row)
+		{
+			ApplyOamCorruptionWriteOrRead(row, isRead: false);
+		}
+
+		internal void ApplyOamCorruptionRead(int row)
+		{
+			ApplyOamCorruptionWriteOrRead(row, isRead: true);
+		}
+
+		internal void ApplyOamCorruptionReadDuringIncDec(int row)
+		{
+			// Pan Docs: doesn't happen if accessed row is one of first four, or last row.
+			if (row < 4 || row >= 19)
+			{
+				ApplyOamCorruptionRead(row);
+				return;
+			}
+
+			// (1) Corrupt first word of preceding row, then copy preceding row to current row and two rows before.
+			ushort a = ReadOamWord(row - 2, 0);
+			ushort b = ReadOamWord(row - 1, 0);
+			ushort c = ReadOamWord(row, 0);
+			ushort d = ReadOamWord(row - 1, 2);
+			ushort newB = (ushort)((b & (a | c | d)) | (a & c & d));
+			WriteOamWord(row - 1, 0, newB);
+
+			for (int w = 0; w < 4; w++)
+			{
+				ushort src = ReadOamWord(row - 1, w);
+				WriteOamWord(row, w, src);
+				WriteOamWord(row - 2, w, src);
+			}
+
+			// (2) Then apply normal read corruption.
+			ApplyOamCorruptionRead(row);
+		}
+
+		private void ApplyOamCorruptionWriteOrRead(int row, bool isRead)
+		{
+			// OAM is 20 rows of 8 bytes (4 words). Row 0 (objects 0-1) is not affected.
+			if (row <= 0 || row >= 20)
+			{
+				return;
+			}
+
+			ushort a = ReadOamWord(row, 0);
+			ushort b = ReadOamWord(row - 1, 0);
+			ushort c = ReadOamWord(row - 1, 2);
+
+			ushort newFirst = isRead
+				? (ushort)(b | (a & c))
+				: (ushort)(((a ^ c) & (b ^ c)) ^ c);
+
+			WriteOamWord(row, 0, newFirst);
+			for (int w = 1; w < 4; w++)
+			{
+				WriteOamWord(row, w, ReadOamWord(row - 1, w));
+			}
+		}
+
+		private ushort ReadOamWord(int row, int wordIndex)
+		{
+			int baseIndex = (row * 8) + (wordIndex * 2);
+			byte lo = ReadOamByte(baseIndex);
+			byte hi = ReadOamByte(baseIndex + 1);
+			return (ushort)((hi << 8) | lo);
+		}
+
+		private void WriteOamWord(int row, int wordIndex, ushort value)
+		{
+			int baseIndex = (row * 8) + (wordIndex * 2);
+			WriteOamByte(baseIndex, (byte)(value & 0xFF));
+			WriteOamByte(baseIndex + 1, (byte)(value >> 8));
+		}
+
+		private byte ReadOamByte(int oamIndex)
+		{
+			if ((uint)oamIndex >= (uint)OAM.Length)
+			{
+				return 0;
+			}
+			return OAM[oamIndex];
+		}
+
+		private void WriteOamByte(int oamIndex, byte value)
+		{
+			if ((uint)oamIndex >= (uint)OAM.Length)
+			{
+				return;
+			}
+			OAM[oamIndex] = value;
+			_gb._memory.WriteOamByteDirect(oamIndex, value);
+		}
+
+		internal void OnLcdEnabled()
+		{
+			// When LCD is turned on from off, hardware synchronizes to the start of the
+			// first visible scanline. Tests expect LY to increment at a specific cycle
+			// offset relative to the enabling write, so we start slightly into the line.
+			_gb._memory.LY = 0;
+			Scanline = 0;
+			WindowScanline = 0;
+			_prevLy = 0;
+			_scanlineCounter = 456 - 4;
+		}
+
 		// Methods
 
 		// Resets the GPU to its initial state.

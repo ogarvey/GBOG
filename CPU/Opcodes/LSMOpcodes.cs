@@ -3,6 +3,7 @@
   public class LSMOpcodes
 	{
 		private static int value;
+		private static int initial;
 		private static ushort address;
 		
 		public static Dictionary<byte, GBOpcode> X8opcodes = new Dictionary<byte, GBOpcode>()
@@ -84,7 +85,10 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb._memory.WriteByte(gb.HL++, gb.A);
+					ushort addr = gb.HL;
+					gb._memory.WriteByte(addr, gb.A);
+					gb.MarkIdu(addr);
+					gb.HL++;
 					return true;
 				},
 			})},
@@ -106,6 +110,7 @@
 					var l = gb.L;
 					address = (ushort)((h << 8) | l);
 					gb.A = gb._memory.ReadByte(address++);
+					gb.MarkIdu(gb.HL);
 					gb.HL++;
 					return true;
 				},
@@ -124,7 +129,10 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb._memory.WriteByte(gb.HL--, gb.A);
+					ushort addr = gb.HL;
+					gb._memory.WriteByte(addr, gb.A);
+					gb.MarkIdu(addr);
+					gb.HL--;
 					return true;
 				},
 			})},
@@ -146,7 +154,10 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.A = gb._memory.ReadByte(gb.HL--);
+					ushort addr = gb.HL;
+					gb.A = gb._memory.ReadByte(addr);
+					gb.MarkIdu(addr);
+					gb.HL--;
 					return true;
 				},
 			})},
@@ -743,15 +754,21 @@
 			})},
       {0xC1, new GBOpcode(0xC1, "POP BC",1,12,new Step[] {
 				(Gameboy gb) => {
-					value = gb._memory.ReadUShort(gb.SP++);
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP +=1;
+					// Read low byte, then increment SP (IDU)
+					initial = gb._memory.ReadByte(gb.SP);
+					gb.MarkIdu(gb.SP);
+					gb.SP++;
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.BC = (ushort)value;
+					// Read high byte, then increment SP (IDU)
+					value = gb._memory.ReadByte(gb.SP);
+					gb.MarkIdu(gb.SP);
+					gb.SP++;
+					gb.BC = (ushort)((value << 8) | (initial & 0xFF));
 					return true;
 				},
 			})},
@@ -761,29 +778,39 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP -= 1;
+					// Internal cycle
 					return true;
 				},
 				(Gameboy gb) => {
+					// Decrement SP and write high byte
+					gb.MarkIdu(gb.SP);
 					gb.SP -= 1;
+					gb._memory.WriteByte(gb.SP, (byte)(value >> 8));
 					return true;
 				},
 				(Gameboy gb) => {
-					gb._memory.WriteUShort(gb.SP, (ushort)value);
+					// Decrement SP and write low byte
+					gb.MarkIdu(gb.SP);
+					gb.SP -= 1;
+					gb._memory.WriteByte(gb.SP, (byte)(value & 0xFF));
 					return true;
 				},
 			})},
       {0xD1, new GBOpcode(0xD1, "POP DE",1,12,new Step[] {
 				(Gameboy gb) => {
-					value = gb._memory.ReadUShort(gb.SP++);
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP +=1;
+					initial = gb._memory.ReadByte(gb.SP);
+					gb.MarkIdu(gb.SP);
+					gb.SP++;
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.DE = (ushort)value;
+					value = gb._memory.ReadByte(gb.SP);
+					gb.MarkIdu(gb.SP);
+					gb.SP++;
+					gb.DE = (ushort)((value << 8) | (initial & 0xFF));
 					return true;
 				},
 			})},
@@ -793,29 +820,37 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP -= 1;
+					// Internal cycle
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.SP);
 					gb.SP -= 1;
+					gb._memory.WriteByte(gb.SP, (byte)(value >> 8));
 					return true;
 				},
 				(Gameboy gb) => {
-					gb._memory.WriteUShort(gb.SP, (ushort)value);
+					gb.MarkIdu(gb.SP);
+					gb.SP -= 1;
+					gb._memory.WriteByte(gb.SP, (byte)(value & 0xFF));
 					return true;
 				},
 			})},
       {0xE1, new GBOpcode(0xE1, "POP HL",1,12,new Step[] {
 				(Gameboy gb) => {
-					value = gb._memory.ReadUShort(gb.SP++);
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP +=1;
+					initial = gb._memory.ReadByte(gb.SP);
+					gb.MarkIdu(gb.SP);
+					gb.SP++;
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.HL = (ushort)value;
+					value = gb._memory.ReadByte(gb.SP);
+					gb.MarkIdu(gb.SP);
+					gb.SP++;
+					gb.HL = (ushort)((value << 8) | (initial & 0xFF));
 					return true;
 				},
 			})},
@@ -825,29 +860,37 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP -= 1;
+					// Internal cycle
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.SP);
 					gb.SP -= 1;
+					gb._memory.WriteByte(gb.SP, (byte)(value >> 8));
 					return true;
 				},
 				(Gameboy gb) => {
-					gb._memory.WriteUShort(gb.SP, (ushort)value);
+					gb.MarkIdu(gb.SP);
+					gb.SP -= 1;
+					gb._memory.WriteByte(gb.SP, (byte)(value & 0xFF));
 					return true;
 				},
 			})},
       {0xF1, new GBOpcode(0xF1, "POP AF",1,12,new Step[] {
 				(Gameboy gb) => {
-					value = gb._memory.ReadUShort(gb.SP++);
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP +=1;
+					initial = gb._memory.ReadByte(gb.SP);
+					gb.MarkIdu(gb.SP);
+					gb.SP++;
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.AF = (ushort)value;
+					value = gb._memory.ReadByte(gb.SP);
+					gb.MarkIdu(gb.SP);
+					gb.SP++;
+					gb.AF = (ushort)((value << 8) | (initial & 0xFF));
 					return true;
 				},
 			})},
@@ -857,15 +900,19 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.SP -= 1;
+					// Internal cycle
 					return true;
 				},
 				(Gameboy gb) => {
+					gb.MarkIdu(gb.SP);
 					gb.SP -= 1;
+					gb._memory.WriteByte(gb.SP, (byte)(value >> 8));
 					return true;
 				},
 				(Gameboy gb) => {
-					gb._memory.WriteUShort(gb.SP, (ushort)value);
+					gb.MarkIdu(gb.SP);
+					gb.SP -= 1;
+					gb._memory.WriteByte(gb.SP, (byte)(value & 0xFF));
 					return true;
 				},
 			})},
