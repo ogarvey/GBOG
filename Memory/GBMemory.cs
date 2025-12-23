@@ -13,7 +13,7 @@ namespace GBOG.Memory
 	public class GBMemory
 	{
 
-		public event EventHandler<char> SerialDataReceived;
+		public event EventHandler<char>? SerialDataReceived;
 
 		// The GameBoy has 8kB of RAM.
 		// The RAM is used to store the program and the data.
@@ -34,6 +34,13 @@ namespace GBOG.Memory
 		// 0xFFFF - 0xFFFF: Interrupt enable register
 		private byte[] _memory = new byte[0x10000];
 		private readonly Gameboy _gameBoy;
+		private bool _isCgb;
+		private bool _key1PrepareSpeedSwitch;
+		private int _serialControlWrites;
+		private int _serialTransferStarts;
+
+		public int SerialControlWrites => _serialControlWrites;
+		public int SerialTransferStarts => _serialTransferStarts;
 
 		// Rom bank 0
 		// The first 16kB of the ROM are always mapped to the memory address 0x0000 - 0x3FFF.
@@ -1121,9 +1128,9 @@ namespace GBOG.Memory
 			}
 		}
 
-		private byte[] _cartRom;
+		private byte[] _cartRom = null!;
 		private byte _currentRomBank = 1;
-		private byte[] RamBanks;
+		private byte[] RamBanks = null!;
 		private byte _romBankingMode;
 		private byte _currentRamBank = 0;
 		private bool _ramEnabled;
@@ -1140,7 +1147,7 @@ namespace GBOG.Memory
 		public GBMemory(Gameboy gameBoy)
 		{
 			Log.Logger = new LoggerConfiguration()
-				.WriteTo.File("log.txt",
+				.WriteTo.File("cpu.log",
 				outputTemplate: "{Message:lj}{NewLine}{Exception}")
 				.CreateLogger();
 			_gameBoy = gameBoy;
@@ -1149,6 +1156,68 @@ namespace GBOG.Memory
 			//InitialiseBootROM();
 			InitialiseIORegisters();
 			//_memory[0xFF44] = 0x90;
+		}
+
+		public bool IsCgb => _isCgb;
+		public bool Key1PrepareSpeedSwitch => _key1PrepareSpeedSwitch;
+
+		private byte BuildKey1Value()
+		{
+			// KEY1 (CGB only):
+			// Bit 7 = current speed (0 normal, 1 double)
+			// Bit 0 = prepare speed switch (writable)
+			// Bits 6-1 read as 1
+			byte value = 0x7E;
+			if (_gameBoy.DoubleSpeed)
+			{
+				value |= 0x80;
+			}
+			if (_key1PrepareSpeedSwitch)
+			{
+				value |= 0x01;
+			}
+			return value;
+		}
+
+		private void WriteKey1(byte value)
+		{
+			if (!_isCgb)
+			{
+				return;
+			}
+			_key1PrepareSpeedSwitch = (value & 0x01) != 0;
+			_memory[0xFF4D] = BuildKey1Value();
+		}
+
+		public void ClearKey1SpeedSwitchPrepare()
+		{
+			if (!_isCgb)
+			{
+				return;
+			}
+			_key1PrepareSpeedSwitch = false;
+			_memory[0xFF4D] = BuildKey1Value();
+		}
+
+		public void RefreshKey1()
+		{
+			if (!_isCgb)
+			{
+				return;
+			}
+			_memory[0xFF4D] = BuildKey1Value();
+		}
+
+		internal void SetNr52Channel1Active(bool active)
+		{
+			if (active)
+			{
+				_memory[0xFF26] |= 0x01;
+			}
+			else
+			{
+				_memory[0xFF26] &= 0xFE;
+			}
 		}
 
 		private void InitialiseBootROM()
@@ -1164,6 +1233,10 @@ namespace GBOG.Memory
 		public byte ReadByte(ushort address)
 		{
 			int newAddress;
+			if (address == 0xFF4D)
+			{
+				return _isCgb ? BuildKey1Value() : (byte)0xFF;
+			}
 			if (address < 0x4000)
 			{
 				if (_mbc1)
@@ -1280,12 +1353,14 @@ namespace GBOG.Memory
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public sbyte ReadSByte(ushort address)
 		{
-			return (sbyte)_memory[address];
+			return (sbyte)ReadByte(address);
 		}
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public ushort ReadUShort(ushort address)
 		{
-			return (ushort)((_memory[address + 1] << 8) | _memory[address]);
+			byte lo = ReadByte(address);
+			byte hi = ReadByte((ushort)(address + 1));
+			return (ushort)((hi << 8) | lo);
 		}
 
 		public void WriteUShort(ushort address, ushort value)
@@ -1314,8 +1389,8 @@ namespace GBOG.Memory
 			{
 				HandleBanking(address, value);
 			}
-			// 0x8000 - 0x97FF
-			else if ((address >= 0x8000) && (address < 0x9FFF))
+			// 0x8000 - 0x9FFF (VRAM)
+			else if ((address >= 0x8000) && (address <= 0x9FFF))
 			{
 				_memory[address] = value;
 				_gameBoy._ppu.VideoRam[address - 0x8000] = value;
@@ -1347,32 +1422,66 @@ namespace GBOG.Memory
 			{
 				Joypad = value;
 			}
-			else if (address == 0xFF02 && value == 0x81)
+			else if (address == 0xFF02)
 			{
-				Console.Write((char)_memory[0xFF01]);
-				SerialDataReceived?.Invoke(this, (char)_memory[0xFF01]);
+				_serialControlWrites++;
+				_memory[address] = value;
+				if (value == 0x81)
+				{
+					_serialTransferStarts++;
+					Console.Write((char)_memory[0xFF01]);
+					SerialDataReceived?.Invoke(this, (char)_memory[0xFF01]);
+				}
+			}
+			else if (address == 0xFF40)
+			{
+				// LCDC: turning LCD off has immediate side effects on LY/STAT timing.
+				byte old = _memory[0xFF40];
+				_memory[0xFF40] = value;
+				bool oldEnabled = (old & 0x80) != 0;
+				bool newEnabled = (value & 0x80) != 0;
+				if (oldEnabled && !newEnabled)
+				{
+					// When LCD is disabled, LY is reset and STAT mode becomes 0.
+					_memory[0xFF44] = 0;
+					_memory[0xFF41] = (byte)(_memory[0xFF41] & 0b1111_1100);
+				}
+			}
+			else if (address == 0xFF4D)
+			{
+				WriteKey1(value);
+			}
+			else if (address == 0xFF26)
+			{
+				// NR52: only bit 7 (sound on/off) is writable.
+				bool enabled = (value & 0x80) != 0;
+				_gameBoy.SetApuEnabled(enabled);
+				_memory[0xFF26] = enabled ? (byte)(_memory[0xFF26] | 0x80) : (byte)0x00;
+			}
+			else if (address == 0xFF14)
+			{
+				// NR14: Channel 1 trigger is bit 7.
+				_memory[address] = value;
+				if ((value & 0x80) != 0)
+				{
+					_gameBoy.TriggerApuChannel1();
+				}
 			}
 			else if (address == 0xFF04)
 			{
 				_gameBoy.DIVCounter = 0;
 				_memory[address] = 0;
+                // When DIV is reset, the internal counter for TIMA should also be affected because TIMA is derived from the system clock which DIV also counts.
+                // In this implementation, _mClockCount represents the "cycles until next TIMA increment".
+                // Resetting DIV effectively resets the internal divider.
+                // So we should reset _mClockCount to the full period.
+                _gameBoy.ResetTimerCounter();
 			}
-			else if (address == TIMA)
+			else if (address == 0xFF05) // TIMA
 			{
-				var currentFrequency = _gameBoy.GetClockFrequency();
 				_memory[address] = value;
-				var newFrequency = _gameBoy.GetClockFrequency();
-
-				if (currentFrequency != newFrequency)
-				{
-					_gameBoy.SetClockFrequency();
-				}
 			}
-			else if (address == DIV)
-			{
-				_memory[address] = 0;
-			}
-			else if (address == TAC)
+			else if (address == 0xFF07) // TAC
 			{
 				_memory[address] = value;
 				_gameBoy.SetClockFrequency();
@@ -1661,7 +1770,7 @@ namespace GBOG.Memory
 			_memory[0xFF47] = 0xFC; // BGP
 			_memory[0xFF48] = 0xFF; // OBP0
 			_memory[0xFF49] = 0xFF; // OBP1
-			_memory[0xFF4D] = 0xFF; // KEY1
+			_memory[0xFF4D] = 0xFF; // KEY1 (DMG reads 0xFF; CGB value is set when ROM is loaded)
 			_memory[0xFF4F] = 0xFF; // VBK
 			_memory[0xFF70] = 0xFF; // SVBK
 
@@ -1670,6 +1779,11 @@ namespace GBOG.Memory
 
 		public void InitialiseGame(byte[] rom)
 		{
+			// CGB support flag at 0x0143: 0x80 = supports CGB, 0xC0 = CGB only.
+			_isCgb = rom.Length > 0x143 && (rom[0x143] == 0x80 || rom[0x143] == 0xC0);
+			_key1PrepareSpeedSwitch = false;
+			_memory[0xFF4D] = _isCgb ? BuildKey1Value() : (byte)0xFF;
+
 			var type = rom[0x147];
 			switch (type)
 			{

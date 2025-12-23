@@ -125,27 +125,33 @@
 			})},
 			{0x34, new GBOpcode(0x34, "INC (HL)",1,12,new Step[] {
 				(Gameboy gb) => {
+					// M1: opcode fetch (timing only)
+					return true;
+				},
+				(Gameboy gb) => {
+					// M2: read from (HL)
 					initial = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
+					// M3: ALU + write back to (HL)
 					value = Inc(gb, (byte)initial);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
 			})},
 			{0x35, new GBOpcode(0x35, "DEC (HL)",1,12,new Step[] {
 				(Gameboy gb) => {
+					// M1: opcode fetch (timing only)
+					return true;
+				},
+				(Gameboy gb) => {
+					// M2: read from (HL)
 					initial = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
-					return true;
-				},
-				(Gameboy gb) => {
+					// M3: ALU + write back to (HL)
 					value = Dec(gb, (byte)initial);
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
@@ -220,9 +226,6 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					return true;
-				},
-				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					Add(gb, (byte)value);
 					return true;
@@ -271,9 +274,6 @@
 				},
 			})},
 			{0x8E, new GBOpcode(0x8E, "ADC A,(HL)",1,8,new Step[] {
-				(Gameboy gb) => {
-					return true;
-				},
 				(Gameboy gb) => {
 					return true;
 				},
@@ -330,9 +330,6 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					return true;
-				},
-				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					Sub(gb, (byte)value);
 					return true;
@@ -381,9 +378,6 @@
 				},
 			})},
 			{0x9E, new GBOpcode(0x9E, "SBC A,(HL)",1,8,new Step[] {
-				(Gameboy gb) => {
-					return true;
-				},
 				(Gameboy gb) => {
 					return true;
 				},
@@ -440,9 +434,6 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					return true;
-				},
-				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					And(gb, (byte)value);
 					return true;
@@ -491,9 +482,6 @@
 				},
 			})},
 			{0xAE, new GBOpcode(0xAE, "XOR (HL)",1,8,new Step[] {
-				(Gameboy gb) => {
-					return true;
-				},
 				(Gameboy gb) => {
 					return true;
 				},
@@ -550,9 +538,6 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					return true;
-				},
-				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					Or(gb, (byte)value);
 					return true;
@@ -601,9 +586,6 @@
 				},
 			})},
 			{0xBE, new GBOpcode(0xBE, "CP (HL)",1,8,new Step[] {
-				(Gameboy gb) => {
-					return true;
-				},
 				(Gameboy gb) => {
 					return true;
 				},

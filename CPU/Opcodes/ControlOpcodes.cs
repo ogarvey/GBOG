@@ -8,12 +8,25 @@
 		public static Dictionary<byte, GBOpcode> MiscOpcodes = new Dictionary<byte, GBOpcode>()
 		{
 			{ 0x00, new GBOpcode(0x00, "NOP", 1, 4, new Step[] {(Gameboy gb) =>{ return true;}}) },
-			{ 0x10, new GBOpcode(0x10, "STOP", 1, 4, new Step[] {(Gameboy gb) =>{ return true; } }) },
+			{ 0x10, new GBOpcode(0x10, "STOP", 2, 4, new Step[] {(Gameboy gb) =>{
+				// STOP is a 2-byte instruction (0x10 0x00). Skip the padding byte.
+				gb.PC += 1;
+
+				// CGB speed switch: if KEY1 bit0 set, STOP triggers the speed toggle.
+				if (gb.TrySwitchCgbSpeed())
+				{
+					return true;
+				}
+
+				// Otherwise behave like a stop (halt until external event). Minimal implementation.
+				gb.Halt = true;
+				return true;
+			} }) },
 			{ 0x76, new GBOpcode(0x76, "HALT", 1, 4, new Step[] {(Gameboy gb) => {gb.Halt = true; return true; } }) },
 			{ 0xF3, new GBOpcode(0xF3, "DI", 1, 4,  new Step[] {(Gameboy gb) =>
-							{gb.InterruptMasterEnabled = false; return true;}}) },
+						{gb.DisableInterruptsImmediate(); return true;}}) },
 			{ 0xFB, new GBOpcode(0xFB, "EI", 1, 4,  new Step[] {(Gameboy gb) =>
-							{gb.InterruptMasterEnabled = true;return true;}}) },
+						{gb.ScheduleEnableInterrupts(); return true;}}) },
 		};
 
 		public static Dictionary<byte, GBOpcode> BROpcodes = new Dictionary<byte, GBOpcode>()
@@ -485,7 +498,7 @@
 				},
 				(Gameboy gb) => {
 					gb.PC = address;
-					gb.InterruptMasterEnabled = true;
+					gb.EnableInterruptsImmediate();
 					return true;
 				},
 			})},

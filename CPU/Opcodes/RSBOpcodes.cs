@@ -110,14 +110,14 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
 					value = Rlc(gb, (byte)value);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
@@ -190,14 +190,14 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
 					value = Rrc(gb, (byte)value);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
@@ -270,14 +270,14 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
 					value = Rl(gb, (byte)value);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
@@ -350,14 +350,14 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
 					value = Rr(gb, (byte)value);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
@@ -430,14 +430,14 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
 					value = Sla(gb, (byte)value);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
@@ -510,14 +510,14 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
 					value = Sra(gb, (byte)value);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
@@ -590,14 +590,14 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
 					value = Swap(gb, (byte)value);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
@@ -670,14 +670,14 @@
 					return true;
 				},
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					value = gb._memory.ReadByte(gb.HL);
 					return true;
 				},
 				(Gameboy gb) => {
 					value = Srl(gb, (byte)value);
-					return true;
-				},
-				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
 					return true;
 				},
@@ -746,6 +746,9 @@
 				},
 			})},
       {0x46, new GBOpcode(0x46, "BIT 0,(HL)",2,12,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					return true;
 				},

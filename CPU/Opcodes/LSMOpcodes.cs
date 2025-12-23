@@ -9,6 +9,9 @@
     {
       {0x02, new GBOpcode(0x02, "LD (BC),A", 1,8, new Step[] {
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.BC, gb.A);
 					return true;
 				},
@@ -42,6 +45,9 @@
 			})},
       {0x12, new GBOpcode(0x12, "LD (DE),A",1,8,new Step[] {
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.DE, gb.A);
 					return true;
 				},
@@ -74,6 +80,9 @@
 				},
 			})},
       {0x22, new GBOpcode(0x22, "LD (HL+),A",1,8,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL++, gb.A);
 					return true;
@@ -112,22 +121,24 @@
 			})},
       {0x32, new GBOpcode(0x32, "LD (HL-),A",1,8,new Step[] {
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL--, gb.A);
 					return true;
 				},
 			})},
       {0x36, new GBOpcode(0x36, "LD (HL),u8",3,12,new Step[] {
 				(Gameboy gb) => {
-					value = gb.PC++;
 					return true;
 				},
 				(Gameboy gb) => {
-					value = gb._memory.ReadByte((ushort)value);
+					value = gb._memory.ReadByte(gb.PC++);
 					return true;
 				},
 				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, (byte)value);
-					return false;
+					return true;
 				},
 			})},
       {0x3A, new GBOpcode(0x3A, "LD A,(HL-)",1,8,new Step[] {
@@ -456,18 +467,26 @@
 			})},
       {0x70, new GBOpcode(0x70, "LD (HL),B",1,8,new Step[] {
 				(Gameboy gb) => {
+					return true;
+				},
+				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, gb.B);
 					return true;
 				},
 			})},
       {0x71, new GBOpcode(0x71, "LD (HL),C",2,8,new Step[] {
 				(Gameboy gb) => {
-					value = gb.C;
-					gb._memory.WriteByte(gb.HL, (byte)value);
-					return false;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb._memory.WriteByte(gb.HL, gb.C);
+					return true;
 				},
 			})},
       {0x72, new GBOpcode(0x72, "LD (HL),D",1,8,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, gb.D);
 					return true;
@@ -475,18 +494,26 @@
 			})},
       {0x73, new GBOpcode(0x73, "LD (HL),E",1,8,new Step[] {
 				(Gameboy gb) => {
-					value = gb.E;
-					gb._memory.WriteByte(gb.HL, (byte)value);
-					return false;
+					return true;
+				},
+				(Gameboy gb) => {
+					gb._memory.WriteByte(gb.HL, gb.E);
+					return true;
 				},
 			})},
       {0x74, new GBOpcode(0x74, "LD (HL),H",1,8,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, gb.H);
 					return true;
 				},
 			})},
       {0x75, new GBOpcode(0x75, "LD (HL),L",1,8,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					gb._memory.WriteByte(gb.HL, gb.L);
 					return true;
@@ -554,12 +581,22 @@
 			})},
       {0xE0, new GBOpcode(0xE0, "LD (FF00+u8),A",2,12,new Step[] {
 				(Gameboy gb) => {
-					address = (ushort)(0xFF00 + gb._memory.ReadByte(gb.PC++));
+					value = gb._memory.ReadByte(gb.PC++);
+					return true;
+				},
+				(Gameboy gb) => {
+					address = (ushort)(0xFF00 + (byte)value);
+					return true;
+				},
+				(Gameboy gb) => {
 					gb._memory.WriteByte(address, gb.A);
 					return true;
 				},
 			})},
       {0xE2, new GBOpcode(0xE2, "LD (FF00+C),A",1,8,new Step[] {
+				(Gameboy gb) => {
+					return true;
+				},
 				(Gameboy gb) => {
 					gb._memory.WriteByte((ushort)(0xFF00 + gb.C), gb.A);
 					return true;
@@ -567,11 +604,14 @@
 			})},
       {0xEA, new GBOpcode(0xEA, "LD (u16),A",3,16,new Step[] {
 				(Gameboy gb) => {
-					address = gb._memory.ReadUShort(gb.PC++);
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.PC += 1;
+					value = gb._memory.ReadByte(gb.PC++);
+					return true;
+				},
+				(Gameboy gb) => {
+					address = (ushort)(value | (gb._memory.ReadByte(gb.PC++) << 8));
 					return true;
 				},
 				(Gameboy gb) => {
@@ -581,11 +621,15 @@
 			})},
       {0xF0, new GBOpcode(0xF0, "LD A,(FF00+u8)",2,12,new Step[] {
 				(Gameboy gb) => {
+					value = gb._memory.ReadByte(gb.PC++);
 					return true;
 				},
 				(Gameboy gb) => {
-				address = (ushort)(0xFF00 + gb._memory.ReadByte(gb.PC++));
-				gb.A = gb._memory.ReadByte(address);
+					address = (ushort)(0xFF00 + (byte)value);
+					return true;
+				},
+				(Gameboy gb) => {
+					gb.A = gb._memory.ReadByte(address);
 					return true;
 				},
 			})},

@@ -1,6 +1,5 @@
 ﻿using GBOG.CPU.Opcodes;
 using GBOG.Graphics;
-using GBOG.Graphics.MonoGame;
 using GBOG.Memory;
 using GBOG.Utils;
 using Serilog;
@@ -34,6 +33,11 @@ namespace GBOG.CPU
 
         public GBMemory _memory { get; }
         public PPU _ppu { get; }
+        public bool EnableCpuTrace { get; set; } = false;
+
+        public bool DoubleSpeed { get; private set; } = false;
+        private bool _apuEnabled = true;
+        private int _apuCh1ActiveBaseCyclesRemaining;
         private int _mClockCount;
         private int _timerPeriod = 1024;
 
@@ -105,6 +109,7 @@ namespace GBOG.CPU
         // The program counter is used to keep track of the current position in the program.
         public ushort PC { get; set; }
         public bool InterruptMasterEnabled { get; set; }
+        private int _imeEnableDelayInstructions;
         public bool Halt { get; set; }
         public int DIVCounter { get; set; }
         #endregion
@@ -130,7 +135,7 @@ namespace GBOG.CPU
 
             _memory.LY = 0x99;
         }
-        public EventHandler<bool> OnGraphicsRAMAccessed;
+        public EventHandler<bool>? OnGraphicsRAMAccessed;
         private bool _exit = false;
 
         private async Task<bool> DoLoop()
@@ -149,17 +154,34 @@ namespace GBOG.CPU
 
                         byte opcode;
 
-                        //LogSystemState();
+                        if (EnableCpuTrace)
+                        {
+                            LogSystemState();
+                        }
                         if (IsInterruptRequested())
                         {
                             Halt = false;
-                            HandleInterrupts();
+                            if (HandleInterrupts())
+                            {
+                                // Interrupt servicing takes 5 machine cycles = 20 t-cycles.
+                                for (int n = 0; n < 5; n++)
+                                {
+                                    int baseCycles = GetBaseCyclesFromCpuCycles(cycles);
+                                cyclesThisUpdate += baseCycles;
+                                UpdateTimer(cycles);
+                                UpdateApu(baseCycles);
+                                _ppu.Step(baseCycles);
+                                }
+
+                                // The interrupt is handled between instructions; don't also fetch/execute an opcode this iteration.
+                                continue;
+                            }
                         }
                         if (!Halt)
                         {
                             //Log.Information($"Register State: A: {A:X2} F: {F:X2} B: {B:X2} C: {C:X2} D: {D:X2} E: {E:X2} H: {H:X2} L: {L:X2} SP: {SP:X4} PC: 00:{PC:X4} PPU::: LY: {_memory.LY:X2} LCDC: {_memory.LCDC:X2} IE: {_memory.InterruptEnableRegister:X2} IF: {_memory.IF:X2}");
                             opcode = _memory.ReadByte(PC++);
-                            GBOpcode op;
+                            GBOpcode? op;
                             if (opcode == 0xCB)
                             {
                                 op = _opcodeHandler.GetOpcode(opcode, true);
@@ -174,12 +196,14 @@ namespace GBOG.CPU
                             {
                                 foreach (var step in steps)
                                 {
-                                    UpdateTimer(cycles);
                                     if (step(this))
                                     {
-                                        cyclesThisUpdate += cycles;
-                                        //UpdateGraphics(cycles);
-                                        _ppu.Step(cycles);
+                                int baseCycles = GetBaseCyclesFromCpuCycles(cycles);
+                                cyclesThisUpdate += baseCycles;
+                                UpdateTimer(cycles);
+                                UpdateApu(baseCycles);
+								//UpdateGraphics(baseCycles);
+								_ppu.Step(baseCycles);
                                         OnGraphicsRAMAccessed?.Invoke(this, true);
                                     }
                                     else
@@ -187,15 +211,21 @@ namespace GBOG.CPU
                                         break;
                                     }
                                 }
+
+                                AdvanceImeDelayAfterInstruction();
                             }
                             //cycles = _opcodeHandler.HandleOpcode(opcode);
                         }
                         else
                         {
-                            cyclesThisUpdate += cycles;
+                            int baseCycles = GetBaseCyclesFromCpuCycles(cycles);
+                            cyclesThisUpdate += baseCycles;
                             UpdateTimer(cycles);
-                            //UpdateGraphics(cycles);
-                            _ppu.Step(cycles);
+                            UpdateApu(baseCycles);
+							//UpdateGraphics(baseCycles);
+							_ppu.Step(baseCycles);
+
+                            // No instruction executed while halted; EI delay does not advance here.
                         }
 
                     }
@@ -205,55 +235,164 @@ namespace GBOG.CPU
             return true;
         }
 
+        private int GetBaseCyclesFromCpuCycles(int cpuCycles)
+        {
+            // In CGB double-speed, CPU runs twice as fast, while timer/PPU/APU remain on the base clock.
+            // So each CPU t-cycle corresponds to 1/2 base cycles.
+            return DoubleSpeed ? (cpuCycles / 2) : cpuCycles;
+        }
+
+        public void SetApuEnabled(bool enabled)
+        {
+            _apuEnabled = enabled;
+            if (!enabled)
+            {
+                _apuCh1ActiveBaseCyclesRemaining = 0;
+                _memory.SetNr52Channel1Active(false);
+            }
+        }
+
+        public void TriggerApuChannel1()
+        {
+            if (!_apuEnabled)
+            {
+                return;
+            }
+
+            // Minimal emulation for blargg get_cpu_speed:
+            // Keep channel 1 active for a fixed base-clock duration so the polling loop runs
+            // ~2x more iterations in double-speed mode.
+            _apuCh1ActiveBaseCyclesRemaining = 16_000;
+            _memory.SetNr52Channel1Active(true);
+        }
+
+        private void UpdateApu(int baseCycles)
+        {
+            if (!_apuEnabled)
+            {
+                return;
+            }
+
+            if (_apuCh1ActiveBaseCyclesRemaining > 0)
+            {
+                _apuCh1ActiveBaseCyclesRemaining -= baseCycles;
+                if (_apuCh1ActiveBaseCyclesRemaining <= 0)
+                {
+                    _apuCh1ActiveBaseCyclesRemaining = 0;
+                    _memory.SetNr52Channel1Active(false);
+                }
+            }
+        }
+
+        public bool TrySwitchCgbSpeed()
+        {
+            if (!_memory.IsCgb || !_memory.Key1PrepareSpeedSwitch)
+            {
+                return false;
+            }
+
+            DoubleSpeed = !DoubleSpeed;
+            _memory.ClearKey1SpeedSwitchPrepare();
+            _memory.RefreshKey1();
+            return true;
+        }
+
         public byte[] GetDisplayArray()
         {
             return _ppu.Screen.GetBuffer();
         }
 
-        private void HandleInterrupts()
+        private bool HandleInterrupts()
         {
-            if (InterruptMasterEnabled)
+            if (!InterruptMasterEnabled)
             {
-                if (_memory.IFVBlank && _memory.IEVBlank)
-                {
-                    _memory.IFVBlank = false;
-                    InterruptMasterEnabled = false;
-                    _memory.WriteByte(--SP, (byte)(PC >> 8));
-                    _memory.WriteByte(--SP, (byte)(PC & 0xFF));
-                    PC = 0x40;
-                }
-                else if (_memory.IFLCDStat && _memory.IELCDStat)
-                {
-                    _memory.IFLCDStat = false;
-                    InterruptMasterEnabled = false;
-                    _memory.WriteByte(--SP, (byte)(PC >> 8));
-                    _memory.WriteByte(--SP, (byte)(PC & 0xFF));
-                    PC = 0x48;
-                }
-                else if (_memory.IFTimer && _memory.IETimer)
-                {
-                    _memory.IFTimer = false;
-                    InterruptMasterEnabled = false;
-                    _memory.WriteByte(--SP, (byte)(PC >> 8));
-                    _memory.WriteByte(--SP, (byte)(PC & 0xFF));
-                    PC = 0x50;
-                }
-                else if (_memory.IFSerial && _memory.IESerial)
-                {
-                    _memory.IFSerial = false;
-                    InterruptMasterEnabled = false;
-                    _memory.WriteByte(--SP, (byte)(PC >> 8));
-                    _memory.WriteByte(--SP, (byte)(PC & 0xFF));
-                    PC = 0x58;
-                }
-                else if (_memory.IFJoypad && _memory.IEJoypad)
-                {
-                    _memory.IFJoypad = false;
-                    InterruptMasterEnabled = false;
-                    _memory.WriteByte(--SP, (byte)(PC >> 8));
-                    _memory.WriteByte(--SP, (byte)(PC & 0xFF));
-                    PC = 0x60;
-                }
+                return false;
+            }
+
+            if (_memory.IFVBlank && _memory.IEVBlank)
+            {
+                _memory.IFVBlank = false;
+                InterruptMasterEnabled = false;
+                _imeEnableDelayInstructions = 0;
+                _memory.WriteByte(--SP, (byte)(PC >> 8));
+                _memory.WriteByte(--SP, (byte)(PC & 0xFF));
+                PC = 0x40;
+                return true;
+            }
+            if (_memory.IFLCDStat && _memory.IELCDStat)
+            {
+                _memory.IFLCDStat = false;
+                InterruptMasterEnabled = false;
+                _imeEnableDelayInstructions = 0;
+                _memory.WriteByte(--SP, (byte)(PC >> 8));
+                _memory.WriteByte(--SP, (byte)(PC & 0xFF));
+                PC = 0x48;
+                return true;
+            }
+            if (_memory.IFTimer && _memory.IETimer)
+            {
+                _memory.IFTimer = false;
+                InterruptMasterEnabled = false;
+                _imeEnableDelayInstructions = 0;
+                _memory.WriteByte(--SP, (byte)(PC >> 8));
+                _memory.WriteByte(--SP, (byte)(PC & 0xFF));
+                PC = 0x50;
+                return true;
+            }
+            if (_memory.IFSerial && _memory.IESerial)
+            {
+                _memory.IFSerial = false;
+                InterruptMasterEnabled = false;
+                _imeEnableDelayInstructions = 0;
+                _memory.WriteByte(--SP, (byte)(PC >> 8));
+                _memory.WriteByte(--SP, (byte)(PC & 0xFF));
+                PC = 0x58;
+                return true;
+            }
+            if (_memory.IFJoypad && _memory.IEJoypad)
+            {
+                _memory.IFJoypad = false;
+                InterruptMasterEnabled = false;
+                _imeEnableDelayInstructions = 0;
+                _memory.WriteByte(--SP, (byte)(PC >> 8));
+                _memory.WriteByte(--SP, (byte)(PC & 0xFF));
+                PC = 0x60;
+                return true;
+            }
+
+            return false;
+        }
+
+        public void ScheduleEnableInterrupts()
+        {
+            // EI enables IME after the *following* instruction executes.
+            // Implemented as a 2-instruction delay so the decrement at end-of-instruction doesn't enable immediately.
+            _imeEnableDelayInstructions = 2;
+        }
+
+        public void DisableInterruptsImmediate()
+        {
+            InterruptMasterEnabled = false;
+            _imeEnableDelayInstructions = 0;
+        }
+
+        public void EnableInterruptsImmediate()
+        {
+            InterruptMasterEnabled = true;
+            _imeEnableDelayInstructions = 0;
+        }
+
+        private void AdvanceImeDelayAfterInstruction()
+        {
+            if (_imeEnableDelayInstructions <= 0)
+            {
+                return;
+            }
+
+            _imeEnableDelayInstructions--;
+            if (_imeEnableDelayInstructions == 0)
+            {
+                InterruptMasterEnabled = true;
             }
         }
 
@@ -310,6 +449,11 @@ namespace GBOG.CPU
                 3 => 256,
                 _ => throw new Exception("Invalid clock frequency")
             };
+            _mClockCount = _timerPeriod;
+        }
+
+        public void ResetTimerCounter()
+        {
             _mClockCount = _timerPeriod;
         }
 
@@ -787,6 +931,19 @@ namespace GBOG.CPU
             // Create a buffer to hold the contents
             // Read the file into the buffer
             _memory.InitialiseGame(rom);
+
+            // Set post-boot register state for DMG vs CGB so test ROMs that check the boot identifier work.
+            // Many blargg ROMs use A's bit 4 to identify CGB.
+            DoubleSpeed = false;
+            if (_memory.IsCgb)
+            {
+                A = 0x11;
+            }
+            else
+            {
+                A = 0x01;
+            }
+            _memory.RefreshKey1();
         }
 
         public async Task<bool> RunGame()
@@ -800,7 +957,7 @@ namespace GBOG.CPU
             _exit = true;
         }
 
-        public event EventHandler<string> LogAdded;
+        public event EventHandler<string>? LogAdded;
         private void LogSystemState()
         {
 

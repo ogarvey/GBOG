@@ -26,7 +26,7 @@ namespace GBOG.Graphics
 			OAM = new byte[0xA0];
 			Screen = new Screen();
 			Scanline = 0;
-			_scanlineCounter = 0;
+			_scanlineCounter = 456;
 		}
 
 		// Methods
@@ -46,14 +46,13 @@ namespace GBOG.Graphics
 		// Steps the GPU a given number of cycles, performing rendering tasks.
 		public void Step(int cycles)
 		{
+			_scanlineCounter -= cycles;
+			SetLCDStatus();
+
 			if (!_gb._memory.LCDEnabled)
 			{
 				return;
 			}
-			
-			_scanlineCounter -= cycles;
-
-			SetLCDStatus();
 
 			if (_scanlineCounter <= 0)
 			{
@@ -401,8 +400,8 @@ namespace GBOG.Graphics
 				Screen.Clear(Color.Black);
 				_scanlineCounter = 456;
 				_gb._memory.LY = 0;
-				lcdStatus &= 0b1111_1100;
-				lcdStatus |= 0b01;
+				// When LCD is off, STAT mode is 0 (HBlank) and coincidence is cleared.
+				lcdStatus &= 0b1111_1000;
 				_gb._memory.LCDStatus = lcdStatus;
 				return;
 			}
@@ -415,20 +414,20 @@ namespace GBOG.Graphics
 			if (Scanline >= 144)
 			{
 				mode = (int)GraphicsMode.Mode1_VBlank;
-				lcdStatus &= 0b1111_1100;
+				lcdStatus = (byte)((lcdStatus & 0b1111_1100) | mode);
 				reqInt = lcdStatus.TestBit(4);
 				WindowScanline = 0;
 			}
 			else if (_scanlineCounter >= _lcdMode2Bounds)
 			{
 				mode = (int)GraphicsMode.Mode2_OAMRead;
-				lcdStatus &= 0b1111_1100;
+				lcdStatus = (byte)((lcdStatus & 0b1111_1100) | mode);
 				reqInt = lcdStatus.TestBit(5);
 			}
 			else if (_scanlineCounter >= _lcdMode3Bounds)
 			{
 				mode = (int)GraphicsMode.Mode3_VRAMReadWrite;
-				lcdStatus |= 0b11;
+				lcdStatus = (byte)((lcdStatus & 0b1111_1100) | mode);
 				if (mode != currentMode)
 				{
 					RenderScanline();
@@ -437,7 +436,7 @@ namespace GBOG.Graphics
 			else
 			{
 				mode = (int)GraphicsMode.Mode0_HBlank;
-				lcdStatus &= 0b1111_1100;
+				lcdStatus = (byte)((lcdStatus & 0b1111_1100) | mode);
 				reqInt = lcdStatus.TestBit(3);
 			}
 
