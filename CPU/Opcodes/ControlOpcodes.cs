@@ -21,7 +21,6 @@
 			{0x18, new GBOpcode(0x18, "JR {0:x2}", 2, 12, new Step[] {
 				(Gameboy gb) => {
 					value = gb._memory.ReadSByte(gb.PC);
-					if (value > 127) value =-((~value + 1) & 0xFF);
 					return true;
 				},
 				(Gameboy gb) => {
@@ -29,14 +28,13 @@
 					return true;
 				},
 				(Gameboy gb) => {
-					gb.PC += (ushort)value;
+					gb.PC = (ushort)(gb.PC + value);
 					return true;
 				}
 			})},
 			{0x20, new GBOpcode(0x20, "JR NZ, {0:x2}", 2, 12, new Step[] {
 				(Gameboy gb) => {
 					value = gb._memory.ReadSByte(gb.PC);
-					if (value > 127) value =-((~value + 1) & 0xFF);
 					return true;
 				},
 				(Gameboy gb) => {
@@ -45,7 +43,7 @@
 				},
 				(Gameboy gb) => {
 					if (!gb.Z) {
-						gb.PC += (ushort)value;
+						gb.PC = (ushort)(gb.PC + value);
 						return true;
 					}
 					return false;
@@ -62,7 +60,7 @@
 				},
 				(Gameboy gb) => {
 					if (gb.Z) {
-						gb.PC += (ushort)value;
+						gb.PC = (ushort)(gb.PC + value);
 						return true;
 					}
 					else
@@ -82,7 +80,7 @@
 				},
 				(Gameboy gb) => {
 					if (!gb.CF) {
-						gb.PC += (ushort)value;
+						gb.PC = (ushort)(gb.PC + value);
 						return true;
 					}
 					else
@@ -102,7 +100,7 @@
 				},
 				(Gameboy gb) => {
 					if (gb.CF) {
-						gb.PC += (ushort)value;
+						gb.PC = (ushort)(gb.PC + value);
 						return true;
 					}
 					else
@@ -619,7 +617,7 @@
 				},
 				(Gameboy gb) => {
 					gb._memory.WriteUShort(gb.SP, gb.PC);
-					return true;
+				 return true;
 				},
 				(Gameboy gb) => {
 					gb.PC = 0x30;

@@ -116,14 +116,18 @@
 					return true;
 				},
 			})},
-      {0x36, new GBOpcode(0x36, "LD (HL),u8",2,12,new Step[] {
+      {0x36, new GBOpcode(0x36, "LD (HL),u8",3,12,new Step[] {
 				(Gameboy gb) => {
+					value = gb.PC++;
 					return true;
 				},
 				(Gameboy gb) => {
-					value = gb._memory.ReadByte(gb.PC++);
-					gb._memory.WriteByte(gb.HL, (byte)value);
+					value = gb._memory.ReadByte((ushort)value);
 					return true;
+				},
+				(Gameboy gb) => {
+					gb._memory.WriteByte(gb.HL, (byte)value);
+					return false;
 				},
 			})},
       {0x3A, new GBOpcode(0x3A, "LD A,(HL-)",1,8,new Step[] {
@@ -456,10 +460,11 @@
 					return true;
 				},
 			})},
-      {0x71, new GBOpcode(0x71, "LD (HL),C",1,8,new Step[] {
+      {0x71, new GBOpcode(0x71, "LD (HL),C",2,8,new Step[] {
 				(Gameboy gb) => {
-					gb._memory.WriteByte(gb.HL, gb.C);
-					return true;
+					value = gb.C;
+					gb._memory.WriteByte(gb.HL, (byte)value);
+					return false;
 				},
 			})},
       {0x72, new GBOpcode(0x72, "LD (HL),D",1,8,new Step[] {
@@ -470,8 +475,9 @@
 			})},
       {0x73, new GBOpcode(0x73, "LD (HL),E",1,8,new Step[] {
 				(Gameboy gb) => {
-					gb._memory.WriteByte(gb.HL, gb.E);
-					return true;
+					value = gb.E;
+					gb._memory.WriteByte(gb.HL, (byte)value);
+					return false;
 				},
 			})},
       {0x74, new GBOpcode(0x74, "LD (HL),H",1,8,new Step[] {

@@ -1,0 +1,675 @@
+﻿
+using Hexa.NET.GLFW;
+using Hexa.NET.ImGui;
+using Hexa.NET.ImGui.Backends.GLFW;
+using Hexa.NET.ImGui.Backends.OpenGL3;
+using Hexa.NET.OpenGL;
+using HexaGen.Runtime;
+using System.Runtime.CompilerServices;
+using GLFWmonitorPtr = Hexa.NET.GLFW.GLFWmonitorPtr;
+using GLFWwindowPtr = Hexa.NET.GLFW.GLFWwindowPtr;
+using Hexa.NET.ImGui.Widgets;
+
+NativeCallback<GLFWerrorfun> error;
+unsafe
+{
+    error = new(static (errorCode, desciption) =>
+    {
+        Console.WriteLine(Utils.DecodeStringUTF8(desciption));
+    });
+    GLFW.SetErrorCallback(error);
+}
+
+GLFW.Init();
+string glslVersion = "#version 150";
+GLFW.WindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, 3);
+GLFW.WindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, 2);
+GLFW.WindowHint(GLFW.GLFW_OPENGL_PROFILE, GLFW.GLFW_OPENGL_CORE_PROFILE);  // 3.2+ only
+
+var mon = GLFW.GetPrimaryMonitor();
+float mainScale = ImGuiImplGLFW.GetContentScaleForMonitor(Unsafe.BitCast<GLFWmonitorPtr, Hexa.NET.ImGui.Backends.GLFW.GLFWmonitorPtr>(mon));
+GLFWwindowPtr window = GLFW.CreateWindow((int)(1280 * mainScale), (int)(800 * mainScale), "GLFW Example", null, null);
+if (window.IsNull)
+{
+    Console.WriteLine("Failed to create GLFW window.");
+    GLFW.Terminate();
+    return;
+}
+
+GLFW.MakeContextCurrent(window);
+
+var guiContext = ImGui.CreateContext();
+ImGui.SetCurrentContext(guiContext);
+
+// Setup ImGui config.
+var io = ImGui.GetIO();
+io.ConfigFlags |= ImGuiConfigFlags.NavEnableKeyboard;     // Enable Keyboard Controls
+io.ConfigFlags |= ImGuiConfigFlags.NavEnableGamepad;      // Enable Gamepad Controls
+io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;         // Enable Docking
+io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;       // Enable Multi-Viewport / Platform Windows
+
+ImGui.StyleColorsDark();
+var style = ImGui.GetStyle();
+style.ScaleAllSizes(mainScale);
+style.FontScaleDpi = mainScale;
+io.ConfigDpiScaleFonts = true;
+io.ConfigDpiScaleViewports = true;
+
+// Load fonts
+float fontScale = 1.0f;
+bool fontsNeedReload = false;
+float pendingFontScale = 1.0f;
+var baseFontSize = (13.0f * mainScale) * fontScale;
+unsafe
+{
+    // Load default font
+    var fontConfig = ImGui.ImFontConfig();
+    fontConfig.FontDataOwnedByAtlas = true;
+    fontConfig.RasterizerDensity = 1.0f;
+    fontConfig.RasterizerMultiply = 1.0f;
+    fontConfig.FontDataOwnedByAtlas = true;
+    fontConfig.GlyphMaxAdvanceX = float.MaxValue;
+    fontConfig.PixelSnapV = true;
+    fontConfig.SizePixels = baseFontSize;
+
+    var defaultFont = io.Fonts.AddFontDefault(fontConfig);
+
+    // Load icon font and merge with default
+    var iconFontPath = Path.Combine(AppContext.BaseDirectory, "Assets", "MaterialSymbolsRounded.ttf");
+    if (File.Exists(iconFontPath))
+    {
+        var iconConfig = ImGui.ImFontConfig();
+        iconConfig.FontDataOwnedByAtlas = true;
+        iconConfig.RasterizerDensity = 1.0f;
+        iconConfig.RasterizerMultiply = 1.0f;
+        iconConfig.GlyphMinAdvanceX = baseFontSize * 3.0f / 4.0f;
+        iconConfig.GlyphMaxAdvanceX = float.MaxValue;
+        iconConfig.MergeMode = true;
+        iconConfig.PixelSnapV = true;
+        iconConfig.SizePixels = baseFontSize * 3.0f / 4.0f;
+
+        // Define the glyph range for Material Symbols (covers most common icons)
+        ushort* glyphRanges = stackalloc ushort[] { 0xe000, 0xf8ff, 0 };
+
+        var pathBytes = System.Text.Encoding.UTF8.GetBytes(iconFontPath + "\0");
+        fixed (byte* pathPtr = pathBytes)
+        {
+            io.Fonts.AddFontFromFileTTF(pathPtr, baseFontSize * 3.0f / 4.0f, iconConfig, (uint*)(void*)glyphRanges);
+        }
+
+        Console.WriteLine("Icon font loaded successfully");
+    }
+    else
+    {
+        Console.WriteLine($"Warning: Icon font not found at {iconFontPath}");
+    }
+}
+
+void ReloadFonts(float scale)
+{
+    pendingFontScale = scale;
+    fontsNeedReload = true;
+}
+
+void ApplyFontReload()
+{
+    io.Fonts.Clear();
+    baseFontSize = (13.0f * mainScale) * pendingFontScale;
+    unsafe
+    {
+
+        // Load default font
+        var fontConfig = ImGui.ImFontConfig();
+        fontConfig.FontDataOwnedByAtlas = true;
+        fontConfig.RasterizerDensity = 1.0f;
+        fontConfig.RasterizerMultiply = 1.0f;
+        fontConfig.GlyphMaxAdvanceX = float.MaxValue;
+        fontConfig.PixelSnapV = true;
+        fontConfig.SizePixels = baseFontSize;
+        io.Fonts.AddFontDefault(fontConfig);
+
+        // Load icon font and merge with default
+        var iconFontPath = Path.Combine(AppContext.BaseDirectory, "Assets", "MaterialSymbolsRounded.ttf");
+        if (File.Exists(iconFontPath))
+        {
+            var iconConfig = ImGui.ImFontConfig();
+            iconConfig.FontDataOwnedByAtlas = true;
+            iconConfig.RasterizerDensity = 1.0f;
+            iconConfig.RasterizerMultiply = 1.0f;
+            iconConfig.GlyphMinAdvanceX = baseFontSize * 3.0f / 4.0f;
+            iconConfig.GlyphMaxAdvanceX = float.MaxValue;
+            iconConfig.MergeMode = true;
+            iconConfig.PixelSnapV = true;
+
+            ushort* glyphRanges = stackalloc ushort[] { 0xe000, 0xf8ff, 0 };
+
+            var pathBytes = System.Text.Encoding.UTF8.GetBytes(iconFontPath + "\0");
+            fixed (byte* pathPtr = pathBytes)
+            {
+                io.Fonts.AddFontFromFileTTF(pathPtr, baseFontSize * 3.0f / 4.0f, iconConfig, (uint*)(void*)glyphRanges);
+            }
+        }
+    }
+
+    fontScale = pendingFontScale;
+    fontsNeedReload = false;
+}
+
+if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
+{
+    style.WindowRounding = 0.0f;
+    style.Colors[(int)ImGuiCol.WindowBg].W = 1.0f;
+}
+
+ImGuiImplGLFW.SetCurrentContext(guiContext);
+
+if (!ImGuiImplGLFW.InitForOpenGL(Unsafe.BitCast<GLFWwindowPtr, Hexa.NET.ImGui.Backends.GLFW.GLFWwindowPtr>(window), true))
+{
+    Console.WriteLine("Failed to init ImGui Impl GLFW");
+    GLFW.Terminate();
+    return;
+}
+
+ImGuiImplOpenGL3.SetCurrentContext(guiContext);
+if (!ImGuiImplOpenGL3.Init(glslVersion))
+{
+    Console.WriteLine("Failed to init ImGui Impl OpenGL3");
+    GLFW.Terminate();
+    return;
+}
+
+GL GL = new(new BindingsContext(window));
+
+// Initialize ImGuiTexInspect RenderState
+if (!GBOG.ImGuiTexInspect.Backend.OpenGL.RenderState.Initialize(GL, glslVersion))
+{
+    Console.WriteLine("Failed to init ImGuiTexInspect RenderState");
+    GLFW.Terminate();
+    return;
+}
+
+// Load application settings
+var appSettings = AppSettings.Load();
+
+// Initialize format manager
+var formatManager = new FormatManager();
+FormatRegistration.RegisterAll(formatManager);
+
+// Initialize window manager and create windows
+var windowManager = new WindowManager();
+var formatGraphWindow = new FormatGraphWindow();
+windowManager.RegisterWindow("formatGraphEditor", formatGraphWindow);
+formatGraphWindow.IsOpen = true;
+
+// Store dockspace ID for use when creating new windows
+uint mainDockspaceId = 0;
+uint leftDockId = 0;
+uint rightDockId = 0;
+bool dockspaceInitialized = false;
+
+// Create and register the file explorer
+var fileExplorer = new FileExplorer("File Explorer", appSettings.LastFileExplorerPath);
+fileExplorer.SetAppSettings(appSettings);
+windowManager.RegisterWindow("fileExplorer", fileExplorer);
+
+// Setup file type handlers 
+var fileTypeHandler = new FileTypeHandler();
+
+// Standard image formats
+string[] imageExtensions = { "png", "jpg", "jpeg", "bmp", "gif", "tga" };
+fileTypeHandler.RegisterCategory("Images", imageExtensions);
+fileTypeHandler.RegisterHandlerForExtensions(imageExtensions, filePath =>
+{
+    // Check if file is already open
+    if (windowManager.TryFocusExistingFile(filePath, typeof(ImageViewer)))
+    {
+        Console.WriteLine($"File already open, focusing existing window: {filePath}");
+        return;
+    }
+
+    // Create a new ImageViewer instance for standard images
+    var newViewer = new ImageViewer(Path.GetFileName(filePath), GL, formatManager);
+    if (newViewer.LoadFromFile(filePath))
+    {
+        newViewer.SetInitialDock(rightDockId, ImGuiDir.None); // Dock to right side
+        var viewerId = windowManager.RegisterWindowWithAutoId("imageViewer", newViewer);
+        windowManager.RegisterFilePath(viewerId, filePath);
+        newViewer.IsOpen = true;
+        Console.WriteLine($"Opened image in new viewer ({viewerId}): {filePath}");
+    }
+});
+
+string[] rawExtensions = { "dat", "bin", "raw", "pal", "spr", "pcx", "lbm", "iff" };
+fileTypeHandler.RegisterCategory("Raw/Binary", rawExtensions);
+fileTypeHandler.RegisterHandlerForExtensions(rawExtensions, filePath =>
+{
+    // Check if file is already open
+    if (windowManager.TryFocusExistingFile(filePath, typeof(ImageViewer)))
+    {
+        Console.WriteLine($"File already open, focusing existing window: {filePath}");
+        return;
+    }
+
+    var newViewer = new ImageViewer(Path.GetFileName(filePath), GL, formatManager);
+    newViewer.ShowFormatSelector = true;
+    newViewer.LoadRawFileData(File.ReadAllBytes(filePath));
+    newViewer.ImagePath = filePath;
+    newViewer.SetInitialDock(rightDockId, ImGuiDir.None);
+
+    var viewerId = windowManager.RegisterWindowWithAutoId("imageViewer", newViewer);
+    windowManager.RegisterFilePath(viewerId, filePath);
+    newViewer.IsOpen = true;
+    Console.WriteLine($"Opened raw file in viewer ({viewerId}): {filePath}");
+});
+
+// IMG archive files (AniMagic DOS games)
+string[] imgExtensions = { "img" };
+fileTypeHandler.RegisterCategory("IMG Archives", imgExtensions);
+fileTypeHandler.RegisterHandlerForExtensions(imgExtensions, filePath =>
+{
+    // Check if file is already open
+    if (windowManager.TryFocusExistingFile(filePath, typeof(ImageViewer)))
+    {
+        Console.WriteLine($"File already open, focusing existing window: {filePath}");
+        return;
+    }
+
+    // IMG files are automatically detected and opened in archive mode
+    var imgViewer = new ImageViewer($"{Path.GetFileName(filePath)} (IMG Archive)", GL, formatManager);
+    if (imgViewer.LoadFromFile(filePath))
+    {
+        imgViewer.SetInitialDock(rightDockId, ImGuiDir.None);
+        var viewerId = windowManager.RegisterWindowWithAutoId("imageViewer", imgViewer);
+        windowManager.RegisterFilePath(viewerId, filePath);
+        imgViewer.IsOpen = true;
+        Console.WriteLine($"Opened IMG archive in viewer ({viewerId}): {filePath}");
+    }
+});
+
+fileExplorer.FileDoubleClicked += filePath =>
+{
+    if (fileTypeHandler.CanHandle(filePath))
+    {
+        fileTypeHandler.TryHandle(filePath);
+    }
+    else
+    {
+        Console.WriteLine($"No handler for file type: {Path.GetExtension(filePath)}");
+    }
+};
+
+fileExplorer.FileOpenWith += (filePath, viewerType) =>
+{
+    switch (viewerType)
+    {
+        case "ImageViewer":
+            // Check if file is already open
+            if (windowManager.TryFocusExistingFile(filePath, typeof(ImageViewer)))
+            {
+                Console.WriteLine($"File already open, focusing existing window: {filePath}");
+                break;
+            }
+
+            var newViewer = new ImageViewer(Path.GetFileName(filePath), GL, formatManager);
+
+            // Try to load as standard image first
+            bool loadedAsImage = newViewer.LoadFromFile(filePath);
+
+            if (!loadedAsImage)
+            {
+                // If standard loading failed, treat as raw file
+                try
+                {
+                    newViewer.ShowFormatSelector = true;
+                    newViewer.LoadRawFileData(File.ReadAllBytes(filePath));
+                    newViewer.ImagePath = filePath;
+                    loadedAsImage = true; // Mark as loaded for raw processing
+                    Console.WriteLine($"Loaded as raw file: {filePath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to read file: {ex.Message}");
+                    loadedAsImage = false;
+                }
+            }
+
+            if (loadedAsImage)
+            {
+                newViewer.SetInitialDock(rightDockId, ImGuiDir.None); // Dock to right side
+                var viewerId = windowManager.RegisterWindowWithAutoId("imageViewer", newViewer);
+                windowManager.RegisterFilePath(viewerId, filePath);
+                newViewer.IsOpen = true;
+                Console.WriteLine($"Opened file with ImageViewer ({viewerId}): {filePath}");
+            }
+            else
+            {
+                Console.WriteLine($"Failed to open file: {filePath}");
+            }
+            break;
+
+        case "ImageViewer_Raw":
+            // Check if file is already open
+            if (windowManager.TryFocusExistingFile(filePath, typeof(ImageViewer)))
+            {
+                Console.WriteLine($"File already open, focusing existing window: {filePath}");
+                break;
+            }
+
+            // Explicitly open as raw file with format selector
+            try
+            {
+                var rawViewer = new ImageViewer(Path.GetFileName(filePath), GL, formatManager);
+                rawViewer.ShowFormatSelector = true;
+                rawViewer.LoadRawFileData(File.ReadAllBytes(filePath));
+                rawViewer.ImagePath = filePath;
+                rawViewer.SetInitialDock(rightDockId, ImGuiDir.None); // Dock to right side
+
+                var viewerId = windowManager.RegisterWindowWithAutoId("imageViewer", rawViewer);
+                windowManager.RegisterFilePath(viewerId, filePath);
+                rawViewer.IsOpen = true;
+                Console.WriteLine($"Opened as raw file ({viewerId}): {filePath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to open raw file: {ex.Message}");
+            }
+            break;
+
+        case "ImageViewer_ImgArchive":
+            // Check if file is already open
+            if (windowManager.TryFocusExistingFile(filePath, typeof(ImageViewer)))
+            {
+                Console.WriteLine($"File already open, focusing existing window: {filePath}");
+                break;
+            }
+
+            // Open as IMG Archive with specialized viewer
+            try
+            {
+                var imgArchiveViewer = new ImageViewer($"{Path.GetFileName(filePath)} (IMG Archive)", GL, formatManager);
+
+                // LoadFromFile will detect .img extension and enable archive mode automatically
+                if (imgArchiveViewer.LoadFromFile(filePath))
+                {
+                    imgArchiveViewer.SetInitialDock(rightDockId, ImGuiDir.None);
+                    var viewerId = windowManager.RegisterWindowWithAutoId("imageViewer", imgArchiveViewer);
+                    windowManager.RegisterFilePath(viewerId, filePath);
+                    imgArchiveViewer.IsOpen = true;
+                    Console.WriteLine($"Opened as IMG Archive ({viewerId}): {filePath}");
+                }
+                else
+                {
+                    Console.WriteLine($"Failed to load IMG archive: {filePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to open IMG archive: {ex.Message}");
+            }
+            break;
+
+        case "HexViewer":
+            // Check if file is already open
+            if (windowManager.TryFocusExistingFile(filePath, typeof(HexViewer)))
+            {
+                Console.WriteLine($"File already open, focusing existing window: {filePath}");
+                break;
+            }
+
+            // Open file in hex viewer
+            try
+            {
+                var hexViewer = new HexViewer();
+                hexViewer.LoadFile(filePath);
+                hexViewer.Title = $"Hex Viewer - {Path.GetFileName(filePath)}";
+                hexViewer.SetInitialDock(rightDockId, ImGuiDir.None); // Dock to right side
+
+                var viewerId = windowManager.RegisterWindowWithAutoId("hexViewer", hexViewer);
+                windowManager.RegisterFilePath(viewerId, filePath);
+                hexViewer.IsOpen = true;
+                Console.WriteLine($"Opened in HexViewer ({viewerId}): {filePath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to open file in HexViewer: {ex.Message}");
+            }
+            break;
+
+        case "ArchiveViewer":
+            // Check if file is already open
+            if (windowManager.TryFocusExistingFile(filePath, typeof(ArchiveViewer)))
+            {
+                Console.WriteLine($"File already open, focusing existing window: {filePath}");
+                break;
+            }
+
+            // Open file in archive viewer
+            try
+            {
+                var archiveViewer = new ArchiveViewer(formatManager, windowManager, GL, rightDockId);
+                archiveViewer.LoadArchive(filePath);
+                archiveViewer.SetInitialDock(rightDockId, ImGuiDir.None); // Dock to right side
+
+                var viewerId = windowManager.RegisterWindowWithAutoId("archiveViewer", archiveViewer);
+                windowManager.RegisterFilePath(viewerId, filePath);
+                archiveViewer.IsOpen = true;
+                Console.WriteLine($"Opened in ArchiveViewer ({viewerId}): {filePath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to open file in ArchiveViewer: {ex.Message}");
+            }
+            break;
+
+        // Add more viewer types here as they are implemented
+        default:
+            Console.WriteLine($"Unknown viewer type: {viewerType}");
+            break;
+    }
+};
+
+while (GLFW.WindowShouldClose(window) == 0)
+{
+    GLFW.PollEvents();
+
+    if (GLFW.GetWindowAttrib(window, GLFW.GLFW_ICONIFIED) != 0)
+    {
+        ImGuiImplGLFW.Sleep(10);
+        continue;
+    }
+
+    if (fontsNeedReload)
+    {
+        ApplyFontReload();
+    }
+
+    GLFW.MakeContextCurrent(window);
+    GL.ClearColor(0, 0, 0, 1);
+    GL.Clear(GLClearBufferMask.ColorBufferBit);
+
+    ImGuiImplOpenGL3.NewFrame();
+    ImGuiImplGLFW.NewFrame();
+    ImGui.NewFrame();
+
+    var dockspaceId = ImGui.GetID("MyDockSpace");
+    mainDockspaceId = dockspaceId;
+    var viewport = ImGui.GetMainViewport();
+
+    if (!dockspaceInitialized || ImGuiP.DockBuilderGetNode(dockspaceId).IsNull)
+    {
+        // Clear any existing layout
+        ImGuiP.DockBuilderRemoveNode(dockspaceId);
+
+        // Create new dockspace
+        ImGuiP.DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags.None);
+        ImGuiP.DockBuilderSetNodeSize(dockspaceId, viewport.Size);
+
+        // Split the dockspace: left side for file explorer (25% width), right side for content (75% width)
+        unsafe
+        {
+            uint tempLeft = 0, tempRight = 0;
+            ImGuiP.DockBuilderSplitNode(dockspaceId, ImGuiDir.Left, 0.25f, &tempLeft, &tempRight);
+            leftDockId = tempLeft;
+            rightDockId = tempRight;
+        }
+
+        // Finish the dockspace setup
+        ImGuiP.DockBuilderFinish(dockspaceId);
+        dockspaceInitialized = true;
+
+        Console.WriteLine($"Dockspace initialized: main={dockspaceId}, left={leftDockId}, right={rightDockId}");
+    }
+
+    ImGui.DockSpaceOverViewport(dockspaceId, viewport, ImGuiDockNodeFlags.PassthruCentralNode);
+
+    fileExplorer.SetInitialDock(leftDockId, ImGuiDir.None);
+    formatGraphWindow.SetInitialDock(rightDockId, ImGuiDir.None);
+
+    if (ImGui.BeginMainMenuBar())
+    {
+        if (ImGui.BeginMenu("File"))
+        {
+            if (ImGui.MenuItem("Exit"))
+            {
+                GLFW.SetWindowShouldClose(window, 1);
+            }
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("View"))
+        {
+            if (ImGui.MenuItem("Increase Font Size", "Ctrl++"))
+            {
+                fontScale = Math.Min(fontScale + 0.1f, 3.0f);
+                ReloadFonts(fontScale);
+            }
+
+            if (ImGui.MenuItem("Decrease Font Size", "Ctrl+-"))
+            {
+                fontScale = Math.Max(fontScale - 0.1f, 0.5f);
+                ReloadFonts(fontScale);
+            }
+
+            if (ImGui.MenuItem("Reset Font Size", "Ctrl+0"))
+            {
+                fontScale = 1.0f;
+                ReloadFonts(fontScale);
+            }
+
+            ImGui.Separator();
+            ImGui.Text($"Current Scale: {fontScale:F1}x");
+
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("Windows"))
+        {
+            foreach (var windowId in windowManager.GetWindowIds())
+            {
+                var win = windowManager.GetWindow(windowId);
+                if (win != null)
+                {
+                    bool isOpen = win.IsOpen;
+                    if (ImGui.MenuItem(win.Title, (string?)null, ref isOpen))
+                    {
+                        windowManager.ToggleWindow(windowId);
+                    }
+                }
+            }
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("Help"))
+        {
+            if (ImGui.MenuItem("About"))
+            {
+                // Future: Show about dialog
+            }
+            ImGui.EndMenu();
+        }
+
+        ImGui.EndMainMenuBar();
+    }
+
+    // Render all windows
+    windowManager.DrawAll();
+
+    WidgetManager.Draw();
+    ImGui.Render();
+
+    GLFW.MakeContextCurrent(window);
+    ImGuiImplOpenGL3.RenderDrawData(ImGui.GetDrawData());
+
+    if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
+    {
+        ImGui.UpdatePlatformWindows();
+        ImGui.RenderPlatformWindowsDefault();
+    }
+
+    GLFW.MakeContextCurrent(window);
+
+    // Swap front and back buffers (double buffering)
+    GLFW.SwapBuffers(window);
+}
+
+GBOG.ImGuiTexInspect.Backend.OpenGL.RenderState.Shutdown();
+ImGuiImplOpenGL3.Shutdown();
+ImGuiImplOpenGL3.SetCurrentContext(null);
+ImGuiImplGLFW.Shutdown();
+ImGuiImplGLFW.SetCurrentContext(null);
+ImGui.DestroyContext();
+GL.Dispose();
+
+// Clean up and terminate GLFW
+GLFW.DestroyWindow(window);
+GLFW.Terminate();
+
+
+internal unsafe class BindingsContext : HexaGen.Runtime.IGLContext
+{
+    private GLFWwindowPtr window;
+
+    public BindingsContext(GLFWwindowPtr window)
+    {
+        this.window = window;
+    }
+
+    public nint Handle => (nint)window.Handle;
+
+    public bool IsCurrent => GLFW.GetCurrentContext() == window;
+
+    public void Dispose()
+    {
+    }
+
+    public nint GetProcAddress(string procName)
+    {
+        return (nint)GLFW.GetProcAddress(procName);
+    }
+
+    public bool IsExtensionSupported(string extensionName)
+    {
+        return GLFW.ExtensionSupported(extensionName) != 0;
+    }
+
+    public void MakeCurrent()
+    {
+        GLFW.MakeContextCurrent(window);
+    }
+
+    public void SwapBuffers()
+    {
+        GLFW.SwapBuffers(window);
+    }
+
+    public void SwapInterval(int interval)
+    {
+        GLFW.SwapInterval(interval);
+    }
+
+    public bool TryGetProcAddress(string procName, out nint procAddress)
+    {
+        procAddress = (nint)GLFW.GetProcAddress(procName);
+        return procAddress != 0;
+    }
+}

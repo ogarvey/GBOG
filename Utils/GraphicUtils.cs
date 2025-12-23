@@ -1,10 +1,10 @@
-﻿using System;
+﻿using GBOG.CPU;
+using System;
 using System.Collections.Generic;
 using System.Drawing.Imaging;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 
 namespace GBOG.Utils
 {
@@ -61,20 +61,20 @@ namespace GBOG.Utils
 			return pixels;
 		}
 
-		internal static Bitmap CreateBitmapFromTileData(byte[] bytes)
-		{
-			// Tiles have already been processed so as to be an 8 * 8 array where each byte represents the pixel colour
-			// We need to convert this into a bitmap
-			Bitmap bitmap = new Bitmap(8, 8);
-			for (int i = 0; i < bytes.Length; i++)
-			{
-				byte color = bytes[i];
-				int x = i % 8;
-				int y = i / 8;
-				bitmap.SetPixel(x, y, GetColor(color));
-			}
-			return bitmap;
-		}
+		//internal static Bitmap CreateBitmapFromTileData(byte[] bytes)
+		//{
+		//	// Tiles have already been processed so as to be an 8 * 8 array where each byte represents the pixel colour
+		//	// We need to convert this into a bitmap
+		//	Bitmap bitmap = new Bitmap(8, 8);
+		//	for (int i = 0; i < bytes.Length; i++)
+		//	{
+		//		byte color = bytes[i];
+		//		int x = i % 8;
+		//		int y = i / 8;
+		//		bitmap.SetPixel(x, y, GetColor(color));
+		//	}
+		//	return bitmap;
+		//}
 		private static bool Diff(uint c1, uint c2, uint trY, uint trU, uint trV, uint trA)
 		{
 			int YUV1 = (int)RgbYuv.GetYuv(c1);
@@ -99,30 +99,8 @@ namespace GBOG.Utils
 				case 3:
 					return Color.Black;
 				default:
-					return Color.AliceBlue;
+					return Color.Fallback;
 			}
-		}
-		public static unsafe Bitmap Scale4(Bitmap bitmap, uint trY = 48, uint trU = 7, uint trV = 6, uint trA = 0, bool wrapX = false, bool wrapY = false)
-		{
-
-			int Xres = bitmap.Width;
-			int Yres = bitmap.Height;
-
-			var dest = new Bitmap(bitmap.Width * 4, bitmap.Height * 4);
-
-			var bmpData = bitmap.LockBits(new Rectangle(Point.Empty, bitmap.Size), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-			var destData = dest.LockBits(new Rectangle(Point.Empty, dest.Size), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-			{
-
-				uint* sp = (uint*)bmpData.Scan0.ToPointer();
-				uint* dp = (uint*)destData.Scan0.ToPointer();
-
-				Scale4(sp, dp, Xres, Yres, trY, trU, trV, trA, wrapX, wrapY);
-			}
-			bitmap.UnlockBits(bmpData);
-			dest.UnlockBits(destData);
-
-			return dest;
 		}
 
 		public static unsafe void Scale4(uint* sp, uint* dp, int Xres, int Yres, uint trY = 48, uint trU = 7, uint trV = 6, uint trA = 0, bool wrapX = false, bool wrapY = false)

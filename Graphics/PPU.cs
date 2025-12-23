@@ -1,6 +1,5 @@
 ﻿using GBOG.CPU;
 using GBOG.Utils;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 
 namespace GBOG.Graphics
 {
@@ -163,11 +162,11 @@ namespace GBOG.Graphics
 		{
 			return colorBits switch
 			{
-				0 => Color.FromArgb(255, 0x9B, 0xBC, 0x0F),
-				1 => Color.FromArgb(255, 0x8B, 0xAC, 0x0F),
-				2 => Color.FromArgb(255, 0x30, 0x62, 0x30),
-				3 => Color.FromArgb(255,0x0F, 0x38, 0x0F),
-				_ => Color.Aquamarine
+				0 => Color.White,
+				1 => Color.LightGray,
+				2 => Color.DarkGray,
+				3 => Color.Black,
+				_ => Color.Fallback
 			};
 		}
 

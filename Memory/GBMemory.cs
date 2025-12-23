@@ -1,5 +1,6 @@
 ﻿using GBOG.CPU;
 using GBOG.Utils;
+using Serilog;
 using Serilog.Core;
 using System;
 using System.Diagnostics;
@@ -1138,12 +1139,16 @@ namespace GBOG.Memory
 
 		public GBMemory(Gameboy gameBoy)
 		{
+			Log.Logger = new LoggerConfiguration()
+				.WriteTo.File("log.txt",
+				outputTemplate: "{Message:lj}{NewLine}{Exception}")
+				.CreateLogger();
 			_gameBoy = gameBoy;
 			_joyPadKeys = new bool[8];
 
 			//InitialiseBootROM();
 			InitialiseIORegisters();
-			_memory[0xFF44] = 0x90;
+			//_memory[0xFF44] = 0x90;
 		}
 
 		private void InitialiseBootROM()
@@ -1177,21 +1182,21 @@ namespace GBOG.Memory
 					// Reading from a memory address between $4000 and $7FFF, no matter what state the Mode Flag is in,
 					// always returns the byte at 0x4000 * HIGH_BANK_NUMBER + (ADDRESS - 0x4000) of the ROM file.
 					int bank = _currentRomBank;
-					
+
 					switch (_romBankCount)
 					{
 						case <= 32:
-							bank &= 0x1f;
+							bank &= 0b00011111;
 							break;
 						case <= 64:
-							bank &= 0x1f;
+							bank &= 0b00011111;
 							// Clear bit 5 of bank
 							bank &= ~(1 << 5);
 							// Set bit 5 of bank to the lower bit of currentRamBank
 							bank |= (_currentRamBank & 0x01) << 5;
 							break;
 						case <= 128:
-							bank &= 0x1f;
+							bank &= 0b00011111;
 							// Clear bits 5 and 6 of bank
 							bank &= ~((1 << 5) | (1 << 6));
 							// Set bits 5 and 6 of bank to the lower two bits of currentRamBank
@@ -1293,13 +1298,13 @@ namespace GBOG.Memory
 			{
 				_gameBoy._ppu.OAM[address - 0xFE00] = (byte)(value & 0xFF);
 				_gameBoy._ppu.OAM[address - 0xFE00 + 1] = (byte)((value & 0xFF00) >> 8);
-				_memory[address] = (byte)(value & 0xFF);
-				_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
+				WriteByte(address, (byte)(value & 0xFF));
+				WriteByte((ushort)(address + 1), (byte)((value & 0xFF00) >> 8));
 			}
 			else
 			{
-				_memory[address] = (byte)(value & 0xFF);
-				_memory[address + 1] = (byte)((value & 0xFF00) >> 8);
+				WriteByte(address,(byte)(value & 0xFF));
+				WriteByte((ushort)(address + 1), (byte)((value & 0xFF00) >> 8));
 			}
 		}
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1538,7 +1543,7 @@ namespace GBOG.Memory
 
 		private void HighRomBankSelect(ushort address, byte value)
 		{
-
+			Log.Information($"BEGIN HIGH BITS - Current ROM Bank: {_currentRomBank}");
 			if (value == 0)
 			{
 				_currentRomBank = 1;
@@ -1549,10 +1554,12 @@ namespace GBOG.Memory
 				if (_currentRomBank == 0)
 					_currentRomBank = 1;
 			}
+			Log.Information($"END HIGH BITS - Current ROM Bank: {_currentRomBank}");
 		}
 
 		private void LowRomBankSelect(ushort address, byte value)
 		{
+			Log.Information($"BEGIN - Current ROM Bank: {_currentRomBank}");
 			if (_mbc2)
 			{
 				_currentRomBank = (byte)(value & 0x0F);
@@ -1576,15 +1583,22 @@ namespace GBOG.Memory
 			}
 			else
 			{
-				if (value == 0)
+				byte lower5 = (byte)(value & 0x1F);
+
+				// Clear lower 5 bits
+				_currentRomBank &= 0xE0;
+
+				_currentRomBank |= lower5;
+
+				if (_currentRomBank == 0x00 || _currentRomBank == 0x20 || _currentRomBank == 0x40 || _currentRomBank == 0x60)
 				{
-					_currentRomBank = 1;
-					return;
+					_currentRomBank++;
 				}
-				var bank = _currentRomBank & 0b0110_0000;
-				bank |= (value & 0b00011111);
-				_currentRomBank = (byte)bank;			
+
+				// I think this is because unused bits are set to 1
+				_currentRomBank &= (byte)(_romBankCount - 1);
 			}
+			Log.Information($"END - Current ROM Bank: {_currentRomBank}");
 		}
 
 		private void RamBankEnable(ushort address, byte value)
@@ -1616,7 +1630,7 @@ namespace GBOG.Memory
 			_memory[0xFF04] = 0x00; // DIV
 
 			_memory[0xFF08] = 0xF8; // TAC
-			_memory[0xFF0F] = 0xE1; // IF
+			_memory[0xFF0F] = 0x01; // IF
 
 			// Sound 1
 			_memory[0xFF10] = 0x80; // ENT1
@@ -1754,18 +1768,6 @@ namespace GBOG.Memory
 					// 8MByte (512 banks)
 					_romBankSize = 0x800000;
 					_romBankCount = 512;
-					break;
-				case 0x52:
-					// 1.1MByte (72 banks)
-					_romBankSize = 0x120000;
-					break;
-				case 0x53:
-					// 1.2MByte (80 banks)
-					_romBankSize = 0x140000;
-					break;
-				case 0x54:
-					// 1.5MByte (96 banks)
-					_romBankSize = 0x180000;
 					break;
 			}
 

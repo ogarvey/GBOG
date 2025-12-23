@@ -1,0 +1,148 @@
+DMG PPU timings - rounded to next M cycle, so accurate to 4 clocks
+
+StatUpdate() means check LY == LYC (or skip and set LY comparision flag to 0 if ly_for_comparison is -1) and test interrupts for mode_for_interrupt
+Similar to ly, mode_for_interrupt = -1 will clear the interrupt line
+
+Note: All STAT mode changes are delayed by 1 M-cycle, so if you change to mode 3 on cycle 76 it won't show as mode 3 until cycle 80
+
+Glitched line 0 (LCD just switched on)
+0   ly_for_comparison = 0;
+    StatMode = 0;
+    mode_for_interrupt = -1;
+    StatUpdate();
+    
+    oam_read_blocked = false;
+    oam_write_blocked = false;
+    vram_read_blocked = false;
+    vram_write_blocked = false;
+    
+76  StatUpdate();     // Note, this is *before* the mode change; mode is still -1 here
+
+    StatMode = 3;
+    mode_for_interrupt = 3;     // No STAT INT fired for this
+    
+80  oam_read_blocked = true;
+    oam_write_blocked = true;
+    vram_read_blocked = true;
+    vram_write_blocked = true;
+    
+84  Mode 3 -  164 cycles here (172 total from cycle 76), but length varies
+
+248 StatMode = 0;
+    mode_for_interrupt = 0;
+
+252 StatUpdate();
+    
+    oam_read_blocked = false;
+    oam_write_blocked = false;
+    vram_read_blocked = false;
+    vram_write_blocked = false;
+    
+452 mode_for_interrupt = 2;
+
+Lines 0 to 143
+0   LY = current_line;
+    
+    StatMode = 0;
+    // The OAM STAT interrupt occurs 1 M-cycle before STAT actually changes, except on line 0
+    if (current_line != 0)
+    {
+        mode_for_interrupt = 2;
+        ly_for_comparison = -1;
+    }
+    else    // Line 0
+    {
+        ly_for_comparison = 0;
+    }
+    
+    StatUpdate();
+    
+    oam_read_blocked = true;
+    oam_write_blocked = false;
+    
+    StatMode = 2;
+    mode_for_interrupt = 2;
+
+4   ly_for_comparison = current_line;
+    StatUpdate();
+    
+    mode_for_interrupt = -1;
+    StatUpdate();
+    
+    oam_write_blocked = true;
+    
+    OAM SEARCH (80 cycles)
+
+80  StatMode = 3
+    mode_for_interrupt = 3;
+    
+84  StatUpdate();   // There is no STAT mode 3 INT so this clears interrupt line
+
+    oam_read_blocked = true;
+    oam_write_blocked = true;
+    vram_read_blocked = true;
+    vram_write_blocked = true;
+
+88  Mode 3 - 164 cycles here (172 total from cycle 80), but length varies
+
+252 StatMode = 0;
+    mode_for_interrupt = 0;
+
+256 StatUpdate();
+    
+    oam_read_blocked = false;
+    oam_write_blocked = false;
+    vram_read_blocked = false;
+    vram_write_blocked = false;
+    
+456 mode_for_interrupt = 2;
+    current_line++;
+
+    LOOP BACK TO 0
+
+Lines 144 - 152
+0   LY = current_line;
+    ly_for_comparison = -1;
+    
+    if (current_line == 144)
+    {
+        mode_for_interrupt = 2;     // Should we really be firing OAM STAT here?
+    }
+    
+    StatUpdate();
+    
+4   ly_for_comparison = current_line;
+
+    if (current_line == 144)
+    {
+        IF |= 1;        
+        
+        StatMode = 1;
+        // Entering VBlank state also triggers the OAM interrupt
+        mode_for_interrupt = 2;
+        StatUpdate();
+        
+        mode_for_interrupt = 1;
+        StatUpdate();
+    }
+    
+    StatUpdate();
+    
+456 LOOP BACK TO 0
+    
+Line 153
+0   LY = 153;
+    ly_for_comparison = -1;
+    StatUpdate();
+
+4   LY = 0;
+    ly_for_comparison = 153;
+    StatUpdate();
+
+8   ly_for_comparison = -1;
+    StatUpdate();
+
+12  ly_for_comparison = 0;
+    StatUpdate();
+    
+456 current_line = 0;
