@@ -16,16 +16,23 @@ namespace GBOG
     public unsafe class GameWindow
     {
         private Hexa.NET.GLFW.GLFWwindowPtr _window;
-        private Gameboy _gb;
+        private Gameboy? _gb;
         private uint _textureId;
         private int _width = 1280;
         private int _height = 720;
         private string _serialOutput = "";
+        private string? _loadedRomName;
         private bool _gameRunning = false;
-        private GL _gl;
+        private GL _gl = null!;
         private ImGuiContextPtr _guiContext;
+        private const float UiScale = 1.25f;
+
+        private float _fontSizePixels = 16.0f;
+        private float? _requestedFontSizePixels;
+        private const float MinFontSizePixels = 10.0f;
+        private const float MaxFontSizePixels = 32.0f;
         
-        private FileOpenDialog _fileOpenDialog;
+        private FileOpenDialog _fileOpenDialog = null!;
 
         public void Run()
         {
@@ -61,6 +68,8 @@ namespace GBOG
             io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;       // Enable Multi-Viewport / Platform Windows
 
             ImGui.StyleColorsDark();
+            ImGui.GetStyle().ScaleAllSizes(UiScale);
+            ApplyFontSize(_fontSizePixels, rebuildBackend: false);
 
             ImGuiImplGLFW.SetCurrentContext(_guiContext);
             // BitCast to convert between the two GLFWwindowPtr types (Hexa.NET.GLFW and Hexa.NET.ImGui.Backends.GLFW)
@@ -86,6 +95,13 @@ namespace GBOG
             while (GLFW.WindowShouldClose(_window) == 0)
             {
                 GLFW.PollEvents();
+
+                if (_requestedFontSizePixels.HasValue)
+                {
+                    var requested = _requestedFontSizePixels.Value;
+                    _requestedFontSizePixels = null;
+                    ApplyFontSize(requested, rebuildBackend: true);
+                }
 
                 ImGuiImplOpenGL3.NewFrame();
                 ImGuiImplGLFW.NewFrame();
@@ -169,17 +185,39 @@ namespace GBOG
                     }
                     ImGui.EndMenu();
                 }
+
+                if (ImGui.BeginMenu("View"))
+                {
+                    var canIncrease = _fontSizePixels < MaxFontSizePixels;
+                    var canDecrease = _fontSizePixels > MinFontSizePixels;
+
+                    if (ImGui.MenuItem("Increase Font Size", string.Empty, false, canIncrease))
+                    {
+                        RequestFontSize(_fontSizePixels + 1.0f);
+                    }
+
+                    if (ImGui.MenuItem("Decrease Font Size", string.Empty, false, canDecrease))
+                    {
+                        RequestFontSize(_fontSizePixels - 1.0f);
+                    }
+
+                    ImGui.MenuItem($"Font Size: {_fontSizePixels:0} px", string.Empty, false, false);
+                    ImGui.EndMenu();
+                }
                 
                 if (ImGui.BeginMenu("Emulation"))
                 {
-                    if (ImGui.MenuItem("Start", (string)null, _gameRunning, _gb != null))
+                    if (ImGui.MenuItem("Start", string.Empty, _gameRunning, _gb != null))
                     {
                         _gameRunning = true;
-                        _gb.RunGame();
+                        if (_gb != null)
+                        {
+                            _ = _gb.RunGame();
+                        }
                     }
-                    if (ImGui.MenuItem("Stop", (string)null, !_gameRunning, _gb != null))
+                    if (ImGui.MenuItem("Stop", string.Empty, !_gameRunning, _gb != null))
                     {
-                        _gb.EndGame();
+                        _gb?.EndGame();
                         _gameRunning = false;
                     }
                     ImGui.EndMenu();
@@ -189,6 +227,7 @@ namespace GBOG
             }
 
             ImGui.Begin("Game View");
+            ImGui.Text($"ROM: {(_loadedRomName ?? "None")}");
             if (_gb != null)
             {
                 UpdateTexture();
@@ -213,13 +252,46 @@ namespace GBOG
             _fileOpenDialog.Draw(ImGuiWindowFlags.None);
         }
 
-        private void LoadRomCallback(object sender, DialogResult result)
+        private void RequestFontSize(float sizePixels)
+        {
+            var clamped = Math.Clamp(sizePixels, MinFontSizePixels, MaxFontSizePixels);
+            if (Math.Abs(clamped - _fontSizePixels) < 0.001f)
+            {
+                return;
+            }
+
+            _fontSizePixels = clamped;
+            _requestedFontSizePixels = clamped;
+        }
+
+        private void ApplyFontSize(float sizePixels, bool rebuildBackend)
+        {
+            var io = ImGui.GetIO();
+
+            io.Fonts.Clear();
+
+            var fontConfig = ImGui.ImFontConfig();
+            fontConfig.SizePixels = sizePixels;
+            io.FontDefault = ImGui.AddFontDefault(io.Fonts, fontConfig);
+
+            // Let the backend handle texture creation/updates via ImGuiBackendFlags_RendererHasTextures.
+            // We only mark the atlas texture as needing (re)creation.
+            var texData = io.Fonts.TexData;
+            if (!texData.IsNull)
+            {
+                texData.Status = ImTextureStatus.WantCreate;
+                texData.WantDestroyNextFrame = false;
+            }
+        }
+
+        private void LoadRomCallback(object? sender, DialogResult result)
         {
             if (result == DialogResult.Ok)
             {
                 var path = _fileOpenDialog.SelectedFile;
-                if (File.Exists(path))
+                if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
                 {
+                    _loadedRomName = Path.GetFileName(path);
                     _gb = new Gameboy();
                     _gb._memory.SerialDataReceived += (sender, data) => _serialOutput += data;
                     _gb.LoadRom(path);
