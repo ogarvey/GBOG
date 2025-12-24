@@ -153,6 +153,7 @@ namespace GBOG.Graphics
 			// When LCD is turned on from off, hardware synchronizes to the start of the
 			// first visible scanline. Tests expect LY to increment at a specific cycle
 			// offset relative to the enabling write, so we start slightly into the line.
+			Screen.Clear(Color.White);
 			_gb._memory.LY = 0;
 			Scanline = 0;
 			WindowScanline = 0;
@@ -197,6 +198,8 @@ namespace GBOG.Graphics
 				
 				if (_gb._memory.LY == 144)
 				{
+					// Frame is complete; publish it for the renderer.
+					Screen.SwapBuffers();
 					_gb.RequestInterrupt(Interrupt.VBlank);
 				}
 			}
@@ -205,29 +208,40 @@ namespace GBOG.Graphics
 		// Renders a scanline to the screen.
 		private void RenderScanline()
 		{
-			// Clear the current scanline on the screen
-			//Screen.ClearScanline(Scanline);
+			// Keep track of whether the BG/WIN pixel at each X uses color number 0.
+			// This is needed for OBJ-to-BG priority (sprite bit 7).
+			Span<bool> bgIsColor0 = stackalloc bool[160];
 
-			// Render the background tiles to the screen
+			// Always fill the scanline with BG palette color 0 (even if BG is disabled).
+			byte bgp = _gb._memory.BGP;
+			int bgShade0 = bgp & 0x03;
+			Color baseColor = MapColor(bgShade0);
+			for (int x = 0; x < 160; x++)
+			{
+				bgIsColor0[x] = true;
+				Screen.DrawPixel(x, Scanline, baseColor);
+			}
+
+			// Render BG layer (if enabled)
 			if (_gb._memory.BGDisplay)
 			{
-				RenderBackground();
+				RenderBackground(bgIsColor0);
 			}
 
-			// Render the window tiles to the screen if the window is enabled
+			// Render Window (if enabled and active on this line)
 			if (_gb._memory.WindowDisplayEnable)
 			{
-				RenderWindow();
+				RenderWindow(bgIsColor0);
 			}
 
-			// Render the sprites to the screen if sprites are enabled
+			// Render sprites on top (if enabled)
 			if (_gb._memory.SpriteDisplay)
 			{
-				RenderSprites();
+				RenderSprites(bgIsColor0);
 			}
 		}
 
-		private void RenderBackground()
+		private void RenderBackground(Span<bool> bgIsColor0)
 		{
 			// Calculate which tiles are visible in the current scanline.
 			// Fetch the tile data using FetchTile method.
@@ -279,6 +293,7 @@ namespace GBOG.Graphics
 				// Get the color number from the tile data
 				int colorNum = tile.GetPixel(xPos % 8, yPos % 8);
 
+				bgIsColor0[pixel] = colorNum == 0;
 				// Map the color number to actual color using the background palette
 				int colorBits = (bgp >> (colorNum * 2)) & 0x03;
 				Color actualColor = MapColor(colorBits);
@@ -300,7 +315,7 @@ namespace GBOG.Graphics
 			};
 		}
 
-		private void RenderWindow()
+		private void RenderWindow(Span<bool> bgIsColor0)
 		{
 			byte lcdControl = _gb._memory.LCDC;
 			byte wx = _gb._memory.WX;
@@ -309,6 +324,8 @@ namespace GBOG.Graphics
 
 			// If the current scanline is below the window, exit
 			if (Scanline < wy) return;
+			// WX has a hardware offset of 7; WX >= 167 means the window is not visible.
+			if (wx >= 167) return;
 
 			// Calculate the address of the window map
 			ushort windowMapAddr = (ushort)((lcdControl & 0x40) == 0x40 ? 0x9C00 : 0x9800);
@@ -317,14 +334,16 @@ namespace GBOG.Graphics
 			bool useSignedTileNumbers = (lcdControl & 0x10) == 0;
 			ushort tileDataBaseAddr = useSignedTileNumbers ? (ushort)0x8800 : (ushort)0x8000;
 
-			// Calculate the Y coordinate in the window map
-			int yPos = Scanline - wy; // Window's Y position in relation to the current scanline
+			// Window uses an internal line counter that increments only on lines where the window is actually rendered.
+			int yPos = WindowScanline;
 			int mapRow = yPos / 8; // The row of the tile in the window map
 
+			bool drewAny = false;
 			for (int pixel = 0; pixel < 160; pixel++) // 160 pixels in a scanline
 			{
 				// If the pixel is before the starting X position of the window, continue to the next pixel
 				if (pixel < wx - 7) continue; // wx register has an offset of 7
+				drewAny = true;
 
 				int xPos = pixel - (wx - 7); // Window's X position in relation to the current pixel
 				int mapCol = xPos / 8; // The column of the tile in the window map
@@ -342,6 +361,7 @@ namespace GBOG.Graphics
 				// Get the color number from the tile data
 				int colorNum = tile.GetPixel(xPos % 8, yPos % 8);
 
+				bgIsColor0[pixel] = colorNum == 0;
 				// Map the color number to actual color using the background palette
 				int colorBits = (bgp >> (colorNum * 2)) & 0x03;
 				Color actualColor = MapColor(colorBits);
@@ -349,41 +369,50 @@ namespace GBOG.Graphics
 				// Draw the pixel to the screen
 				Screen.DrawPixel(pixel, Scanline, actualColor);
 			}
+			if (drewAny)
+			{
+				WindowScanline++;
+			}
 		}
 
-		private void RenderSprites()
+		private void RenderSprites(Span<bool> bgIsColor0)
 		{
 			byte lcdControl = _gb._memory.LCDC;
 			bool use8x16 = (lcdControl & 0x04) == 0x04; // 0x00 for 8x8 sprites, 0x04 for 8x16 sprites
 
 			var sprites = GetSpriteAttributes();
-			var visibleSprites = new List<SpriteAttributes>();
+			var visibleSprites = new List<SpriteAttributes>(10);
 
-			// Filter the sprites visible on the current scanline
+			// Hardware selects up to 10 sprites per scanline in OAM order.
+			int height = use8x16 ? 16 : 8;
 			foreach (var sprite in sprites)
 			{
-				int height = use8x16 ? 16 : 8;
-
-				// Check if the sprite is visible on the current scanline
-				if (Scanline >= sprite.YPosition && Scanline < sprite.YPosition + height)
+				int y = sprite.YPosition;
+				if (Scanline >= y && Scanline < y + height)
 				{
 					visibleSprites.Add(sprite);
+					if (visibleSprites.Count == 10)
+					{
+						break;
+					}
 				}
 			}
 
-			// The Game Boy can only render 10 sprites per scanline
-			int count = Math.Min(visibleSprites.Count, 10);
-
-			// Sort the visible sprites by X position and OAM index
-			visibleSprites.Sort((s1, s2) => s1.XPosition != s2.XPosition ? s1.XPosition - s2.XPosition : sprites.FindIndex(s => s == s1) - sprites.FindIndex(s => s == s2));
-
-			for (int i = 0; i < count; i++)
+			// For overlapping pixels: lower X wins; if equal X, lower OAM index wins.
+			// Since later draws overwrite earlier ones, draw from lowest priority to highest.
+			visibleSprites.Sort((a, b) =>
 			{
-				var sprite = visibleSprites[i];
-				RenderSprite(sprite, use8x16);
+				int xCmp = b.XPosition.CompareTo(a.XPosition);
+				if (xCmp != 0) return xCmp;
+				return b.OamIndex.CompareTo(a.OamIndex);
+			});
+
+			foreach (var sprite in visibleSprites)
+			{
+				RenderSprite(sprite, use8x16, bgIsColor0);
 			}
 		}
-		private void RenderSprite(SpriteAttributes sprite, bool use8x16)
+		private void RenderSprite(SpriteAttributes sprite, bool use8x16, Span<bool> bgIsColor0)
 		{
 			byte obp0 = _gb._memory.OBP0;
 			byte obp1 = _gb._memory.OBP1;
@@ -391,75 +420,63 @@ namespace GBOG.Graphics
 			// Determine the palette to use
 			byte palette = (sprite.Flags & 0x10) == 0x10 ? obp1 : obp0;
 
-			// Fetch the tile data
-			ushort tileNumber = sprite.TileNumber;
+			int spriteX = sprite.XPosition;
+			int spriteY = sprite.YPosition;
+			int height = use8x16 ? 16 : 8;
+			int rowInSprite = Scanline - spriteY;
+			if (rowInSprite < 0 || rowInSprite >= height)
+			{
+				return;
+			}
+
+			// Determine tile index and row within tile.
+			int tileRow = rowInSprite;
+			int tileIndex = sprite.TileNumber;
 			bool xFlip = sprite.XFlip;
 			bool yFlip = sprite.YFlip;
-			var priority = sprite.Priority;
-
+			bool behindBg = sprite.Priority;
 			if (use8x16)
 			{
-				// Check whether the current scanline is in the upper or lower tile of the sprite
-				bool isUpperTile = Scanline < (sprite.YPosition + 8);
-
-				// If the sprite is 8x16, the least significant bit of the tile number is ignored,
-				// and each sprite is represented by two vertical tiles.
-				tileNumber &= 0xFE; // Clear the least significant bit
-
-				if (!isUpperTile)
+				tileIndex &= 0xFE;
+				if (yFlip)
 				{
-					// If the current scanline is in the lower tile of the sprite, increment the tile number
-					tileNumber++;
+					tileRow = 15 - rowInSprite;
+				}
+				if (tileRow >= 8)
+				{
+					tileIndex += 1;
+					tileRow -= 8;
+				}
+			}
+			else
+			{
+				if (yFlip)
+				{
+					tileRow = 7 - rowInSprite;
 				}
 			}
 
-			// Fetch the tile data from the calculated address
-			Tile tile = FetchTile((ushort)(0x8000 + tileNumber * 16));
-			int height = use8x16 ? 16 : 8;
-
-			for (int row = 0; row < height; row++)
+			Tile tile = FetchTile((ushort)(0x8000 + tileIndex * 16));
+			for (int col = 0; col < 8; col++)
 			{
-				int yPos = sprite.YPosition + row;
-
-				if (yPos < 0 || yPos >= 144) continue; // Skip rows outside the screen
-
-				// Skip rows outside the sprite
-				if (Scanline < yPos || Scanline >= yPos + height) continue;
-
-				for (int col = 0; col < 8; col++)
+				int x = spriteX + col;
+				if (x < 0 || x >= 160)
 				{
-					int xPos = sprite.XPosition + col;
-					if (xPos < 0 || xPos >= 160) continue; // Skip columns outside the screen
-
-					// check priority
-
-					// Get the color number from the tile data
-					int colorNum;
-
-					if (xFlip && yFlip)
-					{
-						colorNum = tile.GetPixel(8 - col-1, height - row-1);
-					}
-					else if (xFlip)
-					{
-						colorNum = tile.GetPixel(8 - col-1, row);
-					}
-					else if (yFlip)
-					{
-						colorNum = tile.GetPixel(col, height - row-1);
-					}
-					else {
-						colorNum = tile.GetPixel(col, row);
-					}
-
-					// Map the color number to actual color using the sprite's palette
-					int colorBits = (palette >> (colorNum * 2)) & 0x03;
-
-					Color actualColor = MapColor(colorBits);
-
-					// Draw the pixel to the screen
-					Screen.DrawPixel(xPos, Scanline, actualColor);
+					continue;
 				}
+				int tileCol = xFlip ? (7 - col) : col;
+				int colorNum = tile.GetPixel(tileCol, tileRow);
+				if (colorNum == 0)
+				{
+					continue;
+				}
+				if (behindBg && !bgIsColor0[x])
+				{
+					continue;
+				}
+				int colorBits = (palette >> (colorNum * 2)) & 0x03;
+				Color actualColor = MapColor(colorBits);
+				Screen.DrawPixel(x, Scanline, actualColor);
 			}
 		}
 
@@ -510,12 +527,13 @@ namespace GBOG.Graphics
 			// Each sprite has 4 bytes of attributes in the OAM.
 			for (int i = 0; i < OAM.Length; i += 4)
 			{
-				byte y = (byte)(OAM[i] - 16); // Subtract 16 to get the actual Y position.
-				byte x = (byte)(OAM[i + 1] - 8); // Subtract 8 to get the actual X position.
+				int y = OAM[i] - 16; // signed screen-space Y
+				int x = OAM[i + 1] - 8; // signed screen-space X
 				byte tileNumber = OAM[i + 2];
 				byte attributes = OAM[i + 3];
+				int oamIndex = i / 4;
 
-				sprites.Add(new SpriteAttributes(x, y, tileNumber, attributes));
+				sprites.Add(new SpriteAttributes(x, y, tileNumber, attributes, oamIndex));
 			}
 
 			return sprites;

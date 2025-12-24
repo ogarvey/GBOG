@@ -2,8 +2,9 @@
 {
 	public class SpriteAttributes
 	{
-		public byte XPosition { get; private set; }
-		public byte YPosition { get; private set; }
+		public int XPosition { get; private set; }
+		public int YPosition { get; private set; }
+		public int OamIndex { get; private set; }
 		public byte TileNumber { get; private set; }
 		public bool Priority { get; private set; }
 		public bool YFlip { get; private set; }
@@ -11,10 +12,11 @@
 		public byte PaletteNumber { get; private set; }
 		public byte Flags {	get; private set;}
 
-		public SpriteAttributes(byte xPosition, byte yPosition, byte tileNumber, byte flags)
+		public SpriteAttributes(int xPosition, int yPosition, byte tileNumber, byte flags, int oamIndex)
 		{
 			XPosition = xPosition;
 			YPosition = yPosition;
+			OamIndex = oamIndex;
 			TileNumber = tileNumber;
 			Flags = flags;
 			Priority = (flags & 0x80) == 0x80;

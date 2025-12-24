@@ -1146,6 +1146,23 @@ namespace GBOG.Memory
 		private bool _mbc1m;
 		private byte[]? _mbc2Ram;
 
+		// MBC3 state
+		private byte _mbc3RamBankOrRtcSelect;
+		private bool _mbc3LatchArmed;
+		private bool _mbc3Latched;
+		private int _mbc3RtcSubCycleCounter;
+		private int _mbc3RtcSeconds;
+		private int _mbc3RtcMinutes;
+		private int _mbc3RtcHours;
+		private int _mbc3RtcDays; // 0-511
+		private bool _mbc3RtcHalt;
+		private bool _mbc3RtcCarry;
+		private byte _mbc3RtcLatchedS;
+		private byte _mbc3RtcLatchedM;
+		private byte _mbc3RtcLatchedH;
+		private byte _mbc3RtcLatchedDL;
+		private byte _mbc3RtcLatchedDH;
+
 		private static ReadOnlySpan<byte> NintendoLogo => new byte[]
 		{
 			0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B,
@@ -1267,6 +1284,133 @@ namespace GBOG.Memory
 		{
 			// Pan Docs: only bottom 9 bits are used, so A200-BFFF echoes A000-A1FF.
 			return (address - 0xA000) & 0x01FF;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private int GetMbc3RomBank()
+		{
+			int bank = _currentRomBank & 0x7F;
+			if (bank == 0)
+			{
+				bank = 1;
+			}
+			return MirrorRomBank(bank);
+		}
+
+		internal void TickBaseCycles(int baseCycles)
+		{
+			if (!_mbc3 || _mbc3RtcHalt)
+			{
+				return;
+			}
+
+			// MBC3 RTC increments at 1Hz, independently of CPU speed.
+			// We advance it using the emulator's "base" cycle clock (DMG base clock = 4_194_304 Hz).
+			const int CyclesPerSecond = 4_194_304;
+			if (baseCycles <= 0)
+			{
+				return;
+			}
+			_mbc3RtcSubCycleCounter += baseCycles;
+			while (_mbc3RtcSubCycleCounter >= CyclesPerSecond)
+			{
+				_mbc3RtcSubCycleCounter -= CyclesPerSecond;
+
+				_mbc3RtcSeconds++;
+				if (_mbc3RtcSeconds >= 60)
+				{
+					_mbc3RtcSeconds = 0;
+					_mbc3RtcMinutes++;
+					if (_mbc3RtcMinutes >= 60)
+					{
+						_mbc3RtcMinutes = 0;
+						_mbc3RtcHours++;
+						if (_mbc3RtcHours >= 24)
+						{
+							_mbc3RtcHours = 0;
+							_mbc3RtcDays++;
+							if (_mbc3RtcDays >= 512)
+							{
+								_mbc3RtcDays = 0;
+								_mbc3RtcCarry = true;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private byte Mbc3RtcComposeDH()
+		{
+			byte dh = 0;
+			if (((_mbc3RtcDays >> 8) & 0x01) != 0) dh |= 0x01;
+			if (_mbc3RtcHalt) dh |= 0x40;
+			if (_mbc3RtcCarry) dh |= 0x80;
+			return dh;
+		}
+
+		private void Mbc3RtcLatch()
+		{
+			_mbc3RtcLatchedS = (byte)_mbc3RtcSeconds;
+			_mbc3RtcLatchedM = (byte)_mbc3RtcMinutes;
+			_mbc3RtcLatchedH = (byte)_mbc3RtcHours;
+			_mbc3RtcLatchedDL = (byte)(_mbc3RtcDays & 0xFF);
+			_mbc3RtcLatchedDH = Mbc3RtcComposeDH();
+			_mbc3Latched = true;
+		}
+
+		private byte Mbc3RtcReadSelected()
+		{
+			// Reads return the latched snapshot once a latch has occurred; otherwise, read live values.
+			byte sel = _mbc3RamBankOrRtcSelect;
+			bool useLatched = _mbc3Latched;
+			switch (sel)
+			{
+				case 0x08:
+					return useLatched ? _mbc3RtcLatchedS : (byte)_mbc3RtcSeconds;
+				case 0x09:
+					return useLatched ? _mbc3RtcLatchedM : (byte)_mbc3RtcMinutes;
+				case 0x0A:
+					return useLatched ? _mbc3RtcLatchedH : (byte)_mbc3RtcHours;
+				case 0x0B:
+					return useLatched ? _mbc3RtcLatchedDL : (byte)(_mbc3RtcDays & 0xFF);
+				case 0x0C:
+					return useLatched ? _mbc3RtcLatchedDH : Mbc3RtcComposeDH();
+				default:
+					return 0xFF;
+			}
+		}
+
+		private void Mbc3RtcWriteSelected(byte value)
+		{
+			// Writing affects the live counter, not the latched snapshot.
+			byte sel = _mbc3RamBankOrRtcSelect;
+			switch (sel)
+			{
+				case 0x08:
+					_mbc3RtcSeconds = value % 60;
+					break;
+				case 0x09:
+					_mbc3RtcMinutes = value % 60;
+					break;
+				case 0x0A:
+					_mbc3RtcHours = value % 24;
+					break;
+				case 0x0B:
+					_mbc3RtcDays = (_mbc3RtcDays & 0x100) | value;
+					break;
+				case 0x0C:
+				{
+					int dayBit8 = (value & 0x01) != 0 ? 0x100 : 0;
+					bool newHalt = (value & 0x40) != 0;
+					bool newCarry = (value & 0x80) != 0;
+					_mbc3RtcDays = (_mbc3RtcDays & 0xFF) | dayBit8;
+					_mbc3RtcCarry = newCarry;
+					_mbc3RtcHalt = newHalt;
+					break;
+				}
+			}
 		}
 
 		public GBMemory(Gameboy gameBoy)
@@ -1395,6 +1539,12 @@ namespace GBOG.Memory
 					newAddress = (address - 0x4000) + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
+				if (_mbc3)
+				{
+					int bank = GetMbc3RomBank();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
 				return _memory[address];
 			}
 			else if ((address >= 0xA000) && (address <= 0xBFFF))
@@ -1440,14 +1590,25 @@ namespace GBOG.Memory
 			}
 			else if (_mbc3)
 			{
-				if (_romBankingMode == 1)
+				if (!_ramEnabled)
 				{
-					return RamBanks[offset];
+					return 0xFF;
 				}
-				else
+				byte sel = _mbc3RamBankOrRtcSelect;
+				if (sel <= 0x07)
 				{
-					return RamBanks[offset + (_currentRamBank * 0x2000)];
+					int bank = sel;
+					if (_ramBankSize > 0)
+					{
+						bank %= _ramBankSize;
+					}
+					return RamBanks[offset + (bank * 0x2000)];
 				}
+				if (sel >= 0x08 && sel <= 0x0C)
+				{
+					return Mbc3RtcReadSelected();
+				}
+				return 0xFF;
 			}
 			else if (_mbc5)
 			{
@@ -1652,14 +1813,24 @@ namespace GBOG.Memory
 			}
 			if (_mbc3)
 			{
-				if (_ramEnabled)
+				if (!_ramEnabled) return;
+				byte sel = _mbc3RamBankOrRtcSelect;
+				if (sel <= 0x07)
 				{
-					RamBanks[0x2000 * _currentRamBank + (address - 0xA000)] = value;
+					int bank = sel;
+					if (_ramBankSize > 0)
+					{
+						bank %= _ramBankSize;
+					}
+					RamBanks[(bank * 0x2000) + (address - 0xA000)] = value;
+					return;
 				}
-				else if (_RTCEnabled)
+				if (sel >= 0x08 && sel <= 0x0C)
 				{
-					Debugger.Break();
+					Mbc3RtcWriteSelected(value);
+					return;
 				}
+				return;
 			}
 			if (_mbc5)
 			{
@@ -1708,17 +1879,14 @@ namespace GBOG.Memory
 						_currentRamBank = (byte)(value & 0x03);
 						break;
 					}
-					if (_mbc3 && (value >= 0x08 && value <= 0x0c))
+					if (_mbc3)
 					{
-						// Map RTC Register
-						_RTCEnabled = true;
-						// do stuff ?
+						// MBC3: 0x4000-0x5FFF selects RAM bank (00-07) or RTC register (08-0C)
+						_mbc3RamBankOrRtcSelect = value;
+						_RTCEnabled = (value >= 0x08 && value <= 0x0C);
+						break;
 					}
-					else
-					{
-						RamBankSelect(address, value);
-					}
-
+					RamBankSelect(address, value);
 					break;
 				case < 0x8000:
 					if (_mbc1)
@@ -1727,7 +1895,19 @@ namespace GBOG.Memory
 					}
 					else if (_mbc3)
 					{
-						// RTC Data Latch
+						// MBC3: 0x6000-0x7FFF latch clock data on 00->01 sequence.
+						if (value == 0x00)
+						{
+							_mbc3LatchArmed = true;
+						}
+						else if (value == 0x01)
+						{
+							if (_mbc3LatchArmed)
+							{
+								Mbc3RtcLatch();
+							}
+							_mbc3LatchArmed = false;
+						}
 					}
 					break;
 			}
@@ -1907,6 +2087,21 @@ namespace GBOG.Memory
 			_multicart = false;
 			_mbc1m = false;
 			_mbc2Ram = null;
+			_mbc3RamBankOrRtcSelect = 0;
+			_mbc3LatchArmed = false;
+			_mbc3Latched = false;
+			_mbc3RtcSubCycleCounter = 0;
+			_mbc3RtcSeconds = 0;
+			_mbc3RtcMinutes = 0;
+			_mbc3RtcHours = 0;
+			_mbc3RtcDays = 0;
+			_mbc3RtcHalt = false;
+			_mbc3RtcCarry = false;
+			_mbc3RtcLatchedS = 0;
+			_mbc3RtcLatchedM = 0;
+			_mbc3RtcLatchedH = 0;
+			_mbc3RtcLatchedDL = 0;
+			_mbc3RtcLatchedDH = 0;
 
 			// CGB support flag at 0x0143: 0x80 = supports CGB, 0xC0 = CGB only.
 			// A real DMG runs *everything* in DMG mode; a real CGB runs 0x80 carts in CGB mode by default.
@@ -1977,6 +2172,11 @@ namespace GBOG.Memory
 				{
 					_mbc2Ram[i] = 0x0F;
 				}
+			}
+			if (_mbc3)
+			{
+				// Default: ROM bank = 1, RAM/RTC disabled.
+				_mbc3RtcSubCycleCounter = 0;
 			}
 
 			// ROM bank size

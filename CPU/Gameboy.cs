@@ -13,8 +13,9 @@ namespace GBOG.CPU
     {
         public byte R, G, B, A;
         public static readonly Color White = new Color { R = 255, G = 255, B = 255, A = 255 };
-        public static readonly Color LightGray = new Color { R = 0xCC, G = 0xCC, B = 0xCC, A = 255 };
-        public static readonly Color DarkGray = new Color { R = 0x77, G = 0x77, B = 0x77, A = 255 };
+        // dmg-acid2 expects these exact 8-bit grayscale levels: $00, $55, $AA, $FF.
+        public static readonly Color LightGray = new Color { R = 0xAA, G = 0xAA, B = 0xAA, A = 255 };
+        public static readonly Color DarkGray = new Color { R = 0x55, G = 0x55, B = 0x55, A = 255 };
         public static readonly Color Black = new Color { R = 0, G = 0, B = 0, A = 255 };
         public static readonly Color Fallback = new Color { R = 255, G = 0, B = 255, A = 255 };
     }
@@ -182,6 +183,7 @@ namespace GBOG.CPU
                                 UpdateTimer(cycles);
                                 UpdateApu(baseCycles);
                                 _ppu.Step(baseCycles);
+                                _memory.TickBaseCycles(baseCycles);
                                 }
 
                                 // The interrupt is handled between instructions; don't also fetch/execute an opcode this iteration.
@@ -217,6 +219,7 @@ namespace GBOG.CPU
                                 UpdateApu(baseCycles);
 								//UpdateGraphics(baseCycles);
 								_ppu.Step(baseCycles);
+                                        _memory.TickBaseCycles(baseCycles);
                                         OnGraphicsRAMAccessed?.Invoke(this, true);
                                     }
                                     else
@@ -241,6 +244,7 @@ namespace GBOG.CPU
                             UpdateApu(baseCycles);
 							//UpdateGraphics(baseCycles);
 							_ppu.Step(baseCycles);
+                            _memory.TickBaseCycles(baseCycles);
 
                             // No instruction executed while halted; EI delay does not advance here.
                         }
