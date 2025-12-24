@@ -6,6 +6,7 @@ using GBOG.Utils;
 using Serilog;
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using Log = Serilog.Log;
 
@@ -55,6 +56,75 @@ namespace GBOG.CPU
         public bool LimitSpeed { get; set; } = false;
         private int _mClockCount;
         private int _timerPeriod = 1024;
+
+        public sealed class EmulationStats
+        {
+            public int BaseCyclesLastFrame { get; init; }
+            public double TargetFrameMs { get; init; }
+            public double HostFrameMs { get; init; }
+            public double EmuWorkMs { get; init; }
+            public double EmuWorkCpuMs { get; init; }
+            public double ThrottleWaitMs { get; init; }
+            public double SpeedMultiplier { get; init; }
+            public ushort HotPc { get; init; }
+            public int HotPcRepeats { get; init; }
+
+            public long AllocBytesThisFrame { get; init; }
+
+            public int Gc0Collections { get; init; }
+            public int Gc1Collections { get; init; }
+            public int Gc2Collections { get; init; }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILETIME
+        {
+            public uint dwLowDateTime;
+            public uint dwHighDateTime;
+        }
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentThread();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetThreadTimes(
+            IntPtr hThread,
+            out FILETIME lpCreationTime,
+            out FILETIME lpExitTime,
+            out FILETIME lpKernelTime,
+            out FILETIME lpUserTime);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static long FileTimeToLong(FILETIME ft)
+        {
+            return ((long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+        }
+
+        private static bool TryGetCurrentThreadCpuTime100ns(out long cpu100ns)
+        {
+            cpu100ns = 0;
+            if (!OperatingSystem.IsWindows())
+            {
+                return false;
+            }
+
+            IntPtr thread = GetCurrentThread();
+            if (thread == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            if (!GetThreadTimes(thread, out _, out _, out var kernel, out var user))
+            {
+                return false;
+            }
+
+            cpu100ns = FileTimeToLong(kernel) + FileTimeToLong(user);
+            return true;
+        }
+
+        private volatile EmulationStats? _stats;
+        public EmulationStats? Stats => _stats;
 
         internal OamAccessKind CurrentMCycleOamAccess { get; private set; } = OamAccessKind.None;
         internal bool CurrentMCycleIduInOamRange { get; private set; } = false;
@@ -192,12 +262,36 @@ namespace GBOG.CPU
 
             await Task.Factory.StartNew(() =>
             {
+                try
+                {
+                    Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
+                }
+                catch
+                {
+                    // Ignore if OS/runtime disallows priority changes.
+                }
+
                 long emuStartTicks = 0;
                 ulong emuTicksAccFixed = 0;
                 bool lastLimitSpeed = false;
 
+                ushort hotPc = 0;
+                int hotPcRepeats = 0;
+                ushort lastFetchedPc = 0xFFFF;
+
                 while (!_exit)
                 {
+                    long frameHostStart = Stopwatch.GetTimestamp();
+
+                    long threadCpuStart100ns = 0;
+                    bool hasThreadCpuStart = TryGetCurrentThreadCpuTime100ns(out threadCpuStart100ns);
+
+                    long allocStart = GC.GetAllocatedBytesForCurrentThread();
+
+                    int gc0Start = GC.CollectionCount(0);
+                    int gc1Start = GC.CollectionCount(1);
+                    int gc2Start = GC.CollectionCount(2);
+
                     bool limitSpeed = LimitSpeed;
                     if (limitSpeed && !lastLimitSpeed)
                     {
@@ -242,6 +336,19 @@ namespace GBOG.CPU
                         if (!Halt)
                         {
                             //Log.Information($"Register State: A: {A:X2} F: {F:X2} B: {B:X2} C: {C:X2} D: {D:X2} E: {E:X2} H: {H:X2} L: {L:X2} SP: {SP:X4} PC: 00:{PC:X4} PPU::: LY: {_memory.LY:X2} LCDC: {_memory.LCDC:X2} IE: {_memory.InterruptEnableRegister:X2} IF: {_memory.IF:X2}");
+
+                            ushort fetchPc = PC;
+                            if (fetchPc == lastFetchedPc)
+                            {
+                                hotPcRepeats++;
+                            }
+                            else
+                            {
+                                lastFetchedPc = fetchPc;
+                                hotPc = fetchPc;
+                                hotPcRepeats = 0;
+                            }
+
                             opcode = _memory.ReadByte(PC++);
                             GBOpcode? op;
                             if (opcode == 0xCB)
@@ -300,6 +407,20 @@ namespace GBOG.CPU
 
                     }
 
+                    long emuWorkEnd = Stopwatch.GetTimestamp();
+
+                    double emuWorkCpuMs = double.NaN;
+                    if (hasThreadCpuStart && TryGetCurrentThreadCpuTime100ns(out long threadCpuEnd100ns))
+                    {
+                        emuWorkCpuMs = (threadCpuEnd100ns - threadCpuStart100ns) / 10000.0;
+                    }
+
+                    long allocBytes = GC.GetAllocatedBytesForCurrentThread() - allocStart;
+
+                    double targetFrameMs = baseCyclesThisFrame * 1000.0 / Apu.BaseClockHz;
+                    double emuWorkMs = (emuWorkEnd - frameHostStart) * 1000.0 / Stopwatch.Frequency;
+                    double waitMs = 0;
+
                     if (limitSpeed)
                     {
                         // Advance the target timestamp based on emulated time.
@@ -336,7 +457,37 @@ namespace GBOG.CPU
                                 Thread.SpinWait(200);
                             }
                         }
+
+                        long afterWait = Stopwatch.GetTimestamp();
+                        waitMs = (afterWait - emuWorkEnd) * 1000.0 / Stopwatch.Frequency;
                     }
+
+                    long frameHostEnd = Stopwatch.GetTimestamp();
+                    double hostFrameMs = (frameHostEnd - frameHostStart) * 1000.0 / Stopwatch.Frequency;
+                    double speed = hostFrameMs > 0 ? (targetFrameMs / hostFrameMs) : 0;
+
+                    int gc0 = GC.CollectionCount(0) - gc0Start;
+                    int gc1 = GC.CollectionCount(1) - gc1Start;
+                    int gc2 = GC.CollectionCount(2) - gc2Start;
+
+                    _stats = new EmulationStats
+                    {
+                        BaseCyclesLastFrame = baseCyclesThisFrame,
+                        TargetFrameMs = targetFrameMs,
+                        HostFrameMs = hostFrameMs,
+                        EmuWorkMs = emuWorkMs,
+                        EmuWorkCpuMs = emuWorkCpuMs,
+                        ThrottleWaitMs = waitMs,
+                        SpeedMultiplier = speed,
+                        HotPc = hotPc,
+                        HotPcRepeats = hotPcRepeats,
+
+                        AllocBytesThisFrame = allocBytes,
+
+                        Gc0Collections = gc0,
+                        Gc1Collections = gc1,
+                        Gc2Collections = gc2,
+                    };
                 }
             }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             return true;
@@ -1085,6 +1236,12 @@ namespace GBOG.CPU
                 A = 0x01;
             }
             _memory.RefreshKey1();
+
+            // Warm up likely-to-JIT hotspots so the first rendered frames don't hitch.
+            // This doesn't advance emulation time; it just forces one-time compilation.
+            _opcodeHandler.WarmupJit();
+            _ppu.WarmupJit();
+            Apu.Step(0);
         }
 
         public async Task<bool> RunGame()

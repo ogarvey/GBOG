@@ -1,4 +1,5 @@
 using GBOG.CPU;
+using GBOG.Controls.ImGuiHexEditor;
 using Hexa.NET.GLFW;
 using Hexa.NET.ImGui;
 using Hexa.NET.ImGui.Backends.GLFW;
@@ -33,6 +34,31 @@ namespace GBOG
         private const float MaxFontSizePixels = 32.0f;
         
         private FileOpenDialog _fileOpenDialog = null!;
+
+        private bool _showCpuStateWindow;
+        private bool _showMemoryViewerWindow;
+
+        private sealed class MemoryRegion
+        {
+            public required string Name { get; init; }
+            public required ushort BaseAddress { get; init; }
+            public required int Size { get; init; }
+        }
+
+        private readonly MemoryRegion[] _memoryRegions =
+        [
+            new MemoryRegion { Name = "ROM0 (0000-3FFF)", BaseAddress = 0x0000, Size = 0x4000 },
+            new MemoryRegion { Name = "ROMX (4000-7FFF)", BaseAddress = 0x4000, Size = 0x4000 },
+            new MemoryRegion { Name = "VRAM (8000-9FFF)", BaseAddress = 0x8000, Size = 0x2000 },
+            new MemoryRegion { Name = "ERAM (A000-BFFF)", BaseAddress = 0xA000, Size = 0x2000 },
+            new MemoryRegion { Name = "WRAM (C000-DFFF)", BaseAddress = 0xC000, Size = 0x2000 },
+            new MemoryRegion { Name = "OAM (FE00-FE9F)", BaseAddress = 0xFE00, Size = 0x00A0 },
+            new MemoryRegion { Name = "IO (FF00-FF7F)", BaseAddress = 0xFF00, Size = 0x0080 },
+            new MemoryRegion { Name = "HRAM (FF80-FFFE)", BaseAddress = 0xFF80, Size = 0x007F },
+            new MemoryRegion { Name = "IE (FFFF)", BaseAddress = 0xFFFF, Size = 0x0001 },
+        ];
+
+        private readonly Dictionary<string, HexEditorState> _memoryViewerStates = new();
 
         public void Run()
         {
@@ -91,6 +117,7 @@ namespace GBOG
 
             _textureId = CreateTexture();
             _fileOpenDialog = new FileOpenDialog();
+            EnsureMemoryViewerStates();
 
             while (GLFW.WindowShouldClose(_window) == 0)
             {
@@ -233,6 +260,18 @@ namespace GBOG
                     var canIncrease = _fontSizePixels < MaxFontSizePixels;
                     var canDecrease = _fontSizePixels > MinFontSizePixels;
 
+                    if (ImGui.MenuItem("CPU State", string.Empty, _showCpuStateWindow, true))
+                    {
+                        _showCpuStateWindow = !_showCpuStateWindow;
+                    }
+
+                    if (ImGui.MenuItem("Memory Viewer", string.Empty, _showMemoryViewerWindow, true))
+                    {
+                        _showMemoryViewerWindow = !_showMemoryViewerWindow;
+                    }
+
+                    ImGui.Separator();
+
                     if (ImGui.MenuItem("Increase Font Size", string.Empty, false, canIncrease))
                     {
                         RequestFontSize(_fontSizePixels + 1.0f);
@@ -292,6 +331,184 @@ namespace GBOG
             ImGui.End();
 
             _fileOpenDialog.Draw(ImGuiWindowFlags.None);
+
+            RenderCpuStateWindow();
+            RenderMemoryViewerWindow();
+        }
+
+        private void EnsureMemoryViewerStates()
+        {
+            if (_memoryViewerStates.Count != 0)
+            {
+                return;
+            }
+
+            foreach (var region in _memoryRegions)
+            {
+                _memoryViewerStates[region.Name] = new HexEditorState
+                {
+                    MaxBytes = region.Size,
+                    BytesPerLine = 16,
+                    ShowAddress = true,
+                    ShowAscii = true,
+                    ReadOnly = true,
+                    Separators = 8,
+                    UserData = region,
+                    ReadCallback = ReadMemoryRegion,
+                    GetAddressNameCallback = GetRegionAddressName,
+                };
+            }
+        }
+
+        private int ReadMemoryRegion(HexEditorState state, int offset, byte[] buffer, int size)
+        {
+            if (_gb == null)
+            {
+                return 0;
+            }
+
+            if (state.UserData is not MemoryRegion region)
+            {
+                return 0;
+            }
+
+            int max = Math.Min(size, region.Size - offset);
+            if (max <= 0)
+            {
+                return 0;
+            }
+
+            int addr0 = region.BaseAddress + offset;
+            for (int i = 0; i < max; i++)
+            {
+                buffer[i] = _gb._memory.PeekByte((ushort)(addr0 + i));
+            }
+
+            return max;
+        }
+
+        private bool GetRegionAddressName(HexEditorState state, int offset, out string addressName)
+        {
+            if (state.UserData is MemoryRegion region)
+            {
+                addressName = (region.BaseAddress + offset).ToString("X4");
+                return true;
+            }
+
+            addressName = offset.ToString("X4");
+            return true;
+        }
+
+        private void RenderCpuStateWindow()
+        {
+            if (!_showCpuStateWindow)
+            {
+                return;
+            }
+
+            if (!ImGui.Begin("CPU State", ref _showCpuStateWindow))
+            {
+                ImGui.End();
+                return;
+            }
+
+            if (_gb == null)
+            {
+                ImGui.Text("No ROM loaded.");
+                ImGui.End();
+                return;
+            }
+
+            var gb = _gb;
+
+            ImGui.Text($"Running: {_gameRunning}");
+            ImGui.Text($"IME: {gb.InterruptMasterEnabled}  HALT: {gb.Halt}  CGB DoubleSpeed: {gb.DoubleSpeed}");
+
+            var stats = gb.Stats;
+            if (stats != null)
+            {
+                ImGui.Text($"Frame: target {stats.TargetFrameMs:0.00} ms, host {stats.HostFrameMs:0.00} ms, work {stats.EmuWorkMs:0.00} ms, wait {stats.ThrottleWaitMs:0.00} ms");
+                ImGui.Text($"Speed: {stats.SpeedMultiplier:0.00}x  Hot PC: {stats.HotPc:X4} (repeats {stats.HotPcRepeats})");
+                ImGui.Text($"GC: gen0 +{stats.Gc0Collections}, gen1 +{stats.Gc1Collections}, gen2 +{stats.Gc2Collections}");
+
+                if (double.IsNaN(stats.EmuWorkCpuMs))
+                {
+                    ImGui.Text($"CPU: n/a, alloc {stats.AllocBytesThisFrame / 1024.0:0.0} KB");
+                }
+                else
+                {
+                    double preemptMs = stats.EmuWorkMs - stats.EmuWorkCpuMs;
+                    if (preemptMs < 0) preemptMs = 0;
+                    ImGui.Text($"CPU: {stats.EmuWorkCpuMs:0.00} ms, preempt {preemptMs:0.00} ms, alloc {stats.AllocBytesThisFrame / 1024.0:0.0} KB");
+                }
+            }
+            ImGui.Separator();
+
+            if (ImGui.BeginTable("##cpu_regs", 4, ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.SizingFixedFit))
+            {
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn(); ImGui.Text($"AF: {gb.AF:X4}");
+                ImGui.TableNextColumn(); ImGui.Text($"BC: {gb.BC:X4}");
+                ImGui.TableNextColumn(); ImGui.Text($"DE: {gb.DE:X4}");
+                ImGui.TableNextColumn(); ImGui.Text($"HL: {gb.HL:X4}");
+
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn(); ImGui.Text($"A: {gb.A:X2}  F: {gb.F:X2}");
+                ImGui.TableNextColumn(); ImGui.Text($"B: {gb.B:X2}  C: {gb.C:X2}");
+                ImGui.TableNextColumn(); ImGui.Text($"D: {gb.D:X2}  E: {gb.E:X2}");
+                ImGui.TableNextColumn(); ImGui.Text($"H: {gb.H:X2}  L: {gb.L:X2}");
+
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn(); ImGui.Text($"PC: {gb.PC:X4}");
+                ImGui.TableNextColumn(); ImGui.Text($"SP: {gb.SP:X4}");
+                ImGui.TableNextColumn(); ImGui.Text($"Z:{(gb.Z ? 1 : 0)} N:{(gb.N ? 1 : 0)} H:{(gb.HC ? 1 : 0)} C:{(gb.CF ? 1 : 0)}");
+                ImGui.TableNextColumn(); ImGui.Text($"IE: {gb._memory.InterruptEnableRegister:X2}  IF: {gb._memory.IF:X2}");
+
+                ImGui.EndTable();
+            }
+
+            ImGui.End();
+        }
+
+        private void RenderMemoryViewerWindow()
+        {
+            if (!_showMemoryViewerWindow)
+            {
+                return;
+            }
+
+            if (!ImGui.Begin("Memory Viewer", ref _showMemoryViewerWindow))
+            {
+                ImGui.End();
+                return;
+            }
+
+            if (_gb == null)
+            {
+                ImGui.Text("No ROM loaded.");
+                ImGui.End();
+                return;
+            }
+
+            if (ImGui.BeginTabBar("##mem_tabs"))
+            {
+                foreach (var region in _memoryRegions)
+                {
+                    if (ImGui.BeginTabItem(region.Name))
+                    {
+                        var state = _memoryViewerStates[region.Name];
+                        var avail = ImGui.GetContentRegionAvail();
+                        if (HexEditor.BeginHexEditor($"##hex_{region.BaseAddress:X4}", state, avail))
+                        {
+                            HexEditor.EndHexEditor();
+                        }
+                        ImGui.EndTabItem();
+                    }
+                }
+                ImGui.EndTabBar();
+            }
+
+            ImGui.End();
         }
 
         private void RequestFontSize(float sizePixels)

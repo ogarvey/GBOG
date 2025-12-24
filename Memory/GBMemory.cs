@@ -1680,6 +1680,83 @@ namespace GBOG.Memory
 			}
 		}
 
+		/// <summary>
+		/// Reads a byte without emulating CPU bus side-effects.
+		/// Intended for debug tooling (memory viewers, inspectors).
+		/// </summary>
+		public byte PeekByte(ushort address)
+		{
+			// Prefer reflecting true register behavior for APU.
+			if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
+			{
+				return _gameBoy.Apu.ReadRegister(address);
+			}
+
+			// Avoid JOYP side-effects (SetJoypadState / IF raising).
+			if (address == 0xFF00)
+			{
+				return _memory[0xFF00];
+			}
+
+			if (address == 0xFF4D)
+			{
+				return _isCgb ? BuildKey1Value() : (byte)0xFF;
+			}
+
+			// Like ReadByteForDma: ignore CPU access restrictions and OAM-bug side effects.
+			int newAddress;
+			if (address < 0x4000)
+			{
+				if (_mbc1)
+				{
+					int bank = GetMbc1Bank0();
+					newAddress = (bank * 0x4000) + address;
+					return _cartRom[newAddress];
+				}
+				if (_mbc2)
+				{
+					return _cartRom[address];
+				}
+				return _cartRom[address];
+			}
+			if (address >= 0x4000 && address <= 0x7FFF)
+			{
+				if (_mbc1)
+				{
+					int bank = GetMbc1Bank1();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				if (_mbc2)
+				{
+					int bank = GetMbc2RomBank();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				if (_mbc3)
+				{
+					int bank = GetMbc3RomBank();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				return _memory[address];
+			}
+			if (address >= 0x8000 && address <= 0x9FFF)
+			{
+				return _gameBoy._ppu.VideoRam[address - 0x8000];
+			}
+			if (address >= 0xA000 && address <= 0xBFFF)
+			{
+				return ReadRam(address);
+			}
+			if (address >= 0xFE00 && address <= 0xFE9F)
+			{
+				return _gameBoy._ppu.OAM[address - 0xFE00];
+			}
+
+			return _memory[address];
+		}
+
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private int GetPpuMode() => _memory[0xFF41] & 0b11;
 
