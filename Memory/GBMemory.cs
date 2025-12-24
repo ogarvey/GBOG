@@ -17,6 +17,7 @@ namespace GBOG.Memory
 		TileData = 1 << 0,
 		TileMaps = 1 << 1,
 		Lcdc = 1 << 2,
+		Palette = 1 << 3,
 	}
 
 	public class GBMemory
@@ -2004,6 +2005,12 @@ namespace GBOG.Memory
 				byte preserved = (byte)(old & 0b1000_0111);
 				byte writable = (byte)(value & 0b0111_1000);
 				_memory[0xFF41] = (byte)(preserved | writable);
+			}
+			else if (address == 0xFF47 || address == 0xFF48 || address == 0xFF49)
+			{
+				// DMG palette registers (BGP/OBP0/OBP1). These affect how indices map to shades.
+				_memory[address] = value;
+				MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
 			}
 			else if (address == 0xFF4D)
 			{

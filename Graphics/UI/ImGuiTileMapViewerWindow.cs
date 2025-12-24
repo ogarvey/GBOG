@@ -34,9 +34,26 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
     public bool AutoRefresh { get; set; } = true;
 
+    // When enabled, map BG/WIN color indices through FF47 (BGP) first,
+    // matching the DMG "final shaded output".
+    public bool ApplyBgpShading { get; set; } = false;
+
     // Pan Docs: color index 0 is transparent for OBJs (sprites), but not for BG/WIN.
     // This is a debug viewer toggle for convenience.
     public bool TreatColor0AsTransparent { get; set; } = false;
+
+    private static void DebugLog(string message)
+    {
+        try
+        {
+            System.Diagnostics.Debug.WriteLine(message);
+            Console.WriteLine(message);
+        }
+        catch
+        {
+            // ignore
+        }
+    }
 
     private enum ExportRequest
     {
@@ -76,6 +93,14 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         if (ImGui.Checkbox("Auto", ref auto))
         {
             AutoRefresh = auto;
+        }
+
+        ImGui.SameLine();
+        bool applyBgp = ApplyBgpShading;
+        if (ImGui.Checkbox("Apply BGP", ref applyBgp))
+        {
+            ApplyBgpShading = applyBgp;
+            InvalidateAll();
         }
 
         ImGui.SameLine();
@@ -123,6 +148,12 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             var dirty = gb._memory.ConsumeVideoDebugDirty();
             if (dirty != VideoDebugDirtyFlags.None)
             {
+                if ((dirty & VideoDebugDirtyFlags.Palette) != 0)
+                {
+                    _tileDataAtlasValid = false;
+                    _tileMapsValid = false;
+                }
+
                 if ((dirty & VideoDebugDirtyFlags.TileData) != 0)
                 {
                     _tileDataAtlasValid = false;
@@ -228,30 +259,42 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             {
                 case ExportRequest.TilesToFolder:
                 {
-                    var folder = GetDialogSelectedPath(sender);
+                    var folder = GetSelectedPathForRequest(sender, _exportRequest);
                     if (!string.IsNullOrWhiteSpace(folder))
                     {
-                        ExportTilesToFolder(gb, _exportPalette, folder, TreatColor0AsTransparent);
+                        ExportTilesToFolder(gb, _exportPalette, folder, TreatColor0AsTransparent, ApplyBgpShading);
+                    }
+                    else
+                    {
+                        DebugLog("[TileMapViewer] Export tiles: no folder selected.");
                     }
                     break;
                 }
 
                 case ExportRequest.BackgroundToFile:
                 {
-                    var path = GetDialogSelectedPath(sender);
+                    var path = GetSelectedPathForRequest(sender, _exportRequest);
                     if (!string.IsNullOrWhiteSpace(path))
                     {
-                        ExportTileMapToFile(gb, _exportPalette, isWindow: false, path, TreatColor0AsTransparent);
+                        ExportTileMapToFile(gb, _exportPalette, isWindow: false, path, TreatColor0AsTransparent, ApplyBgpShading);
+                    }
+                    else
+                    {
+                        DebugLog("[TileMapViewer] Export BG: no file selected.");
                     }
                     break;
                 }
 
                 case ExportRequest.WindowToFile:
                 {
-                    var path = GetDialogSelectedPath(sender);
+                    var path = GetSelectedPathForRequest(sender, _exportRequest);
                     if (!string.IsNullOrWhiteSpace(path))
                     {
-                        ExportTileMapToFile(gb, _exportPalette, isWindow: true, path, TreatColor0AsTransparent);
+                        ExportTileMapToFile(gb, _exportPalette, isWindow: true, path, TreatColor0AsTransparent, ApplyBgpShading);
+                    }
+                    else
+                    {
+                        DebugLog("[TileMapViewer] Export WIN: no file selected.");
                     }
                     break;
                 }
@@ -260,11 +303,26 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         catch
         {
             // best-effort; avoid crashing the UI if export fails.
+            DebugLog("[TileMapViewer] Export failed (exception). See debugger output.");
         }
         finally
         {
             _exportRequest = ExportRequest.None;
         }
+    }
+
+    private string? GetSelectedPathForRequest(object? sender, ExportRequest request)
+    {
+        // Prefer reading from our dialog instance; sender isn't guaranteed to be the dialog.
+        object? dialog = request switch
+        {
+            ExportRequest.TilesToFolder => _exportTilesFolderDialog,
+            ExportRequest.BackgroundToFile => _exportBgDialog,
+            ExportRequest.WindowToFile => _exportWindowDialog,
+            _ => null,
+        };
+
+        return GetDialogSelectedPath(dialog) ?? GetDialogSelectedPath(sender);
     }
 
     private static string? GetDialogSelectedPath(object? dialog)
@@ -275,13 +333,39 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         }
 
         var t = dialog.GetType();
+
+        string? currentFolder = null;
+        foreach (var folderProp in new[] { "CurrentFolder", "Folder", "CurrentDirectory", "Directory", "Path" })
+        {
+            var p = t.GetProperty(folderProp);
+            if (p == null || p.PropertyType != typeof(string))
+            {
+                continue;
+            }
+            try
+            {
+                currentFolder = (string?)p.GetValue(dialog);
+                if (!string.IsNullOrWhiteSpace(currentFolder))
+                {
+                    break;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
         foreach (var name in new[]
         {
             "SelectedFile",
+            "FilePath",
+            "FileName",
+            "SelectionString",
             "SelectedPath",
             "SelectedFolder",
-            "Folder",
             "Path",
+            "Folder",
         })
         {
             var p = t.GetProperty(name);
@@ -292,7 +376,21 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
             try
             {
-                return (string?)p.GetValue(dialog);
+                var raw = (string?)p.GetValue(dialog);
+                if (string.IsNullOrWhiteSpace(raw))
+                {
+                    continue;
+                }
+
+                raw = raw.Trim().Trim('"');
+
+                // Some dialogs may return only a filename; combine with current folder when possible.
+                if (!string.IsNullOrWhiteSpace(currentFolder) && !System.IO.Path.IsPathRooted(raw))
+                {
+                    raw = System.IO.Path.Combine(currentFolder, raw);
+                }
+
+                return raw;
             }
             catch
             {
@@ -303,7 +401,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         return null;
     }
 
-    private static void ExportTilesToFolder(Gameboy gb, DisplayPalette palette, string folder, bool treatCi0Transparent)
+    private static void ExportTilesToFolder(Gameboy gb, DisplayPalette palette, string folder, bool treatCi0Transparent, bool applyBgpShading)
     {
         Directory.CreateDirectory(folder);
 
@@ -316,12 +414,16 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             var src = tiles[i];
             using var image = new Image<Rgba32>(tileSize, tileSize);
 
+            byte bgp = gb._memory.BGP;
+
             for (int y = 0; y < tileSize; y++)
             {
                 for (int x = 0; x < tileSize; x++)
                 {
                     byte ci = src[(y * tileSize) + x];
-                    image[x, y] = ToRgba32(palette, ci, treatCi0Transparent);
+                    bool transparent = treatCi0Transparent && ci == 0;
+                    int shadeIndex = applyBgpShading ? MapDmgPaletteToShade(bgp, ci) : ci;
+                    image[x, y] = ToRgba32(palette, shadeIndex, transparent);
                 }
             }
 
@@ -330,7 +432,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         }
     }
 
-    private static void ExportTileMapToFile(Gameboy gb, DisplayPalette palette, bool isWindow, string path, bool treatCi0Transparent)
+    private static void ExportTileMapToFile(Gameboy gb, DisplayPalette palette, bool isWindow, string path, bool treatCi0Transparent, bool applyBgpShading)
     {
         path = EnsurePngExtension(path);
 
@@ -341,6 +443,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         }
 
         var tileData = gb._memory.GetTileData();
+        byte bgp = gb._memory.BGP;
         bool useSignedTileNumbers = !gb._memory.BGWindowTileDataSelect;
 
         ushort mapBase;
@@ -354,17 +457,22 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         }
 
         var map = gb._memory.GetTileMap(mapBase);
-        var rgba = RenderTileMapToRgba(map, tileData, useSignedTileNumbers, palette, treatCi0Transparent);
+        var rgba = RenderTileMapToRgba(map, tileData, useSignedTileNumbers, palette, treatCi0Transparent, applyBgpShading, bgp);
 
         using var image = Image.LoadPixelData<Rgba32>(rgba, TileMapSizePixels, TileMapSizePixels);
         image.Save(path);
     }
 
-    private static Rgba32 ToRgba32(DisplayPalette palette, int colorIndex, bool treatCi0Transparent)
+    private static Rgba32 ToRgba32(DisplayPalette palette, int shadeIndex, bool transparent)
     {
-        var c = palette.GetShade(colorIndex);
-        byte a = (treatCi0Transparent && colorIndex == 0) ? (byte)0 : c.A;
+        var c = palette.GetShade(shadeIndex);
+        byte a = transparent ? (byte)0 : c.A;
         return new Rgba32(c.R, c.G, c.B, a);
+    }
+
+    private static int MapDmgPaletteToShade(byte dmgPalette, int colorIndex)
+    {
+        return (dmgPalette >> (colorIndex * 2)) & 0x03;
     }
 
     private static string EnsurePngExtension(string path)
@@ -431,7 +539,9 @@ public sealed unsafe class ImGuiTileMapViewerWindow
                         int dst = (dstY * width + dstX) * 4;
 
                         byte ci = src[y * tileSize + x];
-                        var c = ToRgba32(palette, ci, TreatColor0AsTransparent);
+                        bool transparent = TreatColor0AsTransparent && ci == 0;
+                        int shadeIndex = ApplyBgpShading ? MapDmgPaletteToShade(gb._memory.BGP, ci) : ci;
+                        var c = ToRgba32(palette, shadeIndex, transparent);
                         rgba[dst + 0] = c.R;
                         rgba[dst + 1] = c.G;
                         rgba[dst + 2] = c.B;
@@ -472,6 +582,8 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         {
             var tileData = gb._memory.GetTileData();
 
+            byte bgp = gb._memory.BGP;
+
             ushort bgMapBase = gb._memory.BGTileMapDisplaySelect ? (ushort)0x9C00 : (ushort)0x9800;
             ushort winMapBase = gb._memory.WindowTileMapDisplaySelect ? (ushort)0x9C00 : (ushort)0x9800;
             bool useSignedTileNumbers = !gb._memory.BGWindowTileDataSelect;
@@ -479,8 +591,8 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             var bgMap = gb._memory.GetTileMap(bgMapBase);
             var winMap = gb._memory.GetTileMap(winMapBase);
 
-            var rgbaBg = RenderTileMapToRgba(bgMap, tileData, useSignedTileNumbers, palette, TreatColor0AsTransparent);
-            var rgbaWin = RenderTileMapToRgba(winMap, tileData, useSignedTileNumbers, palette, TreatColor0AsTransparent);
+            var rgbaBg = RenderTileMapToRgba(bgMap, tileData, useSignedTileNumbers, palette, TreatColor0AsTransparent, ApplyBgpShading, bgp);
+            var rgbaWin = RenderTileMapToRgba(winMap, tileData, useSignedTileNumbers, palette, TreatColor0AsTransparent, ApplyBgpShading, bgp);
 
             if (_bgMapTextureId == 0)
             {
@@ -511,7 +623,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         }
     }
 
-    private static byte[] RenderTileMapToRgba(byte[] tileMap, byte[] tileData, bool useSignedTileNumbers, DisplayPalette palette, bool treatCi0Transparent)
+    private static byte[] RenderTileMapToRgba(byte[] tileMap, byte[] tileData, bool useSignedTileNumbers, DisplayPalette palette, bool treatCi0Transparent, bool applyBgpShading, byte bgp)
     {
         var rgba = new byte[TileMapSizePixels * TileMapSizePixels * 4];
 
@@ -532,7 +644,9 @@ public sealed unsafe class ImGuiTileMapViewerWindow
                     {
                         int bit = 7 - x;
                         int colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
-                        var c = ToRgba32(palette, colorIndex, treatCi0Transparent);
+                        bool transparent = treatCi0Transparent && colorIndex == 0;
+                        int shadeIndex = applyBgpShading ? MapDmgPaletteToShade(bgp, colorIndex) : colorIndex;
+                        var c = ToRgba32(palette, shadeIndex, transparent);
 
                         int px = (mapX * 8) + x;
                         int py = (mapY * 8) + y;
