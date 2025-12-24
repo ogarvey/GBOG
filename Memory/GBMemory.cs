@@ -1143,6 +1143,39 @@ namespace GBOG.Memory
 		private int _ramBankSize;
 		private bool _RTCEnabled;
 		private bool _multicart = false;
+		private bool _mbc1m;
+		private byte[]? _mbc2Ram;
+
+		private static ReadOnlySpan<byte> NintendoLogo => new byte[]
+		{
+			0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B,
+			0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
+			0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
+			0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
+			0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC,
+			0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E
+		};
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private bool DetectMbc1mMulticart(byte[] rom)
+		{
+			// Pan Docs: MBC1M multi-carts can be identified by a Nintendo logo/header in bank $10.
+			const int logoOffsetInBank = 0x0104;
+			const int bank10Base = 0x10 * 0x4000;
+			int start = bank10Base + logoOffsetInBank;
+			if (rom == null || rom.Length < start + NintendoLogo.Length)
+			{
+				return false;
+			}
+			for (int i = 0; i < NintendoLogo.Length; i++)
+			{
+				if (rom[start + i] != NintendoLogo[i])
+				{
+					return false;
+				}
+			}
+			return true;
+		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static bool IsPowerOfTwo(int value) => value > 0 && (value & (value - 1)) == 0;
@@ -1179,20 +1212,34 @@ namespace GBOG.Memory
 		{
 			// In mode 0, bank 0 area is fixed to bank 0.
 			// In mode 1, bank 0 area selects bank (upper2 << 5).
-			int bank = _romBankingMode == 1 ? ((_currentRamBank & 0x03) << 5) : 0;
+			int shift = _mbc1m ? 4 : 5;
+			int bank = _romBankingMode == 1 ? ((_currentRamBank & 0x03) << shift) : 0;
 			return MirrorRomBank(bank);
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private int GetMbc1Bank1()
 		{
-			// 0x4000-0x7FFF always uses BOTH registers (regular MBC1 wiring).
-			// Mode only affects whether the secondary register also applies to 0x0000-0x3FFF and A000-BFFF.
-			int bank = (_currentRomBank & 0x1F) | ((_currentRamBank & 0x03) << 5);
-			// MBC1: if lower 5 bits are 0, it selects bank 1 instead.
-			if ((bank & 0x1F) == 0)
+			// 0x4000-0x7FFF always uses both registers.
+			// MBC1M differs: secondary applies to bits 4-5 and bit 4 of the main register is ignored.
+			int bank;
+			if (_mbc1m)
 			{
-				bank |= 0x01;
+				bank = (_currentRomBank & 0x0F) | ((_currentRamBank & 0x03) << 4);
+				// 00->01 translation compares the FULL 5-bit ROM banking register.
+				if ( (_currentRomBank & 0x1F) == 0)
+				{
+					bank |= 0x01;
+				}
+			}
+			else
+			{
+				bank = (_currentRomBank & 0x1F) | ((_currentRamBank & 0x03) << 5);
+				// 00->01 translation compares the FULL 5-bit ROM banking register.
+				if ( (_currentRomBank & 0x1F) == 0)
+				{
+					bank |= 0x01;
+				}
 			}
 			return MirrorRomBank(bank);
 		}
@@ -1202,6 +1249,24 @@ namespace GBOG.Memory
 		{
 			// In mode 0, always bank 0. In mode 1, select upper2.
 			return _romBankingMode == 1 ? (_currentRamBank & 0x03) : 0;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private int GetMbc2RomBank()
+		{
+			int bank = _currentRomBank & 0x0F;
+			if (bank == 0)
+			{
+				bank = 1;
+			}
+			return MirrorRomBank(bank);
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private int GetMbc2RamIndex(ushort address)
+		{
+			// Pan Docs: only bottom 9 bits are used, so A200-BFFF echoes A000-A1FF.
+			return (address - 0xA000) & 0x01FF;
 		}
 
 		public GBMemory(Gameboy gameBoy)
@@ -1309,6 +1374,11 @@ namespace GBOG.Memory
 					newAddress = (bank * 0x4000) + address;
 					return _cartRom[newAddress];
 				}
+				if (_mbc2)
+				{
+					// MBC2: bank 0 is always mapped here.
+					return _cartRom[address];
+				}
 				return _cartRom[address];
 			}
 			else if ((address >= 0x4000) && (address <= 0x7FFF))
@@ -1316,6 +1386,12 @@ namespace GBOG.Memory
 				if (_mbc1)
 				{
 					int bank = GetMbc1Bank1();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				if (_mbc2)
+				{
+					int bank = GetMbc2RomBank();
 					newAddress = (address - 0x4000) + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
@@ -1335,7 +1411,7 @@ namespace GBOG.Memory
 
 		private byte ReadRam(ushort address)
 		{
-			address = (ushort)(address - 0xA000);
+			int offset = address - 0xA000;
 			ushort newAddress;
 			if (_mbc1)
 			{
@@ -1346,42 +1422,42 @@ namespace GBOG.Memory
 					{
 						ramBank %= _ramBankSize;
 					}
-					newAddress = (ushort)(ramBank * 0x2000 + address);
+					newAddress = (ushort)(ramBank * 0x2000 + offset);
 					return RamBanks[newAddress];
 				}
 				return 0xFF;
 			}
 			else if (_mbc2)
 			{
-				if (_ramEnabled)
-				{
-					return RamBanks[address - 0xA000];
-				}
-				else
+				if (!_ramEnabled)
 				{
 					return 0xFF;
 				}
+				var ram = _mbc2Ram ??= new byte[0x200];
+				int index = GetMbc2RamIndex(address);
+				// Only low nibble is meaningful; upper nibble is undefined.
+				return (byte)(0xF0 | (ram[index] & 0x0F));
 			}
 			else if (_mbc3)
 			{
 				if (_romBankingMode == 1)
 				{
-					return RamBanks[address - 0xA000];
+					return RamBanks[offset];
 				}
 				else
 				{
-					return RamBanks[address - 0xA000 + (_currentRamBank * 0x2000)];
+					return RamBanks[offset + (_currentRamBank * 0x2000)];
 				}
 			}
 			else if (_mbc5)
 			{
 				if (_romBankingMode == 1)
 				{
-					return RamBanks[address - 0xA000];
+					return RamBanks[offset];
 				}
 				else
 				{
-					return RamBanks[address - 0xA000 + (_currentRamBank * 0x2000)];
+					return RamBanks[offset + (_currentRamBank * 0x2000)];
 				}
 			}
 			else
@@ -1568,9 +1644,11 @@ namespace GBOG.Memory
 			}
 			if (_mbc2)
 			{
-				ushort newAddress = address;
-				if (address >= 0xa000 && address <= 0xA1FF) newAddress = (ushort)(address & 0x1FF);
-				RamBanks[newAddress + (_currentRamBank * 0x2000)] = (byte)(value & 0x0F);
+				if (!_ramEnabled) return;
+				var ram = _mbc2Ram ??= new byte[0x200];
+				int index = GetMbc2RamIndex(address);
+				ram[index] = (byte)(value & 0x0F);
+				return;
 			}
 			if (_mbc3)
 			{
@@ -1595,6 +1673,11 @@ namespace GBOG.Memory
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private void HandleBanking(ushort address, byte value)
 		{
+			if (_mbc2 && address < 0x4000)
+			{
+				HandleMbc2RegisterWrite(address, value);
+				return;
+			}
 			switch (address)
 			{
 				case < 0x2000 when !_mbc2:
@@ -1615,16 +1698,6 @@ namespace GBOG.Memory
 						{
 							HighRomBankSelect(address, value);
 						}
-					}
-					break;
-				case < 0x4000 when _mbc2:
-					if (Extensions.TestBit((byte)address, 7))
-					{
-						RamBankEnable(address, value);
-					}
-					else
-					{
-						LowRomBankSelect(address, value);
 					}
 					break;
 				case < 0x6000:
@@ -1657,6 +1730,21 @@ namespace GBOG.Memory
 						// RTC Data Latch
 					}
 					break;
+			}
+		}
+
+		private void HandleMbc2RegisterWrite(ushort address, byte value)
+		{
+			// Pan Docs: Bit 8 of the address selects between RAM enable (A8=0) and ROM bank select (A8=1).
+			if ((address & 0x0100) == 0)
+			{
+				_ramEnabled = (value & 0x0F) == 0x0A;
+				return;
+			}
+			_currentRomBank = (byte)(value & 0x0F);
+			if ((_currentRomBank & 0x0F) == 0)
+			{
+				_currentRomBank = 1;
 			}
 		}
 
@@ -1817,6 +1905,8 @@ namespace GBOG.Memory
 			_mbc1 = _mbc2 = _mbc3 = _mbc5 = false;
 			_RTCEnabled = false;
 			_multicart = false;
+			_mbc1m = false;
+			_mbc2Ram = null;
 
 			// CGB support flag at 0x0143: 0x80 = supports CGB, 0xC0 = CGB only.
 			// A real DMG runs *everything* in DMG mode; a real CGB runs 0x80 carts in CGB mode by default.
@@ -1873,6 +1963,20 @@ namespace GBOG.Memory
 					// MBC5+RUMBLE+RAM+BATTERY
 					_mbc5 = true;
 					break;
+			}
+
+			// Detect special MBC1 wiring used by multi-game compilation carts (MBC1M).
+			if (_mbc1 && DetectMbc1mMulticart(rom))
+			{
+				_mbc1m = true;
+			}
+			if (_mbc2)
+			{
+				_mbc2Ram = new byte[0x200];
+				for (int i = 0; i < _mbc2Ram.Length; i++)
+				{
+					_mbc2Ram[i] = 0x0F;
+				}
 			}
 
 			// ROM bank size
