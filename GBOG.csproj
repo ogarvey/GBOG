@@ -10,6 +10,12 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 
+	<PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+		<!-- Reduce one-off tiered compilation stalls during gameplay (at the cost of some steady-state perf). -->
+		<TieredCompilation>false</TieredCompilation>
+		<TieredPGO>false</TieredPGO>
+	</PropertyGroup>
+
 	<ItemGroup>
 		<PackageReference Include="MonoGame.Content.Builder.Task" Version="3.8.1.303" />
 		<PackageReference Include="MonoGame.Framework.DesktopGL" Version="3.8.1.303" />

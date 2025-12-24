@@ -429,6 +429,7 @@ namespace GBOG
             {
                 ImGui.Text($"Frame: target {stats.TargetFrameMs:0.00} ms, host {stats.HostFrameMs:0.00} ms, work {stats.EmuWorkMs:0.00} ms, wait {stats.ThrottleWaitMs:0.00} ms");
                 ImGui.Text($"Speed: {stats.SpeedMultiplier:0.00}x  Hot PC: {stats.HotPc:X4} (repeats {stats.HotPcRepeats})");
+                ImGui.Text($"Ops: {stats.InstructionsThisFrame}");
                 ImGui.Text($"GC: gen0 +{stats.Gc0Collections}, gen1 +{stats.Gc1Collections}, gen2 +{stats.Gc2Collections}");
 
                 if (double.IsNaN(stats.EmuWorkCpuMs))
@@ -440,6 +441,11 @@ namespace GBOG
                     double preemptMs = stats.EmuWorkMs - stats.EmuWorkCpuMs;
                     if (preemptMs < 0) preemptMs = 0;
                     ImGui.Text($"CPU: {stats.EmuWorkCpuMs:0.00} ms, preempt {preemptMs:0.00} ms, alloc {stats.AllocBytesThisFrame / 1024.0:0.0} KB");
+                }
+
+                if (stats.HasThreadCpuCycles)
+                {
+                    ImGui.Text($"CPU cycles: {stats.ThreadCpuCyclesThisFrame:N0}");
                 }
             }
             ImGui.Separator();

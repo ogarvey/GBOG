@@ -69,6 +69,11 @@ namespace GBOG.CPU
             public ushort HotPc { get; init; }
             public int HotPcRepeats { get; init; }
 
+            public int InstructionsThisFrame { get; init; }
+
+            public bool HasThreadCpuCycles { get; init; }
+            public ulong ThreadCpuCyclesThisFrame { get; init; }
+
             public long AllocBytesThisFrame { get; init; }
 
             public int Gc0Collections { get; init; }
@@ -85,6 +90,9 @@ namespace GBOG.CPU
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetCurrentThread();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryThreadCycleTime(IntPtr threadHandle, out ulong cycleTime);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool GetThreadTimes(
@@ -121,6 +129,23 @@ namespace GBOG.CPU
 
             cpu100ns = FileTimeToLong(kernel) + FileTimeToLong(user);
             return true;
+        }
+
+        private static bool TryGetCurrentThreadCpuCycles(out ulong cycles)
+        {
+            cycles = 0;
+            if (!OperatingSystem.IsWindows())
+            {
+                return false;
+            }
+
+            IntPtr thread = GetCurrentThread();
+            if (thread == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            return QueryThreadCycleTime(thread, out cycles);
         }
 
         private volatile EmulationStats? _stats;
@@ -286,6 +311,9 @@ namespace GBOG.CPU
                     long threadCpuStart100ns = 0;
                     bool hasThreadCpuStart = TryGetCurrentThreadCpuTime100ns(out threadCpuStart100ns);
 
+                    ulong threadCpuCyclesStart = 0;
+                    bool hasThreadCpuCyclesStart = TryGetCurrentThreadCpuCycles(out threadCpuCyclesStart);
+
                     long allocStart = GC.GetAllocatedBytesForCurrentThread();
 
                     int gc0Start = GC.CollectionCount(0);
@@ -301,6 +329,7 @@ namespace GBOG.CPU
                     lastLimitSpeed = limitSpeed;
 
                     int baseCyclesThisFrame = 0;
+                    int instructionsThisFrame = 0;
 
                     while (baseCyclesThisFrame < MaxBaseCyclesPerFrame)
                     {
@@ -350,6 +379,7 @@ namespace GBOG.CPU
                             }
 
                             opcode = _memory.ReadByte(PC++);
+                            instructionsThisFrame++;
                             GBOpcode? op;
                             if (opcode == 0xCB)
                             {
@@ -376,7 +406,6 @@ namespace GBOG.CPU
 								//UpdateGraphics(baseCycles);
 								_ppu.Step(baseCycles);
                                         _memory.TickBaseCycles(baseCycles);
-                                        OnGraphicsRAMAccessed?.Invoke(this, true);
                                     }
                                     else
                                     {
@@ -413,6 +442,14 @@ namespace GBOG.CPU
                     if (hasThreadCpuStart && TryGetCurrentThreadCpuTime100ns(out long threadCpuEnd100ns))
                     {
                         emuWorkCpuMs = (threadCpuEnd100ns - threadCpuStart100ns) / 10000.0;
+                    }
+
+                    bool hasThreadCpuCycles = false;
+                    ulong threadCpuCyclesThisFrame = 0;
+                    if (hasThreadCpuCyclesStart && TryGetCurrentThreadCpuCycles(out ulong threadCpuCyclesEnd))
+                    {
+                        hasThreadCpuCycles = true;
+                        threadCpuCyclesThisFrame = threadCpuCyclesEnd - threadCpuCyclesStart;
                     }
 
                     long allocBytes = GC.GetAllocatedBytesForCurrentThread() - allocStart;
@@ -481,6 +518,11 @@ namespace GBOG.CPU
                         SpeedMultiplier = speed,
                         HotPc = hotPc,
                         HotPcRepeats = hotPcRepeats,
+
+                        InstructionsThisFrame = instructionsThisFrame,
+
+                        HasThreadCpuCycles = hasThreadCpuCycles,
+                        ThreadCpuCyclesThisFrame = threadCpuCyclesThisFrame,
 
                         AllocBytesThisFrame = allocBytes,
 
