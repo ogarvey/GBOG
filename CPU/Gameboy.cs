@@ -8,6 +8,7 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
+using System.Reflection;
 using Log = Serilog.Log;
 
 namespace GBOG.CPU
@@ -46,6 +47,14 @@ namespace GBOG.CPU
         public GBMemory _memory { get; }
         public PPU _ppu { get; }
         public bool EnableCpuTrace { get; set; } = false;
+
+    #if DEBUG
+        // Aggressively pre-JIT most methods at ROM load to avoid one-off, in-game stalls.
+        // This can increase ROM load time in Debug but keeps gameplay smooth.
+        public bool AggressiveJitWarmup { get; set; } = true;
+    #else
+        public bool AggressiveJitWarmup { get; set; } = false;
+    #endif
 
         public bool DoubleSpeed { get; private set; } = false;
         public Apu Apu { get; }
@@ -1284,6 +1293,81 @@ namespace GBOG.CPU
             _opcodeHandler.WarmupJit();
             _ppu.WarmupJit();
             Apu.Step(0);
+
+            if (AggressiveJitWarmup)
+            {
+                WarmupJitAggressive();
+            }
+        }
+
+        private void WarmupJitAggressive()
+        {
+            // JIT compilation uses unmanaged memory, so it can show up as a large CPU-time spike
+            // with 0 managed allocations. Pre-JIT most of the emulator's code to shift that cost
+            // to ROM load.
+            try
+            {
+                var asm = typeof(Gameboy).Assembly;
+                var seen = new HashSet<IntPtr>();
+
+                foreach (var t in asm.GetTypes())
+                {
+                    string? name = t.FullName;
+                    if (name == null || !name.StartsWith("GBOG.", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    // Prepare type initializer (static constructor) if present.
+                    var cctor = t.TypeInitializer;
+                    if (cctor != null && !cctor.ContainsGenericParameters)
+                    {
+                        var mh = cctor.MethodHandle;
+                        if (mh.Value != IntPtr.Zero && seen.Add(mh.Value))
+                        {
+                            try { RuntimeHelpers.PrepareMethod(mh); } catch { }
+                        }
+                    }
+
+                    const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+
+                    foreach (var m in t.GetMethods(flags))
+                    {
+                        if (m.IsAbstract || m.ContainsGenericParameters)
+                        {
+                            continue;
+                        }
+
+                        var mh = m.MethodHandle;
+                        if (mh.Value == IntPtr.Zero || !seen.Add(mh.Value))
+                        {
+                            continue;
+                        }
+
+                        try { RuntimeHelpers.PrepareMethod(mh); } catch { }
+                    }
+
+                    foreach (var ctor in t.GetConstructors(flags))
+                    {
+                        if (ctor.ContainsGenericParameters)
+                        {
+                            continue;
+                        }
+
+                        var mh = ctor.MethodHandle;
+                        if (mh.Value == IntPtr.Zero || !seen.Add(mh.Value))
+                        {
+                            continue;
+                        }
+
+                        try { RuntimeHelpers.PrepareMethod(mh); } catch { }
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort only.
+            }
         }
 
         public async Task<bool> RunGame()

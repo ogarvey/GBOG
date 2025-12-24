@@ -1965,6 +1965,7 @@ namespace GBOG.Memory
 					// When LCD is disabled, LY is reset and STAT mode becomes 0.
 					_memory[0xFF44] = 0;
 					_memory[0xFF41] = (byte)(_memory[0xFF41] & 0b1111_1100);
+					_gameBoy._ppu.OnLcdDisabled();
 				}
 				else if (!oldEnabled && newEnabled)
 				{

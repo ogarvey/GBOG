@@ -163,6 +163,19 @@ namespace GBOG.Graphics
 			_scanlineCounter = 456 - 4;
 		}
 
+		internal void OnLcdDisabled()
+		{
+			// When LCD is turned off, DMG shows a blank (very bright) screen and LY resets.
+			// Do this once on the transition; doing it every PPU step is extremely slow.
+			Screen.Clear(Color.White);
+			_gb._memory.LY = 0;
+			Scanline = 0;
+			WindowScanline = 0;
+			_prevMode = 0;
+			_prevCoincidence = false;
+			_scanlineCounter = 456;
+		}
+
 		// Methods
 
 		// Resets the GPU to its initial state.
@@ -594,15 +607,10 @@ namespace GBOG.Graphics
 
 			if (!_gb._memory.LCDEnabled)
 			{
-				// DMG shows a blank (very bright) screen when LCD is off.
-				Screen.Clear(Color.White);
-				_scanlineCounter = 456;
-				_gb._memory.LY = 0;
 				// When LCD is off, STAT mode is 0 (HBlank) and coincidence is cleared.
+				// Side effects like LY reset and blanking are handled on the LCD on/off transition.
 				lcdStatus &= 0b1111_1000;
 				_gb._memory.LCDStatus = lcdStatus;
-				_prevMode = 0;
-				_prevCoincidence = false;
 				return;
 			}
 
