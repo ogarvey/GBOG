@@ -39,6 +39,12 @@ namespace GBOG.Memory
 		private int _serialControlWrites;
 		private int _serialTransferStarts;
 
+		// OAM DMA (FF46)
+		private bool _oamDmaActive;
+		private ushort _oamDmaSourceBase;
+		private int _oamDmaByteIndex;
+		private int _oamDmaDotCounter;
+
 		public int SerialControlWrites => _serialControlWrites;
 		public int SerialTransferStarts => _serialTransferStarts;
 
@@ -1297,8 +1303,101 @@ namespace GBOG.Memory
 			return MirrorRomBank(bank);
 		}
 
+		private void StartOamDma(byte highByte)
+		{
+			// FF46 write starts a DMA transfer from XX00-XX9F to FE00-FE9F.
+			_memory[0xFF46] = highByte;
+			_oamDmaActive = true;
+			_oamDmaSourceBase = (ushort)(highByte << 8);
+			_oamDmaByteIndex = 0;
+			_oamDmaDotCounter = 0;
+		}
+
+		private byte ReadByteForDma(ushort address)
+		{
+			// Like ReadByte, but without CPU access restrictions (Mode 3 / DMA / OAM access) and without OAM-bug side effects.
+			int newAddress;
+			if (address < 0x4000)
+			{
+				if (_mbc1)
+				{
+					int bank = GetMbc1Bank0();
+					newAddress = (bank * 0x4000) + address;
+					return _cartRom[newAddress];
+				}
+				if (_mbc2)
+				{
+					return _cartRom[address];
+				}
+				return _cartRom[address];
+			}
+			if (address >= 0x4000 && address <= 0x7FFF)
+			{
+				if (_mbc1)
+				{
+					int bank = GetMbc1Bank1();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				if (_mbc2)
+				{
+					int bank = GetMbc2RomBank();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				if (_mbc3)
+				{
+					int bank = GetMbc3RomBank();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				return _memory[address];
+			}
+			if (address >= 0x8000 && address <= 0x9FFF)
+			{
+				return _gameBoy._ppu.VideoRam[address - 0x8000];
+			}
+			if (address >= 0xA000 && address <= 0xBFFF)
+			{
+				return ReadRam(address);
+			}
+			if (address >= 0xFE00 && address <= 0xFE9F)
+			{
+				return _gameBoy._ppu.OAM[address - 0xFE00];
+			}
+			return _memory[address];
+		}
+
+		private void TickOamDma(int baseCycles)
+		{
+			if (!_oamDmaActive || baseCycles <= 0)
+			{
+				return;
+			}
+
+			// 160 bytes total. Timing: 160 M-cycles.
+			// In terms of PPU dots: 640 dots in normal speed, 320 dots in double speed.
+			int dotsPerByte = _gameBoy.DoubleSpeed ? 2 : 4;
+			_oamDmaDotCounter += baseCycles;
+			while (_oamDmaDotCounter >= dotsPerByte && _oamDmaByteIndex < 0xA0)
+			{
+				_oamDmaDotCounter -= dotsPerByte;
+				ushort src = (ushort)(_oamDmaSourceBase + _oamDmaByteIndex);
+				byte b = ReadByteForDma(src);
+				int i = _oamDmaByteIndex;
+				_memory[0xFE00 + i] = b;
+				_gameBoy._ppu.OAM[i] = b;
+				_oamDmaByteIndex++;
+			}
+			if (_oamDmaByteIndex >= 0xA0)
+			{
+				_oamDmaActive = false;
+			}
+		}
+
 		internal void TickBaseCycles(int baseCycles)
 		{
+			TickOamDma(baseCycles);
 			if (!_mbc3 || _mbc3RtcHalt)
 			{
 				return;
@@ -1501,10 +1600,28 @@ namespace GBOG.Memory
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public byte ReadByte(ushort address)
 		{
+			// During OAM DMA on DMG, the CPU can access only HRAM (FF80-FFFE) and typically IE (FFFF).
+			// Reads elsewhere return open bus ($FF).
+			if (_oamDmaActive && !_isCgb && address < 0xFF80)
+			{
+				return 0xFF;
+			}
+
+			// VRAM is inaccessible to the CPU during Mode 3.
+			if (address >= 0x8000 && address <= 0x9FFF && IsVramBlockedForCpu())
+			{
+				return 0xFF;
+			}
+
 			int newAddress;
 			if (address >= 0xFE00 && address <= 0xFEFF)
 			{
 				_gameBoy.MarkOamRead();
+				// OAM is inaccessible during Modes 2 and 3, and also during OAM DMA.
+				if (address <= 0xFE9F && (_oamDmaActive || IsOamBlockedForCpu()))
+				{
+					return 0xFF;
+				}
 			}
 			if (address == 0xFF4D)
 			{
@@ -1557,6 +1674,30 @@ namespace GBOG.Memory
 			{
 				return _memory[address];
 			}
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private int GetPpuMode() => _memory[0xFF41] & 0b11;
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private bool IsVramBlockedForCpu()
+		{
+			if (!LCDEnabled)
+			{
+				return false;
+			}
+			return GetPpuMode() == 3;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private bool IsOamBlockedForCpu()
+		{
+			if (!LCDEnabled)
+			{
+				return false;
+			}
+			int mode = GetPpuMode();
+			return mode == 2 || mode == 3;
 		}
 
 		private byte ReadRam(ushort address)
@@ -1646,13 +1787,6 @@ namespace GBOG.Memory
 			{
 				Debugger.Break();
 			}
-			else if (address >= 0xFE00 && address < 0xFEA0)
-			{
-				_gameBoy._ppu.OAM[address - 0xFE00] = (byte)(value & 0xFF);
-				_gameBoy._ppu.OAM[address - 0xFE00 + 1] = (byte)((value & 0xFF00) >> 8);
-				WriteByte(address, (byte)(value & 0xFF));
-				WriteByte((ushort)(address + 1), (byte)((value & 0xFF00) >> 8));
-			}
 			else
 			{
 				WriteByte(address,(byte)(value & 0xFF));
@@ -1662,6 +1796,13 @@ namespace GBOG.Memory
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public void WriteByte(ushort address, byte value)
 		{
+			// During OAM DMA on DMG, the CPU can access only HRAM (FF80-FFFE) and typically IE (FFFF).
+			// Writes elsewhere are ignored.
+			if (_oamDmaActive && !_isCgb && address < 0xFF80)
+			{
+				return;
+			}
+
 			if (address < 0x8000)
 			{
 				HandleBanking(address, value);
@@ -1669,6 +1810,11 @@ namespace GBOG.Memory
 			// 0x8000 - 0x9FFF (VRAM)
 			else if ((address >= 0x8000) && (address <= 0x9FFF))
 			{
+				// VRAM is inaccessible during Mode 3; writes are ignored.
+				if (IsVramBlockedForCpu())
+				{
+					return;
+				}
 				_memory[address] = value;
 				_gameBoy._ppu.VideoRam[address - 0x8000] = value;
 				//_gameBoy.UpdateTile(address, value);
@@ -1689,6 +1835,11 @@ namespace GBOG.Memory
 			else if (address >= 0xFE00 && address < 0xFEA0)
 			{
 				_gameBoy.MarkOamWrite();
+				// OAM is inaccessible during Modes 2 and 3, and also during OAM DMA.
+				if (_oamDmaActive || IsOamBlockedForCpu())
+				{
+					return;
+				}
 				_gameBoy._ppu.OAM[address - 0xFE00] = value;
 				_memory[address] = value;
 			}
@@ -1730,6 +1881,14 @@ namespace GBOG.Memory
 				{
 					_gameBoy._ppu.OnLcdEnabled();
 				}
+			}
+			else if (address == 0xFF41)
+			{
+				// STAT: only bits 3-6 are writable. Bits 0-2 are controlled by the PPU.
+				byte old = _memory[0xFF41];
+				byte preserved = (byte)(old & 0b1000_0111);
+				byte writable = (byte)(value & 0b0111_1000);
+				_memory[0xFF41] = (byte)(preserved | writable);
 			}
 			else if (address == 0xFF4D)
 			{
@@ -1776,12 +1935,7 @@ namespace GBOG.Memory
 			}
 			else if (address == 0xFF46)
 			{
-				var sourceAddress = (ushort)(value << 8);
-				for (int i = 0; i < 0xA0; i++)
-				{
-					_memory[0xFE00 + i] = _memory[sourceAddress + i];
-					_gameBoy._ppu.OAM[i] = _memory[sourceAddress + i];
-				}
+				StartOamDma(value);
 			}
 			else
 			{

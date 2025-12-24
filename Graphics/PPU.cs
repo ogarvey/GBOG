@@ -9,7 +9,8 @@ namespace GBOG.Graphics
 		private int _scanlineCounter;
 		private readonly Gameboy _gb;
 
-		private static int _prevLy = 0;
+		private int _prevMode = -1;
+		private bool _prevCoincidence;
 		private static readonly int _lcdMode2Bounds = 456 - 80;
 		private readonly int _lcdMode3Bounds = _lcdMode2Bounds - 172;
 		
@@ -157,7 +158,8 @@ namespace GBOG.Graphics
 			_gb._memory.LY = 0;
 			Scanline = 0;
 			WindowScanline = 0;
-			_prevLy = 0;
+			_prevMode = -1;
+			_prevCoincidence = false;
 			_scanlineCounter = 456 - 4;
 		}
 
@@ -546,12 +548,15 @@ namespace GBOG.Graphics
 
 			if (!_gb._memory.LCDEnabled)
 			{
-				Screen.Clear(Color.Black);
+				// DMG shows a blank (very bright) screen when LCD is off.
+				Screen.Clear(Color.White);
 				_scanlineCounter = 456;
 				_gb._memory.LY = 0;
 				// When LCD is off, STAT mode is 0 (HBlank) and coincidence is cleared.
 				lcdStatus &= 0b1111_1000;
 				_gb._memory.LCDStatus = lcdStatus;
+				_prevMode = 0;
+				_prevCoincidence = false;
 				return;
 			}
 
@@ -589,15 +594,26 @@ namespace GBOG.Graphics
 				reqInt = lcdStatus.TestBit(3);
 			}
 
-			if (reqInt && mode != currentMode && _prevLy != Scanline)
+			// STAT mode interrupts trigger on transitions into Mode 0/1/2.
+			if (mode != currentMode)
 			{
-				_gb.RequestInterrupt(Interrupt.LCDStat);
+				if (reqInt)
+				{
+					_gb.RequestInterrupt(Interrupt.LCDStat);
+				}
+				_prevMode = mode;
+			}
+			else if (_prevMode < 0)
+			{
+				_prevMode = mode;
 			}
 
-			if (Scanline == _gb._memory.LYC)
+			// LYC=LY coincidence flag is constantly updated; interrupt triggers on 0->1 edge.
+			bool coincidence = Scanline == _gb._memory.LYC;
+			if (coincidence)
 			{
-				lcdStatus |= 0b100;
-				if (lcdStatus.TestBit(6) && _prevLy != Scanline)
+				lcdStatus |= 0b0000_0100;
+				if (!_prevCoincidence && lcdStatus.TestBit(6))
 				{
 					_gb.RequestInterrupt(Interrupt.LCDStat);
 				}
@@ -606,11 +622,7 @@ namespace GBOG.Graphics
 			{
 				lcdStatus &= 0b1111_1011;
 			}
-
-			if (_prevLy != Scanline)
-			{
-				_prevLy = Scanline;
-			}
+			_prevCoincidence = coincidence;
 			
 			_gb._memory.LCDStatus = lcdStatus;
 		}
