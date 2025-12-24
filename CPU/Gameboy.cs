@@ -60,6 +60,10 @@ namespace GBOG.CPU
         public Apu Apu { get; }
         private AudioOutput? _audioOutput;
 
+        private float _audioVolume = 1.0f;
+        public float AudioVolume => _audioVolume;
+        public bool AudioEnabled => _audioOutput != null;
+
         // When enabled, throttle emulation to real time.
         // This prevents audio buffer overflow (crackles) and keeps games at correct speed.
         public bool LimitSpeed { get; set; } = false;
@@ -269,6 +273,7 @@ namespace GBOG.CPU
                     return;
                 }
                 _audioOutput = new AudioOutput(sampleRate: 44100);
+                _audioOutput.Volume = _audioVolume;
                 Apu.SetSink(_audioOutput);
             }
             else
@@ -280,6 +285,15 @@ namespace GBOG.CPU
                 Apu.SetSink(null);
                 _audioOutput.Dispose();
                 _audioOutput = null;
+            }
+        }
+
+        public void SetAudioVolume(float volume)
+        {
+            _audioVolume = Math.Clamp(volume, 0f, 1f);
+            if (_audioOutput != null)
+            {
+                _audioOutput.Volume = _audioVolume;
             }
         }
         public EventHandler<bool>? OnGraphicsRAMAccessed;

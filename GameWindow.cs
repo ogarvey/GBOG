@@ -8,6 +8,8 @@ using Hexa.NET.ImGui.Widgets;
 using Hexa.NET.ImGui.Widgets.Dialogs;
 using Hexa.NET.OpenGL;
 using HexaGen.Runtime;
+using GBOG.Utils;
+using System.Reflection;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -16,6 +18,8 @@ namespace GBOG
 {
     public unsafe class GameWindow
     {
+        private AppSettings _settings = new();
+
         private Hexa.NET.GLFW.GLFWwindowPtr _window;
         private Gameboy? _gb;
         private uint _textureId;
@@ -24,6 +28,10 @@ namespace GBOG
         private string _serialOutput = "";
         private string? _loadedRomName;
         private bool _gameRunning = false;
+
+        private bool _audioEnabled = true;
+        private float _audioVolume = 1.0f;
+
         private GL _gl = null!;
         private ImGuiContextPtr _guiContext;
         private const float UiScale = 1.25f;
@@ -62,6 +70,9 @@ namespace GBOG
 
         public void Run()
         {
+            _settings = SettingsStore.Load();
+            ApplySettingsToFields();
+
             if (GLFW.Init() == 0)
             {
                 Console.WriteLine("Failed to initialize GLFW");
@@ -117,6 +128,7 @@ namespace GBOG
 
             _textureId = CreateTexture();
             _fileOpenDialog = new FileOpenDialog();
+            ApplySettingsToFileDialog();
             EnsureMemoryViewerStates();
 
             while (GLFW.WindowShouldClose(_window) == 0)
@@ -124,12 +136,14 @@ namespace GBOG
                 GLFW.PollEvents();
 
                 UpdateJoypadFromKeyboard();
+                HandleGlobalShortcuts();
 
                 if (_requestedFontSizePixels.HasValue)
                 {
                     var requested = _requestedFontSizePixels.Value;
                     _requestedFontSizePixels = null;
                     ApplyFontSize(requested, rebuildBackend: true);
+                    SaveSettings();
                 }
 
                 ImGuiImplOpenGL3.NewFrame();
@@ -159,6 +173,24 @@ namespace GBOG
 
                 GLFW.SwapBuffers(_window);
             }
+
+            // Persist window size for next run.
+            try
+            {
+                int w, h;
+                GLFW.GetWindowSize(_window, &w, &h);
+                if (w > 0 && h > 0)
+                {
+                    _width = w;
+                    _height = h;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            SaveSettings();
 
             // Cleanup
             if (_gb != null)
@@ -209,6 +241,66 @@ namespace GBOG
             _ = _gb._memory.Joypad;
         }
 
+        private void HandleGlobalShortcuts()
+        {
+            // Only process shortcuts when our window is focused.
+            if (GLFW.GetWindowAttrib(_window, GLFW.GLFW_FOCUSED) == 0)
+            {
+                return;
+            }
+
+            var io = ImGui.GetIO();
+            if (io.WantTextInput)
+            {
+                return;
+            }
+
+            bool changed = false;
+
+            // Audio shortcuts (avoid overlapping with gameplay keys).
+            if (ImGui.IsKeyPressed(ImGuiKey.F9))
+            {
+                ToggleAudioEnabled();
+                changed = true;
+            }
+
+            const float step = 0.05f;
+            if (ImGui.IsKeyPressed(ImGuiKey.F10, true))
+            {
+                AdjustAudioVolume(-step);
+                changed = true;
+            }
+            if (ImGui.IsKeyPressed(ImGuiKey.F11, true))
+            {
+                AdjustAudioVolume(step);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                SaveSettings();
+            }
+        }
+
+        private void ToggleAudioEnabled()
+        {
+            _audioEnabled = !_audioEnabled;
+            if (_gb != null)
+            {
+                _gb.ConfigureAudioOutput(_audioEnabled);
+                if (_audioEnabled)
+                {
+                    _gb.SetAudioVolume(_audioVolume);
+                }
+            }
+        }
+
+        private void AdjustAudioVolume(float delta)
+        {
+            _audioVolume = Math.Clamp(_audioVolume + delta, 0f, 1f);
+            _gb?.SetAudioVolume(_audioVolume);
+        }
+
         private bool IsKeyDown(GlfwKey key)
         {
             return GLFW.GetKey(_window, (int)key) == GLFW.GLFW_PRESS;
@@ -246,6 +338,7 @@ namespace GBOG
                 {
                     if (ImGui.MenuItem("Load ROM"))
                     {
+                        ApplySettingsToFileDialog();
                         _fileOpenDialog.Show(LoadRomCallback);
                     }
                     if (ImGui.MenuItem("Exit"))
@@ -293,6 +386,8 @@ namespace GBOG
                         _gameRunning = true;
                         if (_gb != null)
                         {
+                            _gb.ConfigureAudioOutput(_audioEnabled);
+                            _gb.SetAudioVolume(_audioVolume);
                             _ = _gb.RunGame();
                         }
                     }
@@ -301,6 +396,42 @@ namespace GBOG
                         _gb?.EndGame();
                         _gameRunning = false;
                     }
+                    ImGui.EndMenu();
+                }
+
+                if (ImGui.BeginMenu("Audio"))
+                {
+                    bool enabled = _audioEnabled;
+                    if (ImGui.MenuItem("Enabled", "F9", enabled, true))
+                    {
+                        ToggleAudioEnabled();
+
+                        SaveSettings();
+                    }
+
+                    ImGui.Separator();
+
+                    const float step = 0.05f;
+
+                    // Keep the menu open while clicking volume adjustments.
+                    ImGui.PushItemFlag(ImGuiItemFlags.AutoClosePopups, false);
+
+                    if (ImGui.MenuItem("Volume -", "F10", false, true))
+                    {
+                        AdjustAudioVolume(-step);
+
+                        SaveSettings();
+                    }
+                    if (ImGui.MenuItem("Volume +", "F11", false, true))
+                    {
+                        AdjustAudioVolume(step);
+
+                        SaveSettings();
+                    }
+
+                    ImGui.PopItemFlag();
+
+                    ImGui.MenuItem($"Volume: {(int)MathF.Round(_audioVolume * 100f)}%", string.Empty, false, false);
                     ImGui.EndMenu();
                 }
 
@@ -529,6 +660,84 @@ namespace GBOG
             _requestedFontSizePixels = clamped;
         }
 
+        private void ApplySettingsToFields()
+        {
+            _audioEnabled = _settings.AudioEnabled;
+            _audioVolume = Math.Clamp(_settings.AudioVolume, 0f, 1f);
+            _fontSizePixels = Math.Clamp(_settings.FontSizePixels, MinFontSizePixels, MaxFontSizePixels);
+
+            if (_settings.WindowWidth >= 320 && _settings.WindowWidth <= 8192)
+            {
+                _width = _settings.WindowWidth;
+            }
+            if (_settings.WindowHeight >= 240 && _settings.WindowHeight <= 8192)
+            {
+                _height = _settings.WindowHeight;
+            }
+        }
+
+        private void SaveSettings()
+        {
+            _settings.AudioEnabled = _audioEnabled;
+            _settings.AudioVolume = Math.Clamp(_audioVolume, 0f, 1f);
+            _settings.FontSizePixels = _fontSizePixels;
+            _settings.WindowWidth = _width;
+            _settings.WindowHeight = _height;
+
+            try
+            {
+                SettingsStore.Save(_settings);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private void ApplySettingsToFileDialog()
+        {
+            string? dir = _settings.LastRomDirectory;
+            if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
+            {
+                return;
+            }
+
+            TrySetStringProperty(_fileOpenDialog, new[]
+            {
+                "InitialDirectory",
+                "InitialPath",
+                "CurrentDirectory",
+                "CurrentPath",
+                "CurrentFolder",
+                "Directory",
+                "Folder",
+                "Path",
+            }, dir);
+        }
+
+        private static void TrySetStringProperty(object target, string[] propertyNames, string value)
+        {
+            Type t = target.GetType();
+            foreach (var name in propertyNames)
+            {
+                var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+                if (p == null || !p.CanWrite || p.PropertyType != typeof(string))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    p.SetValue(target, value);
+                    return;
+                }
+                catch
+                {
+                    // try next
+                }
+            }
+        }
+
         private void ApplyFontSize(float sizePixels, bool rebuildBackend)
         {
             var io = ImGui.GetIO();
@@ -557,8 +766,20 @@ namespace GBOG
                 if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
                 {
                     _loadedRomName = Path.GetFileName(path);
+
+                    try
+                    {
+                        _settings.LastRomDirectory = Path.GetDirectoryName(path);
+                        SaveSettings();
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+
                     _gb = new Gameboy();
-                    _gb.ConfigureAudioOutput(true);
+                    _gb.ConfigureAudioOutput(_audioEnabled);
+                    _gb.SetAudioVolume(_audioVolume);
                     _gb.LimitSpeed = true;
                     _gb._memory.SerialDataReceived += (sender, data) => _serialOutput += data;
                     _gb.LoadRom(path);
