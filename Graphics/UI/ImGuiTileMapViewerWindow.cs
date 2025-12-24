@@ -6,8 +6,10 @@ using Hexa.NET.ImGui.Widgets.Dialogs;
 using Hexa.NET.OpenGL;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using System;
 using System.IO;
 using System.Numerics;
+using System.Text;
 
 namespace GBOG.Graphics.UI;
 
@@ -16,10 +18,12 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     private uint _tileDataTextureId;
     private uint _bgMapTextureId;
     private uint _windowMapTextureId;
+    private uint _spriteLayerTextureId;
 
     private readonly OpenFolderDialog _exportTilesFolderDialog = new();
     private readonly SaveFileDialog _exportBgDialog = new();
     private readonly SaveFileDialog _exportWindowDialog = new();
+    private readonly SaveFileDialog _exportSpritesDialog = new();
 
     private Gameboy? _exportGb;
     private DisplayPalette _exportPalette;
@@ -31,6 +35,10 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
     private const int TileMapSizePixels = 256;
     private bool _tileMapsValid;
+
+    private const int ScreenWidth = 160;
+    private const int ScreenHeight = 144;
+    private bool _spriteLayerValid;
 
     public bool AutoRefresh { get; set; } = true;
 
@@ -61,12 +69,14 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         TilesToFolder,
         BackgroundToFile,
         WindowToFile,
+        SpritesToFile,
     }
 
     public void InvalidateAll()
     {
         _tileDataAtlasValid = false;
         _tileMapsValid = false;
+        _spriteLayerValid = false;
     }
 
     public void Render(ref bool show, Gameboy? gb, GL gl, DisplayPalette displayPalette)
@@ -143,6 +153,15 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             _exportWindowDialog.Show(ExportDialogCallback);
         }
 
+        ImGui.SameLine();
+        if (ImGui.Button("Export Sprites..."))
+        {
+            _exportGb = gb;
+            _exportPalette = displayPalette;
+            _exportRequest = ExportRequest.SpritesToFile;
+            _exportSpritesDialog.Show(ExportDialogCallback);
+        }
+
         if (AutoRefresh)
         {
             var dirty = gb._memory.ConsumeVideoDebugDirty();
@@ -152,16 +171,24 @@ public sealed unsafe class ImGuiTileMapViewerWindow
                 {
                     _tileDataAtlasValid = false;
                     _tileMapsValid = false;
+                    _spriteLayerValid = false;
                 }
 
                 if ((dirty & VideoDebugDirtyFlags.TileData) != 0)
                 {
                     _tileDataAtlasValid = false;
+                    _spriteLayerValid = false;
                 }
 
                 if ((dirty & (VideoDebugDirtyFlags.TileMaps | VideoDebugDirtyFlags.Lcdc)) != 0)
                 {
                     _tileMapsValid = false;
+                    _spriteLayerValid = false;
+                }
+
+                if ((dirty & VideoDebugDirtyFlags.Oam) != 0)
+                {
+                    _spriteLayerValid = false;
                 }
             }
         }
@@ -174,6 +201,11 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         if (!_tileMapsValid)
         {
             TryUpdateTileMaps(gb, gl, displayPalette);
+        }
+
+        if (!_spriteLayerValid)
+        {
+            TryUpdateSpriteLayer(gb, gl, displayPalette);
         }
 
         if (_tileDataTextureId == 0 || _tileDataAtlasWidth <= 0 || _tileDataAtlasHeight <= 0)
@@ -197,7 +229,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             }
 
             ImGui.TableNextColumn();
-            ImGui.Text("Background + Window (Full 256x256)");
+            ImGui.Text("Layers");
             {
                 if (_bgMapTextureId == 0 || _windowMapTextureId == 0)
                 {
@@ -206,24 +238,57 @@ public sealed unsafe class ImGuiTileMapViewerWindow
                 else
                 {
                     var avail = ImGui.GetContentRegionAvail();
-                    float width = MathF.Max(1f, avail.X);
 
-                    // Two square previews stacked vertically.
-                    float each = width;
-                    float gap = ImGui.GetStyle().ItemSpacing.Y;
-                    float needed = (each * 2f) + gap;
-                    if (needed > avail.Y && avail.Y > 1f)
+                    if (ImGui.BeginTabBar("##layerTabs"))
                     {
-                        each = MathF.Max(1f, (avail.Y - gap) / 2f);
-                        width = each;
+                        if (ImGui.BeginTabItem("Background"))
+                        {
+                            var size = FitAspect(avail, aspect: 1f);
+                            ImGui.Image(new ImTextureRef(null, _bgMapTextureId), size);
+                            ImGui.EndTabItem();
+                        }
+
+                        if (ImGui.BeginTabItem("Window"))
+                        {
+                            var size = FitAspect(avail, aspect: 1f);
+                            ImGui.Image(new ImTextureRef(null, _windowMapTextureId), size);
+                            ImGui.EndTabItem();
+                        }
+
+                        if (ImGui.BeginTabItem("Sprites"))
+                        {
+                            if (_spriteLayerTextureId == 0)
+                            {
+                                ImGui.Text("Sprite layer not available.");
+                            }
+                            else
+                            {
+                                float aspect = ScreenWidth / (float)ScreenHeight;
+                                var size = FitAspect(avail, aspect);
+                                ImGui.Image(new ImTextureRef(null, _spriteLayerTextureId), size);
+                                if (ImGui.IsItemHovered())
+                                {
+                                    var mouse = ImGui.GetMousePos();
+                                    var min = ImGui.GetItemRectMin();
+                                    var imgSize = ImGui.GetItemRectSize();
+                                    float u = imgSize.X <= 0 ? 0 : (mouse.X - min.X) / imgSize.X;
+                                    float v = imgSize.Y <= 0 ? 0 : (mouse.Y - min.Y) / imgSize.Y;
+                                    int sx = Math.Clamp((int)(u * ScreenWidth), 0, ScreenWidth - 1);
+                                    int sy = Math.Clamp((int)(v * ScreenHeight), 0, ScreenHeight - 1);
+
+                                    string info = DescribeSpritesAtPixel(gb, sx, sy);
+                                    if (!string.IsNullOrWhiteSpace(info))
+                                    {
+                                        ImGui.TextWrapped(info);
+                                    }
+                                }
+                            }
+
+                            ImGui.EndTabItem();
+                        }
+
+                        ImGui.EndTabBar();
                     }
-
-                    ImGui.Text("Background");
-                    ImGui.Image(new ImTextureRef(null, _bgMapTextureId), new Vector2(width, each));
-
-                    ImGui.Spacing();
-                    ImGui.Text("Window");
-                    ImGui.Image(new ImTextureRef(null, _windowMapTextureId), new Vector2(width, each));
                 }
             }
 
@@ -234,6 +299,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         _exportTilesFolderDialog.Draw(ImGuiWindowFlags.None);
         _exportBgDialog.Draw(ImGuiWindowFlags.None);
         _exportWindowDialog.Draw(ImGuiWindowFlags.None);
+        _exportSpritesDialog.Draw(ImGuiWindowFlags.None);
 
         ImGui.End();
     }
@@ -298,6 +364,20 @@ public sealed unsafe class ImGuiTileMapViewerWindow
                     }
                     break;
                 }
+
+                case ExportRequest.SpritesToFile:
+                {
+                    var path = GetSelectedPathForRequest(sender, _exportRequest);
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        ExportSpritesToFile(gb, _exportPalette, path);
+                    }
+                    else
+                    {
+                        DebugLog("[TileMapViewer] Export OBJ: no file selected.");
+                    }
+                    break;
+                }
             }
         }
         catch
@@ -319,6 +399,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             ExportRequest.TilesToFolder => _exportTilesFolderDialog,
             ExportRequest.BackgroundToFile => _exportBgDialog,
             ExportRequest.WindowToFile => _exportWindowDialog,
+            ExportRequest.SpritesToFile => _exportSpritesDialog,
             _ => null,
         };
 
@@ -461,6 +542,39 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
         using var image = Image.LoadPixelData<Rgba32>(rgba, TileMapSizePixels, TileMapSizePixels);
         image.Save(path);
+    }
+
+    private static void ExportSpritesToFile(Gameboy gb, DisplayPalette palette, string path)
+    {
+        path = EnsurePngExtension(path);
+
+        string? dir = System.IO.Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(dir))
+        {
+            Directory.CreateDirectory(dir);
+        }
+
+        var tileData = gb._memory.GetTileData();
+        var oam = gb._memory.OAMRam;
+        bool use8x16 = gb._memory.OBJSize;
+        byte obp0 = gb._memory.OBP0;
+        byte obp1 = gb._memory.OBP1;
+        var rgba = RenderSpriteLayerToRgba(oam, tileData, use8x16, palette, obp0, obp1);
+
+        using var image = Image.LoadPixelData<Rgba32>(rgba, ScreenWidth, ScreenHeight);
+        image.Save(path);
+    }
+
+    private static Vector2 FitAspect(Vector2 avail, float aspect)
+    {
+        float w = MathF.Max(1f, avail.X);
+        float h = w / MathF.Max(0.0001f, aspect);
+        if (h > avail.Y && avail.Y > 1f)
+        {
+            h = MathF.Max(1f, avail.Y);
+            w = h * aspect;
+        }
+        return new Vector2(w, h);
     }
 
     private static Rgba32 ToRgba32(DisplayPalette palette, int shadeIndex, bool transparent)
@@ -620,6 +734,206 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         catch
         {
             // best-effort
+        }
+    }
+
+    private void TryUpdateSpriteLayer(Gameboy gb, GL gl, DisplayPalette palette)
+    {
+        try
+        {
+            var tileData = gb._memory.GetTileData();
+            var oam = gb._memory.OAMRam;
+            bool use8x16 = gb._memory.OBJSize;
+            byte obp0 = gb._memory.OBP0;
+            byte obp1 = gb._memory.OBP1;
+
+            var rgba = RenderSpriteLayerToRgba(oam, tileData, use8x16, palette, obp0, obp1);
+
+            if (_spriteLayerTextureId == 0)
+            {
+                _spriteLayerTextureId = CreateTexture(gl, ScreenWidth, ScreenHeight);
+            }
+
+            fixed (byte* p = rgba)
+            {
+                gl.BindTexture(GLTextureTarget.Texture2D, _spriteLayerTextureId);
+                gl.TexSubImage2D(GLTextureTarget.Texture2D, 0, 0, 0, ScreenWidth, ScreenHeight, GLPixelFormat.Rgba, GLPixelType.UnsignedByte, p);
+            }
+
+            _spriteLayerValid = true;
+        }
+        catch
+        {
+            // best-effort
+        }
+    }
+
+    private static byte[] RenderSpriteLayerToRgba(byte[] oam, byte[] tileData, bool use8x16, DisplayPalette palette, byte obp0, byte obp1)
+    {
+        var rgba = new byte[ScreenWidth * ScreenHeight * 4];
+        // Start fully transparent.
+
+        int spriteHeight = use8x16 ? 16 : 8;
+
+        // Draw in reverse OAM order so lower OAM index wins on overlap.
+        for (int spriteIndex = 39; spriteIndex >= 0; spriteIndex--)
+        {
+            int baseAddr = spriteIndex * 4;
+            if (baseAddr + 3 >= oam.Length)
+            {
+                continue;
+            }
+
+            int y = oam[baseAddr + 0] - 16;
+            int x = oam[baseAddr + 1] - 8;
+            int tile = oam[baseAddr + 2];
+            byte attr = oam[baseAddr + 3];
+
+            bool yFlip = (attr & 0x40) != 0;
+            bool xFlip = (attr & 0x20) != 0;
+            bool useObp1 = (attr & 0x10) != 0;
+            byte dmgPal = useObp1 ? obp1 : obp0;
+
+            // 8x16 sprites use two stacked tiles, and the tile index is forced even.
+            int baseTile = use8x16 ? (tile & 0xFE) : tile;
+
+            for (int sy = 0; sy < spriteHeight; sy++)
+            {
+                int py = y + sy;
+                if ((uint)py >= (uint)ScreenHeight)
+                {
+                    continue;
+                }
+
+                int localY = yFlip ? (spriteHeight - 1 - sy) : sy;
+                int tileY = localY;
+                int tileIndex = baseTile;
+                if (use8x16)
+                {
+                    tileIndex = baseTile + (tileY >= 8 ? 1 : 0);
+                    tileY &= 7;
+                }
+
+                int rowIndex = (tileIndex * 16) + (tileY * 2);
+                byte b1 = (uint)rowIndex < (uint)tileData.Length ? tileData[rowIndex] : (byte)0;
+                byte b2 = (uint)(rowIndex + 1) < (uint)tileData.Length ? tileData[rowIndex + 1] : (byte)0;
+
+                for (int sx = 0; sx < 8; sx++)
+                {
+                    int px = x + sx;
+                    if ((uint)px >= (uint)ScreenWidth)
+                    {
+                        continue;
+                    }
+
+                    int localX = xFlip ? (7 - sx) : sx;
+                    int bit = 7 - localX;
+                    int colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+                    if (colorIndex == 0)
+                    {
+                        // OBJ color index 0 is always transparent.
+                        continue;
+                    }
+
+                    int shadeIndex = MapDmgPaletteToShade(dmgPal, colorIndex);
+                    var c = ToRgba32(palette, shadeIndex, transparent: false);
+
+                    int dst = (py * ScreenWidth + px) * 4;
+                    rgba[dst + 0] = c.R;
+                    rgba[dst + 1] = c.G;
+                    rgba[dst + 2] = c.B;
+                    rgba[dst + 3] = c.A;
+                }
+            }
+        }
+
+        return rgba;
+    }
+
+    private static string DescribeSpritesAtPixel(Gameboy gb, int sx, int sy)
+    {
+        try
+        {
+            var oam = gb._memory.OAMRam;
+            var tileData = gb._memory.GetTileData();
+            bool use8x16 = gb._memory.OBJSize;
+
+            int spriteHeight = use8x16 ? 16 : 8;
+            int found = 0;
+            var sb = new StringBuilder();
+
+            sb.Append($"OBJ @ ({sx},{sy})\n");
+
+            for (int spriteIndex = 0; spriteIndex < 40; spriteIndex++)
+            {
+                int baseAddr = spriteIndex * 4;
+                if (baseAddr + 3 >= oam.Length)
+                {
+                    break;
+                }
+
+                int y = oam[baseAddr + 0] - 16;
+                int x = oam[baseAddr + 1] - 8;
+                int tile = oam[baseAddr + 2];
+                byte attr = oam[baseAddr + 3];
+
+                if (sx < x || sx >= x + 8 || sy < y || sy >= y + spriteHeight)
+                {
+                    continue;
+                }
+
+                bool yFlip = (attr & 0x40) != 0;
+                bool xFlip = (attr & 0x20) != 0;
+                bool useObp1 = (attr & 0x10) != 0;
+                bool behindBg = (attr & 0x80) != 0;
+
+                int localY = sy - y;
+                int localX = sx - x;
+                if (yFlip) localY = (spriteHeight - 1 - localY);
+                if (xFlip) localX = (7 - localX);
+
+                int baseTile = use8x16 ? (tile & 0xFE) : tile;
+                int tileIndex = baseTile;
+                int tileY = localY;
+                if (use8x16)
+                {
+                    tileIndex = baseTile + (tileY >= 8 ? 1 : 0);
+                    tileY &= 7;
+                }
+
+                int rowIndex = (tileIndex * 16) + (tileY * 2);
+                byte b1 = (uint)rowIndex < (uint)tileData.Length ? tileData[rowIndex] : (byte)0;
+                byte b2 = (uint)(rowIndex + 1) < (uint)tileData.Length ? tileData[rowIndex + 1] : (byte)0;
+                int bit = 7 - localX;
+                int colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+                if (colorIndex == 0)
+                {
+                    continue;
+                }
+
+                found++;
+                if (found <= 8)
+                {
+                    sb.Append($"- OAM#{spriteIndex:00} pos=({x},{y}) tile={tile} (rowTile={tileIndex}) pal={(useObp1 ? "OBP1" : "OBP0")} flip={(xFlip ? "X" : "-")}{(yFlip ? "Y" : "-")} pri={(behindBg ? "BehindBG" : "Front")}\n");
+                }
+            }
+
+            if (found == 0)
+            {
+                return string.Empty;
+            }
+
+            if (found > 8)
+            {
+                sb.Append($"(+{found - 8} more)\n");
+            }
+
+            sb.Append("Tip: sprites that form a character will usually be a cluster of OAM entries near the same area; the tile IDs shown above are the ones you want to inspect in the Tile Data atlas.");
+            return sb.ToString();
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 

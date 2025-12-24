@@ -28,7 +28,13 @@ namespace GBOG
         private int _height = 720;
         private string _serialOutput = "";
         private string? _loadedRomName;
+        private string? _loadedRomPath;
         private bool _gameRunning = false;
+        private bool _gamePaused = false;
+
+        private EventHandler<char>? _serialHandler;
+
+        private static readonly byte[] _blankFrame = new byte[160 * 144 * 4];
 
         private bool _audioEnabled = true;
         private float _audioVolume = 1.0f;
@@ -155,6 +161,7 @@ namespace GBOG
             }
 
             _textureId = CreateTexture();
+            ClearDisplayTexture();
             _fileOpenDialog = new FileOpenDialog();
             ApplySettingsToFileDialog();
             EnsureMemoryViewerStates();
@@ -285,6 +292,45 @@ namespace GBOG
 
             bool changed = false;
 
+            // Emulation shortcuts
+            if (ImGui.IsKeyPressed(ImGuiKey.F5))
+            {
+                if (_gb != null && _gameRunning && _gamePaused)
+                {
+                    _gb.Resume();
+                    _gamePaused = false;
+                }
+                else
+                {
+                    EnsureGameboyLoaded();
+                    if (_gb != null)
+                    {
+                        _gb.ConfigureAudioOutput(_audioEnabled);
+                        _gb.SetAudioVolume(_audioVolume);
+                        _ = _gb.RunGame();
+                        _gameRunning = true;
+                        _gamePaused = false;
+                    }
+                }
+            }
+
+            if (ImGui.IsKeyPressed(ImGuiKey.F6))
+            {
+                if (_gb != null && _gameRunning && !_gamePaused)
+                {
+                    _gb.Pause();
+                    _gamePaused = true;
+                }
+            }
+
+            if (ImGui.IsKeyPressed(ImGuiKey.F7))
+            {
+                if (_gb != null && _gameRunning)
+                {
+                    StopEmulation(clearLoadedRom: false);
+                }
+            }
+
             // Audio shortcuts (avoid overlapping with gameplay keys).
             if (ImGui.IsKeyPressed(ImGuiKey.F9))
             {
@@ -369,6 +415,90 @@ namespace GBOG
             }
         }
 
+        private void ClearDisplayTexture()
+        {
+            fixed (byte* p = _blankFrame)
+            {
+                _gl.BindTexture(GLTextureTarget.Texture2D, _textureId);
+                _gl.TexSubImage2D(GLTextureTarget.Texture2D, 0, 0, 0, 160, 144, GLPixelFormat.Rgba, GLPixelType.UnsignedByte, p);
+            }
+        }
+
+        private void EnsureGameboyLoaded()
+        {
+            if (_gb != null)
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(_loadedRomPath) || !File.Exists(_loadedRomPath))
+            {
+                return;
+            }
+
+            var gb = new Gameboy();
+            gb.SetDisplayPalette(GetCurrentDisplayPalette());
+            gb.ConfigureAudioOutput(_audioEnabled);
+            gb.SetAudioVolume(_audioVolume);
+            gb.LimitSpeed = true;
+
+            // Reset UI-facing state for a fresh run.
+            _serialOutput = string.Empty;
+
+            _serialHandler = (_, data) => _serialOutput += data;
+            gb._memory.SerialDataReceived += _serialHandler;
+
+            gb.LoadRom(_loadedRomPath);
+            _gb = gb;
+
+            _tileViewer.InvalidateAll();
+            ClearDisplayTexture();
+        }
+
+        private void StopEmulation(bool clearLoadedRom)
+        {
+            var gb = _gb;
+            if (gb != null)
+            {
+                try
+                {
+                    gb.EndGame();
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                try
+                {
+                    if (_serialHandler != null)
+                    {
+                        gb._memory.SerialDataReceived -= _serialHandler;
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+
+            _serialHandler = null;
+            _gb = null;
+            _gameRunning = false;
+            _gamePaused = false;
+
+            // Clear UI so we don't show stale pixels/state.
+            ClearDisplayTexture();
+            _tileViewer.InvalidateAll();
+
+            if (clearLoadedRom)
+            {
+                _loadedRomName = null;
+                _loadedRomPath = null;
+                _serialOutput = string.Empty;
+            }
+        }
+
         private void RenderUI()
         {
             if (ImGui.BeginMainMenuBar())
@@ -425,20 +555,38 @@ namespace GBOG
                 
                 if (ImGui.BeginMenu("Emulation"))
                 {
-                    if (ImGui.MenuItem("Start", string.Empty, _gameRunning, _gb != null))
+                    bool canStart = !_gameRunning && (_gb != null || !string.IsNullOrWhiteSpace(_loadedRomPath));
+                    if (ImGui.MenuItem("Start", "F5", _gameRunning && !_gamePaused, canStart))
                     {
-                        _gameRunning = true;
+                        EnsureGameboyLoaded();
                         if (_gb != null)
                         {
                             _gb.ConfigureAudioOutput(_audioEnabled);
                             _gb.SetAudioVolume(_audioVolume);
                             _ = _gb.RunGame();
+                            _gameRunning = true;
+                            _gamePaused = false;
                         }
                     }
-                    if (ImGui.MenuItem("Stop", string.Empty, !_gameRunning, _gb != null))
+
+                    bool canPause = _gb != null && _gameRunning && !_gamePaused;
+                    if (ImGui.MenuItem("Pause", "F6", _gamePaused, canPause))
                     {
-                        _gb?.EndGame();
-                        _gameRunning = false;
+                        _gb?.Pause();
+                        _gamePaused = true;
+                    }
+
+                    bool canResume = _gb != null && _gameRunning && _gamePaused;
+                    if (ImGui.MenuItem("Resume", "F5", false, canResume))
+                    {
+                        _gb?.Resume();
+                        _gamePaused = false;
+                    }
+
+                    bool canStop = _gb != null && _gameRunning;
+                    if (ImGui.MenuItem("Stop", "F7", false, canStop))
+                    {
+                        StopEmulation(clearLoadedRom: false);
                     }
                     ImGui.EndMenu();
                 }
@@ -490,9 +638,13 @@ namespace GBOG
 
             ImGui.Begin("Game View");
             ImGui.Text($"ROM: {(_loadedRomName ?? "None")}");
-            if (_gb != null)
+
+            if (_gb != null && _gameRunning && !_gamePaused)
             {
                 UpdateTexture();
+            }
+
+            {
                 var avail = ImGui.GetContentRegionAvail();
                 float aspect = 160f / 144f;
                 float w = avail.X;
@@ -502,7 +654,7 @@ namespace GBOG
                     h = avail.Y;
                     w = h * aspect;
                 }
-                
+
                 ImGui.Image(new ImTextureRef(null, _textureId), new Vector2(w, h));
             }
             ImGui.End();
@@ -950,7 +1102,11 @@ namespace GBOG
                 var path = _fileOpenDialog.SelectedFile;
                 if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
                 {
+                    // If a ROM is currently running/paused, stop and clear state before switching.
+                    StopEmulation(clearLoadedRom: false);
+
                     _loadedRomName = Path.GetFileName(path);
+                    _loadedRomPath = path;
 
                     try
                     {
@@ -962,16 +1118,8 @@ namespace GBOG
                         // ignore
                     }
 
-                    _gb = new Gameboy();
-                    _gb.SetDisplayPalette(GetCurrentDisplayPalette());
-                    _gb.ConfigureAudioOutput(_audioEnabled);
-                    _gb.SetAudioVolume(_audioVolume);
-                    _gb.LimitSpeed = true;
-                    _gb._memory.SerialDataReceived += (sender, data) => _serialOutput += data;
-                    _gb.LoadRom(path);
-
-                    // Refresh tile viewer textures for the new ROM.
-                    _tileViewer.InvalidateAll();
+                    // Load ROM into a fresh emulator instance (state reset).
+                    EnsureGameboyLoaded();
                 }
             }
         }

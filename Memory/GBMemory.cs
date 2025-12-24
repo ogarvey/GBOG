@@ -18,6 +18,7 @@ namespace GBOG.Memory
 		TileMaps = 1 << 1,
 		Lcdc = 1 << 2,
 		Palette = 1 << 3,
+		Oam = 1 << 4,
 	}
 
 	public class GBMemory
@@ -1333,6 +1334,7 @@ namespace GBOG.Memory
 			_oamDmaSourceBase = (ushort)(highByte << 8);
 			_oamDmaByteIndex = 0;
 			_oamDmaDotCounter = 0;
+			MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
 		}
 
 		private byte ReadByteForDma(ushort address)
@@ -1401,6 +1403,7 @@ namespace GBOG.Memory
 			// In terms of PPU dots: 640 dots in normal speed, 320 dots in double speed.
 			int dotsPerByte = _gameBoy.DoubleSpeed ? 2 : 4;
 			_oamDmaDotCounter += baseCycles;
+			bool wroteAny = false;
 			while (_oamDmaDotCounter >= dotsPerByte && _oamDmaByteIndex < 0xA0)
 			{
 				_oamDmaDotCounter -= dotsPerByte;
@@ -1410,6 +1413,11 @@ namespace GBOG.Memory
 				_memory[0xFE00 + i] = b;
 				_gameBoy._ppu.OAM[i] = b;
 				_oamDmaByteIndex++;
+				wroteAny = true;
+			}
+			if (wroteAny)
+			{
+				MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
 			}
 			if (_oamDmaByteIndex >= 0xA0)
 			{
@@ -1954,6 +1962,7 @@ namespace GBOG.Memory
 				}
 				_gameBoy._ppu.OAM[address - 0xFE00] = value;
 				_memory[address] = value;
+				MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
 			}
 			else if (address >= 0xFEA0 && address <= 0xFEFF)
 			{

@@ -9,6 +9,8 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using Log = Serilog.Log;
 
 namespace GBOG.CPU
@@ -307,6 +309,16 @@ namespace GBOG.CPU
         public EventHandler<bool>? OnGraphicsRAMAccessed;
         private bool _exit = false;
 
+        private readonly ManualResetEventSlim _pauseEvent = new(initialState: true);
+        private readonly object _runLock = new();
+        private Task<bool>? _runTask;
+
+        public bool IsPaused => !_pauseEvent.IsSet;
+
+        public void Pause() => _pauseEvent.Reset();
+
+        public void Resume() => _pauseEvent.Set();
+
         private async Task<bool> DoLoop()
         {
             const int MaxBaseCyclesPerFrame = 70224;
@@ -337,6 +349,13 @@ namespace GBOG.CPU
 
                 while (!_exit)
                 {
+                    // Block here when paused; EndGame() also resumes to allow exit.
+                    _pauseEvent.Wait();
+                    if (_exit)
+                    {
+                        break;
+                    }
+
                     long frameHostStart = Stopwatch.GetTimestamp();
 
                     long threadCpuStart100ns = 0;
@@ -364,6 +383,11 @@ namespace GBOG.CPU
 
                     while (baseCyclesThisFrame < MaxBaseCyclesPerFrame)
                     {
+                        // If paused mid-frame, break out so the outer loop can block.
+                        if (!_pauseEvent.IsSet)
+                        {
+                            break;
+                        }
 
                         byte opcode;
 
@@ -1392,15 +1416,27 @@ namespace GBOG.CPU
             }
         }
 
-        public async Task<bool> RunGame()
+        public Task<bool> RunGame()
         {
-            //LogSystemState();
-            return await DoLoop();
+            lock (_runLock)
+            {
+                if (_runTask != null && !_runTask.IsCompleted)
+                {
+                    return _runTask;
+                }
+
+                // Allow restarting after EndGame().
+                _exit = false;
+                _pauseEvent.Set();
+                _runTask = DoLoop();
+                return _runTask;
+            }
         }
 
         public void EndGame()
         {
             _exit = true;
+            _pauseEvent.Set();
             ConfigureAudioOutput(false);
         }
 
