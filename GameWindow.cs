@@ -96,6 +96,8 @@ namespace GBOG
             {
                 GLFW.PollEvents();
 
+                UpdateJoypadFromKeyboard();
+
                 if (_requestedFontSizePixels.HasValue)
                 {
                     var requested = _requestedFontSizePixels.Value;
@@ -143,6 +145,46 @@ namespace GBOG
 
             GLFW.DestroyWindow(_window);
             GLFW.Terminate();
+        }
+
+        private void UpdateJoypadFromKeyboard()
+        {
+            if (_gb == null || !_gameRunning)
+            {
+                return;
+            }
+
+            var keys = _gb._memory._joyPadKeys;
+            if (keys == null || keys.Length < 8)
+            {
+                return;
+            }
+
+            if (GLFW.GetWindowAttrib(_window, GLFW.GLFW_FOCUSED) == 0)
+            {
+                Array.Clear(keys, 0, keys.Length);
+                _ = _gb._memory.Joypad;
+                return;
+            }
+
+            keys[0] = IsKeyDown(GlfwKey.Right) || IsKeyDown(GlfwKey.D); // Right
+            keys[1] = IsKeyDown(GlfwKey.Left) || IsKeyDown(GlfwKey.A);  // Left
+            keys[2] = IsKeyDown(GlfwKey.Up) || IsKeyDown(GlfwKey.W);    // Up
+            keys[3] = IsKeyDown(GlfwKey.Down) || IsKeyDown(GlfwKey.S);  // Down
+
+            keys[4] = IsKeyDown(GlfwKey.Z);         // A
+            keys[5] = IsKeyDown(GlfwKey.X);         // B
+            keys[6] = IsKeyDown(GlfwKey.Backspace); // Select
+            keys[7] = IsKeyDown(GlfwKey.Enter);     // Start
+
+            // Force JOYP refresh so edge-triggered interrupt can fire even if the game
+            // doesn't read FF00 this frame.
+            _ = _gb._memory.Joypad;
+        }
+
+        private bool IsKeyDown(GlfwKey key)
+        {
+            return GLFW.GetKey(_window, (int)key) == GLFW.GLFW_PRESS;
         }
 
         private uint CreateTexture()

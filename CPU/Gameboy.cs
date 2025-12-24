@@ -294,24 +294,20 @@ namespace GBOG.CPU
                         double targetSeconds = cyclesThisUpdate / (double)Apu.BaseClockHz;
                         double elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
                         double remainingSeconds = targetSeconds - elapsedSeconds;
-                        if (remainingSeconds > 0)
+                        // Windows sleep timing can overshoot significantly; avoid long sleeps.
+                        // Strategy: sleep in ~1ms chunks while we're well ahead, then spin briefly.
+                        while (remainingSeconds > 0.002)
                         {
-                            int sleepMs = (int)(remainingSeconds * 1000.0);
-                            if (sleepMs > 0)
-                            {
-                                Thread.Sleep(sleepMs);
-                            }
+                            Thread.Sleep(1);
+                            elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
+                            remainingSeconds = targetSeconds - elapsedSeconds;
+                        }
 
-                            // Fine spin to reduce jitter.
-                            while (true)
-                            {
-                                elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
-                                if (elapsedSeconds >= targetSeconds)
-                                {
-                                    break;
-                                }
-                                Thread.SpinWait(50);
-                            }
+                        while (remainingSeconds > 0)
+                        {
+                            Thread.SpinWait(200);
+                            elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
+                            remainingSeconds = targetSeconds - elapsedSeconds;
                         }
                     }
                     i++;
