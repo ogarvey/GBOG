@@ -9,6 +9,7 @@ using Hexa.NET.ImGui.Widgets.Dialogs;
 using Hexa.NET.OpenGL;
 using HexaGen.Runtime;
 using GBOG.Utils;
+using GBOG.Graphics.UI;
 using System.Reflection;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -32,6 +33,30 @@ namespace GBOG
         private bool _audioEnabled = true;
         private float _audioVolume = 1.0f;
 
+        private string _displayPalettePreset = DisplayPalettes.PresetDmg;
+        private Vector4 _customShade0 = new(1f, 1f, 1f, 1f);
+        private Vector4 _customShade1 = new(0.6667f, 0.6667f, 0.6667f, 1f);
+        private Vector4 _customShade2 = new(0.3333f, 0.3333f, 0.3333f, 1f);
+        private Vector4 _customShade3 = new(0f, 0f, 0f, 1f);
+
+        private static readonly string[] _paletteKeys =
+        [
+            DisplayPalettes.PresetDmg,
+            DisplayPalettes.PresetPocket,
+            DisplayPalettes.PresetGreen,
+            DisplayPalettes.PresetBlue,
+            DisplayPalettes.PresetCustom,
+        ];
+
+        private static readonly string[] _paletteLabels =
+        [
+            "DMG (Default)",
+            "Pocket",
+            "Green",
+            "Blue",
+            "Custom",
+        ];
+
         private GL _gl = null!;
         private ImGuiContextPtr _guiContext;
         private const float UiScale = 1.25f;
@@ -45,6 +70,9 @@ namespace GBOG
 
         private bool _showCpuStateWindow;
         private bool _showMemoryViewerWindow;
+        private bool _showTileDataViewerWindow;
+
+        private readonly ImGuiTileMapViewerWindow _tileViewer = new();
 
         private sealed class MemoryRegion
         {
@@ -317,6 +345,17 @@ namespace GBOG
             return textureId;
         }
 
+        private uint CreateTexture(int width, int height)
+        {
+            uint textureId;
+            _gl.GenTextures(1, &textureId);
+            _gl.BindTexture(GLTextureTarget.Texture2D, textureId);
+            _gl.TexParameteri(GLTextureTarget.Texture2D, GLTextureParameterName.MinFilter, (int)GLTextureMinFilter.Nearest);
+            _gl.TexParameteri(GLTextureTarget.Texture2D, GLTextureParameterName.MagFilter, (int)GLTextureMagFilter.Nearest);
+            _gl.TexImage2D(GLTextureTarget.Texture2D, 0, GLInternalFormat.Rgba, width, height, 0, GLPixelFormat.Rgba, GLPixelType.UnsignedByte, null);
+            return textureId;
+        }
+
         private void UpdateTexture()
         {
             if (_gb == null) return;
@@ -361,6 +400,11 @@ namespace GBOG
                     if (ImGui.MenuItem("Memory Viewer", string.Empty, _showMemoryViewerWindow, true))
                     {
                         _showMemoryViewerWindow = !_showMemoryViewerWindow;
+                    }
+
+                    if (ImGui.MenuItem("Tile Data Viewer", string.Empty, _showTileDataViewerWindow, true))
+                    {
+                        _showTileDataViewerWindow = !_showTileDataViewerWindow;
                     }
 
                     ImGui.Separator();
@@ -435,6 +479,12 @@ namespace GBOG
                     ImGui.EndMenu();
                 }
 
+                if (ImGui.BeginMenu("Video"))
+                {
+                    RenderPaletteMenu();
+                    ImGui.EndMenu();
+                }
+
                 ImGui.EndMainMenuBar();
             }
 
@@ -465,6 +515,122 @@ namespace GBOG
 
             RenderCpuStateWindow();
             RenderMemoryViewerWindow();
+            RenderTileDataViewerWindow();
+        }
+
+        private void RenderPaletteMenu()
+        {
+            if (!ImGui.BeginMenu("Palette"))
+            {
+                return;
+            }
+
+            int current = Array.IndexOf(_paletteKeys, _displayPalettePreset);
+            if (current < 0)
+            {
+                current = 0;
+            }
+
+            int selected = current;
+            if (ImGui.Combo("Preset", ref selected, _paletteLabels, _paletteLabels.Length))
+            {
+                _displayPalettePreset = _paletteKeys[Math.Clamp(selected, 0, _paletteKeys.Length - 1)];
+                ApplyCurrentDisplayPalette();
+                SaveSettings();
+            }
+
+            if (_displayPalettePreset == DisplayPalettes.PresetCustom)
+            {
+                ImGui.Separator();
+                var flags = ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoAlpha;
+
+                bool changed = false;
+                changed |= ImGui.ColorEdit4("Shade 0", ref _customShade0, flags);
+                changed |= ImGui.ColorEdit4("Shade 1", ref _customShade1, flags);
+                changed |= ImGui.ColorEdit4("Shade 2", ref _customShade2, flags);
+                changed |= ImGui.ColorEdit4("Shade 3", ref _customShade3, flags);
+
+                if (changed)
+                {
+                    ForceOpaque(ref _customShade0);
+                    ForceOpaque(ref _customShade1);
+                    ForceOpaque(ref _customShade2);
+                    ForceOpaque(ref _customShade3);
+                    ApplyCurrentDisplayPalette();
+                    SaveSettings();
+                }
+            }
+
+            ImGui.EndMenu();
+        }
+
+        private static void ForceOpaque(ref Vector4 c)
+        {
+            c.W = 1f;
+        }
+
+        private void ApplyCurrentDisplayPalette()
+        {
+            var palette = GetCurrentDisplayPalette();
+            _gb?.SetDisplayPalette(palette);
+            _tileViewer.InvalidateAll();
+        }
+
+        private DisplayPalette GetCurrentDisplayPalette()
+        {
+            if (_displayPalettePreset == DisplayPalettes.PresetCustom)
+            {
+                return new DisplayPalette(
+                    FromVector4(_customShade0),
+                    FromVector4(_customShade1),
+                    FromVector4(_customShade2),
+                    FromVector4(_customShade3));
+            }
+
+            return DisplayPalettes.GetPreset(_displayPalettePreset);
+        }
+
+        private static Vector4 ToVector4(Color c)
+        {
+            return new Vector4(c.R / 255f, c.G / 255f, c.B / 255f, c.A / 255f);
+        }
+
+        private static Color FromVector4(Vector4 v)
+        {
+            static byte ToByte(float x)
+            {
+                int i = (int)MathF.Round(Math.Clamp(x, 0f, 1f) * 255f);
+                return (byte)Math.Clamp(i, 0, 255);
+            }
+
+            return new Color
+            {
+                R = ToByte(v.X),
+                G = ToByte(v.Y),
+                B = ToByte(v.Z),
+                A = 255,
+            };
+        }
+
+        private static uint PackRgba(Color c)
+        {
+            return (uint)(c.R | (c.G << 8) | (c.B << 16) | (c.A << 24));
+        }
+
+        private static Color UnpackRgba(uint rgba)
+        {
+            return new Color
+            {
+                R = (byte)(rgba & 0xFF),
+                G = (byte)((rgba >> 8) & 0xFF),
+                B = (byte)((rgba >> 16) & 0xFF),
+                A = (byte)((rgba >> 24) & 0xFF),
+            };
+        }
+
+        private void RenderTileDataViewerWindow()
+        {
+            _tileViewer.Render(ref _showTileDataViewerWindow, _gb, _gl, GetCurrentDisplayPalette());
         }
 
         private void EnsureMemoryViewerStates()
@@ -666,6 +832,19 @@ namespace GBOG
             _audioVolume = Math.Clamp(_settings.AudioVolume, 0f, 1f);
             _fontSizePixels = Math.Clamp(_settings.FontSizePixels, MinFontSizePixels, MaxFontSizePixels);
 
+            _displayPalettePreset = string.IsNullOrWhiteSpace(_settings.DisplayPalettePreset)
+                ? DisplayPalettes.PresetDmg
+                : _settings.DisplayPalettePreset;
+
+            _customShade0 = ToVector4(UnpackRgba(_settings.CustomPalette0));
+            _customShade1 = ToVector4(UnpackRgba(_settings.CustomPalette1));
+            _customShade2 = ToVector4(UnpackRgba(_settings.CustomPalette2));
+            _customShade3 = ToVector4(UnpackRgba(_settings.CustomPalette3));
+            ForceOpaque(ref _customShade0);
+            ForceOpaque(ref _customShade1);
+            ForceOpaque(ref _customShade2);
+            ForceOpaque(ref _customShade3);
+
             if (_settings.WindowWidth >= 320 && _settings.WindowWidth <= 8192)
             {
                 _width = _settings.WindowWidth;
@@ -683,6 +862,12 @@ namespace GBOG
             _settings.FontSizePixels = _fontSizePixels;
             _settings.WindowWidth = _width;
             _settings.WindowHeight = _height;
+
+            _settings.DisplayPalettePreset = _displayPalettePreset;
+            _settings.CustomPalette0 = PackRgba(FromVector4(_customShade0));
+            _settings.CustomPalette1 = PackRgba(FromVector4(_customShade1));
+            _settings.CustomPalette2 = PackRgba(FromVector4(_customShade2));
+            _settings.CustomPalette3 = PackRgba(FromVector4(_customShade3));
 
             try
             {
@@ -778,11 +963,15 @@ namespace GBOG
                     }
 
                     _gb = new Gameboy();
+                    _gb.SetDisplayPalette(GetCurrentDisplayPalette());
                     _gb.ConfigureAudioOutput(_audioEnabled);
                     _gb.SetAudioVolume(_audioVolume);
                     _gb.LimitSpeed = true;
                     _gb._memory.SerialDataReceived += (sender, data) => _serialOutput += data;
                     _gb.LoadRom(path);
+
+                    // Refresh tile viewer textures for the new ROM.
+                    _tileViewer.InvalidateAll();
                 }
             }
         }

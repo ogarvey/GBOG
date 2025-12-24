@@ -60,9 +60,17 @@ namespace GBOG.CPU
         public Apu Apu { get; }
         private AudioOutput? _audioOutput;
 
+        private DisplayPalette _displayPalette = DisplayPalettes.Dmg;
+        public DisplayPalette DisplayPalette => _displayPalette;
+
         private float _audioVolume = 1.0f;
         public float AudioVolume => _audioVolume;
         public bool AudioEnabled => _audioOutput != null;
+
+        public void SetDisplayPalette(DisplayPalette palette)
+        {
+            _displayPalette = palette;
+        }
 
         // When enabled, throttle emulation to real time.
         // This prevents audio buffer overflow (crackles) and keeps games at correct speed.

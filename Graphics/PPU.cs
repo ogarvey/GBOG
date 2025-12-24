@@ -361,14 +361,7 @@ namespace GBOG.Graphics
 
 		private Color MapColor(int colorBits)
 		{
-			return colorBits switch
-			{
-				0 => Color.White,
-				1 => Color.LightGray,
-				2 => Color.DarkGray,
-				3 => Color.Black,
-				_ => Color.Fallback
-			};
+			return _gb.DisplayPalette.GetShade(colorBits);
 		}
 
 		private void RenderWindow(Span<bool> bgIsColor0)

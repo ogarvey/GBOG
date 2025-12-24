@@ -15,6 +15,16 @@ public sealed class AppSettings
 
     public float FontSizePixels { get; set; } = 16.0f;
 
+    // Display palette affects only rendering (not emulation correctness).
+    // Preset keys: DMG, Pocket, Green, Blue, Custom
+    public string DisplayPalettePreset { get; set; } = DisplayPalettes.PresetDmg;
+
+    // Packed RGBA32: R in lowest byte, then G, B, A.
+    public uint CustomPalette0 { get; set; } = 0xFFFFFFFF;
+    public uint CustomPalette1 { get; set; } = 0xFFAAAAAA;
+    public uint CustomPalette2 { get; set; } = 0xFF555555;
+    public uint CustomPalette3 { get; set; } = 0xFF000000;
+
     public int WindowWidth { get; set; } = 1280;
     public int WindowHeight { get; set; } = 720;
 }

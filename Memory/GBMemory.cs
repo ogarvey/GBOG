@@ -10,8 +10,29 @@ using System.Threading.Channels;
 
 namespace GBOG.Memory
 {
+	[Flags]
+	public enum VideoDebugDirtyFlags
+	{
+		None = 0,
+		TileData = 1 << 0,
+		TileMaps = 1 << 1,
+		Lcdc = 1 << 2,
+	}
+
 	public class GBMemory
 	{
+		private int _videoDebugDirty;
+
+		public void MarkVideoDebugDirty(VideoDebugDirtyFlags flags)
+		{
+			System.Threading.Interlocked.Or(ref _videoDebugDirty, (int)flags);
+		}
+
+		public VideoDebugDirtyFlags ConsumeVideoDebugDirty()
+		{
+			int v = System.Threading.Interlocked.Exchange(ref _videoDebugDirty, 0);
+			return (VideoDebugDirtyFlags)v;
+		}
 
 		public event EventHandler<char>? SerialDataReceived;
 
@@ -1906,6 +1927,7 @@ namespace GBOG.Memory
 				}
 				_memory[address] = value;
 				_gameBoy._ppu.VideoRam[address - 0x8000] = value;
+				MarkVideoDebugDirty(address < 0x9800 ? VideoDebugDirtyFlags.TileData : VideoDebugDirtyFlags.TileMaps);
 				//_gameBoy.UpdateTile(address, value);
 			}
 			else if (address >= 0xA000 && address <= 0xBFFF)
@@ -1971,6 +1993,9 @@ namespace GBOG.Memory
 				{
 					_gameBoy._ppu.OnLcdEnabled();
 				}
+
+				// Any LCDC change can affect which tilemap/tiledata region is used.
+				MarkVideoDebugDirty(VideoDebugDirtyFlags.Lcdc | VideoDebugDirtyFlags.TileMaps);
 			}
 			else if (address == 0xFF41)
 			{
@@ -2512,9 +2537,19 @@ namespace GBOG.Memory
 
 		public byte[] GetTileMap()
 		{
-			// 9800-9BFF
+			return GetTileMap(0x9800);
+		}
+
+		public byte[] GetTileMap(ushort baseAddress)
+		{
+			// 9800-9BFF or 9C00-9FFF
+			if (baseAddress != 0x9800 && baseAddress != 0x9C00)
+			{
+				throw new ArgumentOutOfRangeException(nameof(baseAddress), "Tile map base must be 0x9800 or 0x9C00");
+			}
+
 			var tileMap = new byte[0x400];
-			Array.Copy(_memory, 0x9800, tileMap, 0, 0x400);
+			Array.Copy(_memory, baseAddress, tileMap, 0, 0x400);
 			return tileMap;
 		}
 
