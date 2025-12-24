@@ -183,22 +183,32 @@ namespace GBOG.CPU
 
         private async Task<bool> DoLoop()
         {
-            const int MAX_CYCLES = 70224;
-            var i = 0;
-            int cycles = 4;
-            await Task.Run(() =>
+            const int MaxBaseCyclesPerFrame = 70224;
+            const int CpuCyclesPerMCycle = 4;
+
+            // Use a running target timestamp instead of measuring each frame independently.
+            // This reduces jitter caused by variable work time + Windows sleep overshoot.
+            ulong ticksPerBaseCycleFixed = ((ulong)Stopwatch.Frequency << 32) / (ulong)Apu.BaseClockHz;
+
+            await Task.Factory.StartNew(() =>
             {
-                while (!_exit && true)
+                long emuStartTicks = 0;
+                ulong emuTicksAccFixed = 0;
+                bool lastLimitSpeed = false;
+
+                while (!_exit)
                 {
-                    long frameStartTicks = 0;
-                    if (LimitSpeed)
+                    bool limitSpeed = LimitSpeed;
+                    if (limitSpeed && !lastLimitSpeed)
                     {
-                        frameStartTicks = Stopwatch.GetTimestamp();
+                        emuStartTicks = Stopwatch.GetTimestamp();
+                        emuTicksAccFixed = 0;
                     }
+                    lastLimitSpeed = limitSpeed;
 
-                    int cyclesThisUpdate = 0;
+                    int baseCyclesThisFrame = 0;
 
-                    while (cyclesThisUpdate < MAX_CYCLES)
+                    while (baseCyclesThisFrame < MaxBaseCyclesPerFrame)
                     {
 
                         byte opcode;
@@ -215,12 +225,14 @@ namespace GBOG.CPU
                                 // Interrupt servicing takes 5 machine cycles = 20 t-cycles.
                                 for (int n = 0; n < 5; n++)
                                 {
-                                    int baseCycles = GetBaseCyclesFromCpuCycles(cycles);
-                                cyclesThisUpdate += baseCycles;
-                                UpdateTimer(cycles);
-                                UpdateApu(baseCycles);
-                                _ppu.Step(baseCycles);
-                                _memory.TickBaseCycles(baseCycles);
+                                    BeginMCycle();
+                                    ApplyOamBugIfNeeded();
+                                    int baseCycles = GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
+                                    baseCyclesThisFrame += baseCycles;
+                                    UpdateTimer(CpuCyclesPerMCycle);
+                                    UpdateApu(baseCycles);
+                                    _ppu.Step(baseCycles);
+                                    _memory.TickBaseCycles(baseCycles);
                                 }
 
                                 // The interrupt is handled between instructions; don't also fetch/execute an opcode this iteration.
@@ -250,10 +262,10 @@ namespace GBOG.CPU
                                     if (step(this))
                                     {
                                         ApplyOamBugIfNeeded();
-                                int baseCycles = GetBaseCyclesFromCpuCycles(cycles);
-                                cyclesThisUpdate += baseCycles;
-                                UpdateTimer(cycles);
-                                UpdateApu(baseCycles);
+                                        int baseCycles = GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
+                                        baseCyclesThisFrame += baseCycles;
+                                        UpdateTimer(CpuCyclesPerMCycle);
+                                        UpdateApu(baseCycles);
 								//UpdateGraphics(baseCycles);
 								_ppu.Step(baseCycles);
                                         _memory.TickBaseCycles(baseCycles);
@@ -275,9 +287,9 @@ namespace GBOG.CPU
                             // HALT: no CPU bus activity in our model, but still allow any pending
                             // OAM bug triggers from previous access to be applied (should be none).
                             ApplyOamBugIfNeeded();
-                            int baseCycles = GetBaseCyclesFromCpuCycles(cycles);
-                            cyclesThisUpdate += baseCycles;
-                            UpdateTimer(cycles);
+                            int baseCycles = GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
+                            baseCyclesThisFrame += baseCycles;
+                            UpdateTimer(CpuCyclesPerMCycle);
                             UpdateApu(baseCycles);
 							//UpdateGraphics(baseCycles);
 							_ppu.Step(baseCycles);
@@ -288,31 +300,45 @@ namespace GBOG.CPU
 
                     }
 
-                    if (LimitSpeed)
+                    if (limitSpeed)
                     {
-                        // Pace based on the amount of base cycles we actually executed.
-                        double targetSeconds = cyclesThisUpdate / (double)Apu.BaseClockHz;
-                        double elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
-                        double remainingSeconds = targetSeconds - elapsedSeconds;
-                        // Windows sleep timing can overshoot significantly; avoid long sleeps.
-                        // Strategy: sleep in ~1ms chunks while we're well ahead, then spin briefly.
-                        while (remainingSeconds > 0.002)
+                        // Advance the target timestamp based on emulated time.
+                        emuTicksAccFixed += (ulong)baseCyclesThisFrame * ticksPerBaseCycleFixed;
+                        long targetTicks = emuStartTicks + (long)(emuTicksAccFixed >> 32);
+
+                        long now0 = Stopwatch.GetTimestamp();
+                        long remainingTicks0 = targetTicks - now0;
+                        // If we're significantly behind (e.g., breakpoint / OS stall), resync.
+                        // Prevents long catch-up runs that feel like stutter.
+                        if (remainingTicks0 < -Stopwatch.Frequency / 4)
                         {
-                            Thread.Sleep(1);
-                            elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
-                            remainingSeconds = targetSeconds - elapsedSeconds;
+                            emuStartTicks = now0;
+                            emuTicksAccFixed = 0;
+                            continue;
                         }
 
-                        while (remainingSeconds > 0)
+                        while (true)
                         {
-                            Thread.SpinWait(200);
-                            elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
-                            remainingSeconds = targetSeconds - elapsedSeconds;
+                            long now = Stopwatch.GetTimestamp();
+                            long remainingTicks = targetTicks - now;
+                            if (remainingTicks <= 0)
+                            {
+                                break;
+                            }
+
+                            // Sleep while we're comfortably ahead, then spin for sub-millisecond precision.
+                            if (remainingTicks > Stopwatch.Frequency / 500) // > ~2ms
+                            {
+                                Thread.Sleep(1);
+                            }
+                            else
+                            {
+                                Thread.SpinWait(200);
+                            }
                         }
                     }
-                    i++;
                 }
-            });
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             return true;
         }
 
