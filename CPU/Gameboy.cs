@@ -1,9 +1,11 @@
 ﻿using GBOG.CPU.Opcodes;
+using GBOG.Audio;
 using GBOG.Graphics;
 using GBOG.Memory;
 using GBOG.Utils;
 using Serilog;
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Log = Serilog.Log;
 
@@ -45,8 +47,12 @@ namespace GBOG.CPU
         public bool EnableCpuTrace { get; set; } = false;
 
         public bool DoubleSpeed { get; private set; } = false;
-        private bool _apuEnabled = true;
-        private int _apuCh1ActiveBaseCyclesRemaining;
+        public Apu Apu { get; }
+        private AudioOutput? _audioOutput;
+
+        // When enabled, throttle emulation to real time.
+        // This prevents audio buffer overflow (crackles) and keeps games at correct speed.
+        public bool LimitSpeed { get; set; } = false;
         private int _mClockCount;
         private int _timerPeriod = 1024;
 
@@ -135,6 +141,8 @@ namespace GBOG.CPU
             _display = new byte[160, 144, 4];
             _pixels = new byte[160 * 144 * 4];
 
+            Apu = new Apu(sampleRate: 44100);
+
             _opcodeHandler = new OpcodeHandler(this);
             _memory = new GBMemory(this);
             _ppu = new PPU(this);
@@ -146,6 +154,29 @@ namespace GBOG.CPU
             PC = 0x0100;
 
             _memory.LY = 0x99;
+        }
+
+        public void ConfigureAudioOutput(bool enabled)
+        {
+            if (enabled)
+            {
+                if (_audioOutput != null)
+                {
+                    return;
+                }
+                _audioOutput = new AudioOutput(sampleRate: 44100);
+                Apu.SetSink(_audioOutput);
+            }
+            else
+            {
+                if (_audioOutput == null)
+                {
+                    return;
+                }
+                Apu.SetSink(null);
+                _audioOutput.Dispose();
+                _audioOutput = null;
+            }
         }
         public EventHandler<bool>? OnGraphicsRAMAccessed;
         private bool _exit = false;
@@ -159,6 +190,12 @@ namespace GBOG.CPU
             {
                 while (!_exit && true)
                 {
+                    long frameStartTicks = 0;
+                    if (LimitSpeed)
+                    {
+                        frameStartTicks = Stopwatch.GetTimestamp();
+                    }
+
                     int cyclesThisUpdate = 0;
 
                     while (cyclesThisUpdate < MAX_CYCLES)
@@ -250,6 +287,33 @@ namespace GBOG.CPU
                         }
 
                     }
+
+                    if (LimitSpeed)
+                    {
+                        // Pace based on the amount of base cycles we actually executed.
+                        double targetSeconds = cyclesThisUpdate / (double)Apu.BaseClockHz;
+                        double elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
+                        double remainingSeconds = targetSeconds - elapsedSeconds;
+                        if (remainingSeconds > 0)
+                        {
+                            int sleepMs = (int)(remainingSeconds * 1000.0);
+                            if (sleepMs > 0)
+                            {
+                                Thread.Sleep(sleepMs);
+                            }
+
+                            // Fine spin to reduce jitter.
+                            while (true)
+                            {
+                                elapsedSeconds = (Stopwatch.GetTimestamp() - frameStartTicks) / (double)Stopwatch.Frequency;
+                                if (elapsedSeconds >= targetSeconds)
+                                {
+                                    break;
+                                }
+                                Thread.SpinWait(50);
+                            }
+                        }
+                    }
                     i++;
                 }
             });
@@ -334,46 +398,9 @@ namespace GBOG.CPU
             return DoubleSpeed ? (cpuCycles / 2) : cpuCycles;
         }
 
-        public void SetApuEnabled(bool enabled)
-        {
-            _apuEnabled = enabled;
-            if (!enabled)
-            {
-                _apuCh1ActiveBaseCyclesRemaining = 0;
-                _memory.SetNr52Channel1Active(false);
-            }
-        }
-
-        public void TriggerApuChannel1()
-        {
-            if (!_apuEnabled)
-            {
-                return;
-            }
-
-            // Minimal emulation for blargg get_cpu_speed:
-            // Keep channel 1 active for a fixed base-clock duration so the polling loop runs
-            // ~2x more iterations in double-speed mode.
-            _apuCh1ActiveBaseCyclesRemaining = 16_000;
-            _memory.SetNr52Channel1Active(true);
-        }
-
         private void UpdateApu(int baseCycles)
         {
-            if (!_apuEnabled)
-            {
-                return;
-            }
-
-            if (_apuCh1ActiveBaseCyclesRemaining > 0)
-            {
-                _apuCh1ActiveBaseCyclesRemaining -= baseCycles;
-                if (_apuCh1ActiveBaseCyclesRemaining <= 0)
-                {
-                    _apuCh1ActiveBaseCyclesRemaining = 0;
-                    _memory.SetNr52Channel1Active(false);
-                }
-            }
+            Apu.Step(baseCycles);
         }
 
         public bool TrySwitchCgbSpeed()
@@ -1047,6 +1074,7 @@ namespace GBOG.CPU
         public void EndGame()
         {
             _exit = true;
+            ConfigureAudioOutput(false);
         }
 
         public event EventHandler<string>? LogAdded;

@@ -1668,6 +1668,10 @@ namespace GBOG.Memory
 			{
 				return ReadRam(address);
 			}
+			else if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
+			{
+				return _gameBoy.Apu.ReadRegister(address);
+			}
 			else if (0xFF00 == address)
 				return Joypad;
 			else
@@ -1803,6 +1807,14 @@ namespace GBOG.Memory
 				return;
 			}
 
+			// Audio registers and wave RAM are handled by the APU.
+			if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
+			{
+				_gameBoy.Apu.WriteRegister(address, value);
+				_memory[address] = value;
+				return;
+			}
+
 			if (address < 0x8000)
 			{
 				HandleBanking(address, value);
@@ -1893,22 +1905,6 @@ namespace GBOG.Memory
 			else if (address == 0xFF4D)
 			{
 				WriteKey1(value);
-			}
-			else if (address == 0xFF26)
-			{
-				// NR52: only bit 7 (sound on/off) is writable.
-				bool enabled = (value & 0x80) != 0;
-				_gameBoy.SetApuEnabled(enabled);
-				_memory[0xFF26] = enabled ? (byte)(_memory[0xFF26] | 0x80) : (byte)0x00;
-			}
-			else if (address == 0xFF14)
-			{
-				// NR14: Channel 1 trigger is bit 7.
-				_memory[address] = value;
-				if ((value & 0x80) != 0)
-				{
-					_gameBoy.TriggerApuChannel1();
-				}
 			}
 			else if (address == 0xFF04)
 			{

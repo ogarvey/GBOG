@@ -293,6 +293,8 @@ namespace GBOG
                 {
                     _loadedRomName = Path.GetFileName(path);
                     _gb = new Gameboy();
+                    _gb.ConfigureAudioOutput(true);
+                    _gb.LimitSpeed = true;
                     _gb._memory.SerialDataReceived += (sender, data) => _serialOutput += data;
                     _gb.LoadRom(path);
                 }
