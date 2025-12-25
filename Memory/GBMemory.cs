@@ -1541,6 +1541,11 @@ namespace GBOG.Memory
 		private bool _mbc1m;
 		private byte[]? _mbc2Ram;
 
+		// MBC5 state
+		private ushort _mbc5RomBank = 1;
+		private bool _mbc5HasRumble;
+		private bool _mbc5Rumble;
+
 		// MBC3 state
 		private byte _mbc3RamBankOrRtcSelect;
 		private bool _mbc3LatchArmed;
@@ -1692,6 +1697,14 @@ namespace GBOG.Memory
 			return MirrorRomBank(bank);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private int GetMbc5RomBank()
+		{
+			// MBC5 supports a 9-bit ROM bank number (0-511). Bank 0 is allowed.
+			int bank = _mbc5RomBank & 0x01FF;
+			return MirrorRomBank(bank);
+		}
+
 		private void StartOamDma(byte highByte)
 		{
 			// FF46 write starts a DMA transfer from XX00-XX9F to FE00-FE9F.
@@ -1719,6 +1732,11 @@ namespace GBOG.Memory
 				{
 					return _cartRom[address];
 				}
+				if (_mbc5)
+				{
+					// MBC5: bank 0 is always mapped here.
+					return _cartRom[address];
+				}
 				return _cartRom[address];
 			}
 			if (address >= 0x4000 && address <= 0x7FFF)
@@ -1738,6 +1756,12 @@ namespace GBOG.Memory
 				if (_mbc3)
 				{
 					int bank = GetMbc3RomBank();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				if (_mbc5)
+				{
+					int bank = GetMbc5RomBank();
 					newAddress = (address - 0x4000) + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
@@ -2038,6 +2062,11 @@ namespace GBOG.Memory
 					// MBC2: bank 0 is always mapped here.
 					return _cartRom[address];
 				}
+				if (_mbc5)
+				{
+					// MBC5: bank 0 is always mapped here.
+					return _cartRom[address];
+				}
 				return _cartRom[address];
 			}
 			else if ((address >= 0x4000) && (address <= 0x7FFF))
@@ -2057,6 +2086,12 @@ namespace GBOG.Memory
 				if (_mbc3)
 				{
 					int bank = GetMbc3RomBank();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				if (_mbc5)
+				{
+					int bank = GetMbc5RomBank();
 					newAddress = (address - 0x4000) + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
@@ -2115,6 +2150,11 @@ namespace GBOG.Memory
 				{
 					return _cartRom[address];
 				}
+				if (_mbc5)
+				{
+					// MBC5: bank 0 is always mapped here.
+					return _cartRom[address];
+				}
 				return _cartRom[address];
 			}
 			if (address >= 0x4000 && address <= 0x7FFF)
@@ -2134,6 +2174,12 @@ namespace GBOG.Memory
 				if (_mbc3)
 				{
 					int bank = GetMbc3RomBank();
+					newAddress = (address - 0x4000) + (bank * 0x4000);
+					return _cartRom[newAddress];
+				}
+				if (_mbc5)
+				{
+					int bank = GetMbc5RomBank();
 					newAddress = (address - 0x4000) + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
@@ -2232,14 +2278,16 @@ namespace GBOG.Memory
 			}
 			else if (_mbc5)
 			{
-				if (_romBankingMode == 1)
+				if (!_ramEnabled)
 				{
-					return RamBanks[offset];
+					return 0xFF;
 				}
-				else
+				int bank = _currentRamBank;
+				if (_ramBankSize > 0)
 				{
-					return RamBanks[offset + (_currentRamBank * 0x2000)];
+					bank %= _ramBankSize;
 				}
+				return RamBanks[offset + (bank * 0x2000)];
 			}
 			else
 			{
@@ -2474,11 +2522,17 @@ namespace GBOG.Memory
 			}
 			if (_mbc5)
 			{
-				if (_ramEnabled)
+				if (!_ramEnabled)
 				{
-					RamBanks[0x2000 * _currentRamBank + (address - 0xA000)] = value;
-					MarkSaveDirtyIfBatteryBackedSave();
+					return;
 				}
+				int bank = _currentRamBank;
+				if (_ramBankSize > 0)
+				{
+					bank %= _ramBankSize;
+				}
+				RamBanks[(bank * 0x2000) + (address - 0xA000)] = value;
+				MarkSaveDirtyIfBatteryBackedSave();
 			}
 		}
 
@@ -2596,13 +2650,36 @@ namespace GBOG.Memory
 			}
 			else if (_mbc5)
 			{
-				_currentRamBank = value;
+				if (_mbc5HasRumble)
+				{
+					// Rumble carts use bit 3 for motor control; only bits 0-2 select RAM bank.
+					_mbc5Rumble = (value & 0x08) != 0;
+					_currentRamBank = (byte)(value & 0x07);
+				}
+				else
+				{
+					_currentRamBank = (byte)(value & 0x0F);
+				}
+				if (_ramBankSize > 0)
+				{
+					_currentRamBank %= (byte)_ramBankSize;
+				}
 			}
 		}
 
 		private void HighRomBankSelect(ushort address, byte value)
 		{
-			Log.Information($"BEGIN HIGH BITS - Current ROM Bank: {_currentRomBank}");
+			if (_mbc5)
+			{
+				// MBC5: 0x3000-0x3FFF sets bit 8 of the ROM bank.
+				_mbc5RomBank = (ushort)((_mbc5RomBank & 0x00FF) | ((value & 0x01) << 8));
+				return;
+			}
+
+			if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
+			{
+				Log.Debug($"BEGIN HIGH BITS - Current ROM Bank: {_currentRomBank}");
+			}
 			if (value == 0)
 			{
 				_currentRomBank = 1;
@@ -2613,12 +2690,18 @@ namespace GBOG.Memory
 				if (_currentRomBank == 0)
 					_currentRomBank = 1;
 			}
-			Log.Information($"END HIGH BITS - Current ROM Bank: {_currentRomBank}");
+			if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
+			{
+				Log.Debug($"END HIGH BITS - Current ROM Bank: {_currentRomBank}");
+			}
 		}
 
 		private void LowRomBankSelect(ushort address, byte value)
 		{
-			Log.Information($"BEGIN - Current ROM Bank: {_currentRomBank}");
+			if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
+			{
+				Log.Debug($"BEGIN - Current ROM Bank: {_currentRomBank}");
+			}
 			if (_mbc2)
 			{
 				_currentRomBank = (byte)(value & 0x0F);
@@ -2637,6 +2720,8 @@ namespace GBOG.Memory
 			}
 			else if (_mbc5)
 			{
+				// MBC5: 0x2000-0x2FFF sets the low 8 bits of the ROM bank.
+				_mbc5RomBank = (ushort)((_mbc5RomBank & 0x0100) | value);
 				_currentRomBank = value;
 
 			}
@@ -2646,7 +2731,10 @@ namespace GBOG.Memory
 				// computed on reads (including the "lower bits == 0 => +1" quirk).
 				_currentRomBank = (byte)(value & 0x1F);
 			}
-			Log.Information($"END - Current ROM Bank: {_currentRomBank}");
+			if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
+			{
+				Log.Debug($"END - Current ROM Bank: {_currentRomBank}");
+			}
 		}
 
 		private void RamBankEnable(ushort address, byte value)
@@ -2729,6 +2817,9 @@ namespace GBOG.Memory
 			_romBankingMode = 0;
 			_ramEnabled = false;
 			_mbc1 = _mbc2 = _mbc3 = _mbc5 = false;
+			_mbc5RomBank = 1;
+			_mbc5HasRumble = false;
+			_mbc5Rumble = false;
 			_RTCEnabled = false;
 			_multicart = false;
 			_mbc1m = false;
@@ -2796,7 +2887,10 @@ namespace GBOG.Memory
 				case 0x1A:
 				// MBC5+RAM
 				case 0x1B:
-				// MBC5+RAM+BATTERY
+					// MBC5+RAM+BATTERY
+					_mbc5 = true;
+					_mbc5HasRumble = false;
+					break;
 				case 0x1C:
 				// MBC5+RUMBLE
 				case 0x1D:
@@ -2804,6 +2898,7 @@ namespace GBOG.Memory
 				case 0x1E:
 					// MBC5+RUMBLE+RAM+BATTERY
 					_mbc5 = true;
+					_mbc5HasRumble = true;
 					break;
 			}
 
