@@ -171,6 +171,7 @@ namespace GBOG.ImGuiTexInspect.Backend.OpenGL
             _gl.Uniform1i(uniforms.ForceNearestSampling, shaderOptions.ForceNearestSampling ? 1 : 0);
             _gl.Uniform1i(uniforms.CheckeredBackground, shaderOptions.CheckeredBackground ? 1 : 0);
             _gl.Uniform2f(uniforms.GridWidth, shaderOptions.GridWidth.X, shaderOptions.GridWidth.Y);
+            _gl.Uniform2f(uniforms.GridCellSize, shaderOptions.GridCellSizeTexels.X, shaderOptions.GridCellSizeTexels.Y);
             _gl.Uniform4f(uniforms.Grid, 
                 shaderOptions.GridColor.X, 
                 shaderOptions.GridColor.Y, 

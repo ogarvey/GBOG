@@ -15,6 +15,24 @@ namespace GBOG.ImGuiTexInspect
         private static Context? _globalContext;
         private const int BorderWidth = 1;
 
+        public readonly struct HoverInfo
+        {
+            public HoverInfo(Inspector inspector, Vector2 uv, Vector2 texel, Vector4 color, bool hasColor = true)
+            {
+                Inspector = inspector;
+                UV = uv;
+                Texel = texel;
+                Color = color;
+                HasColor = hasColor;
+            }
+
+            public Inspector Inspector { get; }
+            public Vector2 UV { get; }
+            public Vector2 Texel { get; }
+            public Vector4 Color { get; }
+            public bool HasColor { get; }
+        }
+
         /// <summary>
         /// Initialize ImGuiTexInspect (optional but recommended)
         /// </summary>
@@ -86,6 +104,33 @@ namespace GBOG.ImGuiTexInspect
         }
 
         /// <summary>
+        /// Set the alpha mode to apply to the next inspector panel.
+        /// </summary>
+        public static void SetNextPanelAlphaMode(InspectorAlphaMode alphaMode)
+        {
+            var ctx = GetCurrentContext();
+            ctx.NextPanelOptions.AlphaMode = alphaMode;
+        }
+
+        /// <summary>
+        /// Set the grid cell size (in texture texels) to apply to the next inspector panel.
+        /// </summary>
+        public static void SetNextPanelGridCellSize(Vector2 gridCellSizeTexels)
+        {
+            var ctx = GetCurrentContext();
+            ctx.NextPanelOptions.GridCellSizeTexels = gridCellSizeTexels;
+        }
+
+        /// <summary>
+        /// Set the minimum zoom scale required for the grid to show on the next inspector panel.
+        /// </summary>
+        public static void SetNextPanelMinimumGridScale(float minimumGridScale)
+        {
+            var ctx = GetCurrentContext();
+            ctx.NextPanelOptions.MinimumGridScale = minimumGridScale;
+        }
+
+        /// <summary>
         /// Begin an inspector panel. Returns true if the panel is visible and should be rendered.
         /// Must be paired with EndInspectorPanel().
         /// </summary>
@@ -96,9 +141,27 @@ namespace GBOG.ImGuiTexInspect
             InspectorFlags flags = InspectorFlags.None,
             Vector2? size = null)
         {
+            return BeginInspectorPanel(title, texture, textureSize, flags, size, null);
+        }
+
+        /// <summary>
+        /// Begin an inspector panel with an optional callback to append additional tooltip content.
+        /// </summary>
+        public static unsafe bool BeginInspectorPanel(
+            string title,
+            nint texture,
+            Vector2 textureSize,
+            InspectorFlags flags,
+            Vector2? size,
+            Action<HoverInfo>? extraTooltip)
+        {
             var ctx = GetCurrentContext();
             var id = ImGui.GetID(title);
             var io = ImGui.GetIO();
+
+            var nextAlphaMode = ctx.NextPanelOptions.AlphaMode;
+            var nextGridCellSize = ctx.NextPanelOptions.GridCellSizeTexels;
+            var nextMinimumGridScale = ctx.NextPanelOptions.MinimumGridScale;
 
             // Get or create inspector
             bool justCreated = !ctx.Inspectors.ContainsKey(id);
@@ -127,6 +190,23 @@ namespace GBOG.ImGuiTexInspect
             inspector.Flags = MathUtils.SetFlag(inspector.Flags, newlySetFlags);
             inspector.Flags = MathUtils.ClearFlag(inspector.Flags, ctx.NextPanelOptions.ToClear);
             newlySetFlags = MathUtils.ClearFlag(newlySetFlags, ctx.NextPanelOptions.ToClear);
+
+            // Apply alpha mode (if requested) before we update shader options/draw.
+            if (nextAlphaMode.HasValue)
+            {
+                CurrentInspector_SetAlphaMode(nextAlphaMode.Value);
+            }
+
+            if (nextGridCellSize.HasValue)
+            {
+                inspector.ActiveShaderOptions.GridCellSizeTexels = nextGridCellSize.Value;
+            }
+
+            if (nextMinimumGridScale.HasValue)
+            {
+                inspector.MinimumGridSize = nextMinimumGridScale.Value;
+            }
+
             ctx.NextPanelOptions = new NextPanelSettings();
 
             // Calculate panel size
@@ -257,11 +337,25 @@ namespace GBOG.ImGuiTexInspect
             // Get mouse position for interaction
             var mousePos = ImGui.GetMousePos();
             var mousePosTexel = inspector.PixelsToTexels * mousePos;
+
+            // Texel coordinate behavior should match what the image actually shows:
+            // - If ShowWrap is enabled, wrap texels.
+            // - Otherwise, clamp to texture bounds (prevents edge/padding reporting as wrapped texels).
+            if (MathUtils.HasFlag(inspector.Flags, InspectorFlags.ShowWrap))
+            {
+                mousePosTexel.X = MathUtils.Modulus(mousePosTexel.X, textureSize.X);
+                mousePosTexel.Y = MathUtils.Modulus(mousePosTexel.Y, textureSize.Y);
+            }
+            else
+            {
+                // Clamp slightly below max so (int)cast stays in-range.
+                float maxX = MathF.Max(0f, textureSize.X - 0.001f);
+                float maxY = MathF.Max(0f, textureSize.Y - 0.001f);
+                mousePosTexel.X = MathF.Min(maxX, MathF.Max(0f, mousePosTexel.X));
+                mousePosTexel.Y = MathF.Min(maxY, MathF.Max(0f, mousePosTexel.Y));
+            }
+
             var mouseUV = mousePosTexel / textureSize;
-            
-            // Wrap texel coordinates to be within texture bounds
-            mousePosTexel.X = MathUtils.Modulus(mousePosTexel.X, textureSize.X);
-            mousePosTexel.Y = MathUtils.Modulus(mousePosTexel.Y, textureSize.Y);
             
             bool hovered = ImGui.IsWindowHovered();
 
@@ -296,23 +390,25 @@ namespace GBOG.ImGuiTexInspect
                     }
                 }
 
-                // Display tooltip if we have texture data
+                // Always show tooltip even if texture readback fails.
+                // Readback is required only for showing the RGBA swatch/values.
+                string tooltipText = $"UV: ({mouseUV.X:F5}, {mouseUV.Y:F5})\n" +
+                                   $"Texel: ({(int)mousePosTexel.X}, {(int)mousePosTexel.Y})";
+
+                Vector4 color = default;
+                bool hasColor = false;
                 if (inspector.HaveCurrentTexelData)
                 {
-                    Vector4 color = BufferUtils.GetTexel(inspector.Buffer, (int)mousePosTexel.X, (int)mousePosTexel.Y);
-                    
-                    // Format tooltip text
-                    string tooltipText = $"UV: ({mouseUV.X:F5}, {mouseUV.Y:F5})\n" +
-                                       $"Texel: ({(int)mousePosTexel.X}, {(int)mousePosTexel.Y})";
-                    
-                    // Use ImGui's ColorTooltip function equivalent
-                    ImGui.BeginTooltip();
-                    
-                    // Display color swatch
+                    color = BufferUtils.GetTexel(inspector.Buffer, (int)mousePosTexel.X, (int)mousePosTexel.Y);
+                    hasColor = true;
+                }
+
+                ImGui.BeginTooltip();
+
+                if (hasColor)
+                {
                     ImGui.ColorButton("##preview", color, ImGuiColorEditFlags.NoAlpha | ImGuiColorEditFlags.NoPicker, new Vector2(40, 40));
                     ImGui.SameLine();
-                    
-                    // Display color values and position info
                     ImGui.BeginGroup();
                     ImGui.Text(tooltipText);
                     ImGui.Separator();
@@ -320,9 +416,21 @@ namespace GBOG.ImGuiTexInspect
                     ImGui.Text($"R:{(byte)(color.X * 255)}, G:{(byte)(color.Y * 255)}, B:{(byte)(color.Z * 255)}, A:{(byte)(color.W * 255)}");
                     ImGui.Text($"({color.X:F3}, {color.Y:F3}, {color.Z:F3}, {color.W:F3})");
                     ImGui.EndGroup();
-                    
-                    ImGui.EndTooltip();
                 }
+                else
+                {
+                    ImGui.Text(tooltipText);
+                    ImGui.Separator();
+                    ImGui.TextDisabled("Texture readback unavailable");
+                }
+
+                if (extraTooltip != null)
+                {
+                    ImGui.Separator();
+                    extraTooltip(new HoverInfo(inspector, mouseUV, mousePosTexel, color, hasColor));
+                }
+
+                ImGui.EndTooltip();
             }
 
             // Dragging (panning)
@@ -980,15 +1088,29 @@ namespace GBOG.ImGuiTexInspect
 
         private static void UpdateShaderOptions(Inspector inspector)
         {
-            if (!MathUtils.HasFlag(inspector.Flags, InspectorFlags.NoGrid) && inspector.Scale.Y > inspector.MinimumGridSize)
+            float minScale = MathF.Min(inspector.Scale.X, inspector.Scale.Y);
+
+            if (!MathUtils.HasFlag(inspector.Flags, InspectorFlags.NoGrid) && minScale >= inspector.MinimumGridSize)
             {
                 // Show grid
                 inspector.ActiveShaderOptions.GridColor = new Vector4(0, 0, 0, 0.5f);
+
+                // GridWidth is expressed in texel-space (0..1 within a texel).
+                // To keep grid lines ~1 pixel thick on screen, set width ~= 1/scale.
+                float gwX = inspector.Scale.X > 0.0001f ? (1.0f / inspector.Scale.X) : 0.0f;
+                float gwY = inspector.Scale.Y > 0.0001f ? (1.0f / inspector.Scale.Y) : 0.0f;
+
+                // Clamp to avoid overly thick lines at low zoom.
+                gwX = MathF.Min(gwX, 1.0f);
+                gwY = MathF.Min(gwY, 1.0f);
+
+                inspector.ActiveShaderOptions.GridWidth = new Vector2(gwX, gwY);
             }
             else
             {
                 // Hide grid
                 inspector.ActiveShaderOptions.GridColor = Vector4.Zero;
+                inspector.ActiveShaderOptions.GridWidth = Vector2.Zero;
             }
 
             inspector.ActiveShaderOptions.ForceNearestSampling =

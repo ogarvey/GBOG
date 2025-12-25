@@ -71,6 +71,10 @@ namespace GBOG
         private float? _requestedFontSizePixels;
         private const float MinFontSizePixels = 10.0f;
         private const float MaxFontSizePixels = 32.0f;
+        private int _lastFlushedSaveVersion;
+        private int _lastSeenSaveVersion;
+        private long _lastSeenSaveDirtyTick;
+        private const int SaveDebounceMs = 2000;
         
         private FileOpenDialog _fileOpenDialog = null!;
 
@@ -85,6 +89,10 @@ namespace GBOG
             public required string Name { get; init; }
             public required ushort BaseAddress { get; init; }
             public required int Size { get; init; }
+
+            // When non-zero, reads for this region are served from a snapshot buffer instead of live memory.
+            // This prevents live updates from clobbering in-progress edits (e.g. between hex nibbles).
+            public int FreezeRefreshFrames { get; set; }
         }
 
         private readonly MemoryRegion[] _memoryRegions =
@@ -106,6 +114,7 @@ namespace GBOG
         {
             _settings = SettingsStore.Load();
             ApplySettingsToFields();
+            _tileViewer.ApplySettings(_settings);
 
             if (GLFW.Init() == 0)
             {
@@ -160,6 +169,13 @@ namespace GBOG
                  return;
             }
 
+            // Initialize ImGuiTexInspect render-state/shader integration.
+            // Without this, inspectors still render (via ImGui.Image), but grid/alpha/background features won't work.
+            if (!GBOG.ImGuiTexInspect.Backend.OpenGL.RenderState.Initialize(_gl, "#version 330"))
+            {
+                Console.WriteLine("WARNING: Failed to init ImGuiTexInspect RenderState (grid/alpha modes may not work).");
+            }
+
             _textureId = CreateTexture();
             ClearDisplayTexture();
             _fileOpenDialog = new FileOpenDialog();
@@ -190,6 +206,8 @@ namespace GBOG
                 ImGui.DockSpaceOverViewport(dockspaceId, ImGui.GetMainViewport(), ImGuiDockNodeFlags.PassthruCentralNode);
 
                 RenderUI();
+
+                UpdateBatterySaveAutosave();
 
                 ImGui.Render();
                 int display_w, display_h;
@@ -230,8 +248,12 @@ namespace GBOG
             // Cleanup
             if (_gb != null)
             {
+                TryFlushBatterySave(_gb, force: true);
                 _gb.EndGame();
             }
+
+            // Cleanup ImGuiTexInspect resources (safe to call even if init failed).
+            GBOG.ImGuiTexInspect.Backend.OpenGL.RenderState.Shutdown();
             
             ImGuiImplOpenGL3.Shutdown();
             ImGuiImplGLFW.Shutdown();
@@ -257,7 +279,7 @@ namespace GBOG
             if (GLFW.GetWindowAttrib(_window, GLFW.GLFW_FOCUSED) == 0)
             {
                 Array.Clear(keys, 0, keys.Length);
-                _ = _gb._memory.Joypad;
+                _gb._memory.NotifyJoypadStateChanged();
                 return;
             }
 
@@ -273,7 +295,7 @@ namespace GBOG
 
             // Force JOYP refresh so edge-triggered interrupt can fire even if the game
             // doesn't read FF00 this frame.
-            _ = _gb._memory.Joypad;
+            _gb._memory.NotifyJoypadStateChanged();
         }
 
         private void HandleGlobalShortcuts()
@@ -449,6 +471,12 @@ namespace GBOG
             gb._memory.SerialDataReceived += _serialHandler;
 
             gb.LoadRom(_loadedRomPath);
+
+            TryLoadBatterySave(gb);
+            _lastFlushedSaveVersion = gb._memory.SaveDirtyVersion;
+            _lastSeenSaveVersion = _lastFlushedSaveVersion;
+            _lastSeenSaveDirtyTick = 0;
+
             _gb = gb;
 
             _tileViewer.InvalidateAll();
@@ -462,6 +490,7 @@ namespace GBOG
             {
                 try
                 {
+                    TryFlushBatterySave(gb, force: true);
                     gb.EndGame();
                 }
                 catch
@@ -486,6 +515,10 @@ namespace GBOG
             _gb = null;
             _gameRunning = false;
             _gamePaused = false;
+
+            _lastFlushedSaveVersion = 0;
+            _lastSeenSaveVersion = 0;
+            _lastSeenSaveDirtyTick = 0;
 
             // Clear UI so we don't show stale pixels/state.
             ClearDisplayTexture();
@@ -782,7 +815,7 @@ namespace GBOG
 
         private void RenderTileDataViewerWindow()
         {
-            _tileViewer.Render(ref _showTileDataViewerWindow, _gb, _gl, GetCurrentDisplayPalette());
+            _tileViewer.Render(ref _showTileDataViewerWindow, _gb, _gl, GetCurrentDisplayPalette(), _settings, SaveSettings);
         }
 
         private void EnsureMemoryViewerStates()
@@ -800,10 +833,13 @@ namespace GBOG
                     BytesPerLine = 16,
                     ShowAddress = true,
                     ShowAscii = true,
-                    ReadOnly = true,
+                    // Keep ROM read-only by default. All other regions are writable.
+                    ReadOnly = region.BaseAddress < 0x8000,
                     Separators = 8,
                     UserData = region,
+                    Bytes = new byte[region.Size],
                     ReadCallback = ReadMemoryRegion,
+                    WriteCallback = WriteMemoryRegion,
                     GetAddressNameCallback = GetRegionAddressName,
                 };
             }
@@ -821,6 +857,63 @@ namespace GBOG
                 return 0;
             }
 
+            // Ensure we have a snapshot buffer.
+            if (state.Bytes == null || state.Bytes.Length != region.Size)
+            {
+                state.Bytes = new byte[region.Size];
+            }
+
+            int max = Math.Min(size, region.Size - offset);
+            if (max <= 0)
+            {
+                return 0;
+            }
+
+            // If we recently edited this region, freeze refresh and serve reads from the snapshot.
+            // This prevents the emulator's live writes from changing the byte between the first and
+            // second nibble entry when editing in hex.
+            if (region.FreezeRefreshFrames > 0)
+            {
+                region.FreezeRefreshFrames--;
+                Array.Copy(state.Bytes, offset, buffer, 0, max);
+                return max;
+            }
+
+            int addr0 = region.BaseAddress + offset;
+            for (int i = 0; i < max; i++)
+            {
+                byte v = _gb._memory.PeekByte((ushort)(addr0 + i));
+                buffer[i] = v;
+                state.Bytes[offset + i] = v;
+            }
+
+            return max;
+        }
+
+        private int WriteMemoryRegion(HexEditorState state, int offset, byte[] buffer, int size)
+        {
+            if (_gb == null)
+            {
+                return 0;
+            }
+
+            if (state.UserData is not MemoryRegion region)
+            {
+                return 0;
+            }
+
+            // Ensure we have a snapshot buffer.
+            if (state.Bytes == null || state.Bytes.Length != region.Size)
+            {
+                state.Bytes = new byte[region.Size];
+            }
+
+            // Do not allow editing ROM via this viewer.
+            if (region.BaseAddress < 0x8000)
+            {
+                return 0;
+            }
+
             int max = Math.Min(size, region.Size - offset);
             if (max <= 0)
             {
@@ -830,8 +923,13 @@ namespace GBOG
             int addr0 = region.BaseAddress + offset;
             for (int i = 0; i < max; i++)
             {
-                buffer[i] = _gb._memory.PeekByte((ushort)(addr0 + i));
+                byte v = buffer[i];
+                _gb._memory.WriteByte((ushort)(addr0 + i), v);
+                state.Bytes[offset + i] = v;
             }
+
+            // Freeze refresh for a short window so multi-nibble edits don't get clobbered by live updates.
+            region.FreezeRefreshFrames = Math.Max(region.FreezeRefreshFrames, 90);
 
             return max;
         }
@@ -1092,6 +1190,120 @@ namespace GBOG
             {
                 texData.Status = ImTextureStatus.WantCreate;
                 texData.WantDestroyNextFrame = false;
+            }
+        }
+
+        private string? GetSaveFilePath()
+        {
+            if (string.IsNullOrWhiteSpace(_loadedRomPath))
+            {
+                return null;
+            }
+
+            return Path.ChangeExtension(_loadedRomPath, ".sav");
+        }
+
+        private void TryLoadBatterySave(Gameboy gb)
+        {
+            try
+            {
+                if (!gb._memory.HasBatteryBackedSave)
+                {
+                    return;
+                }
+
+                string? savePath = GetSaveFilePath();
+                if (string.IsNullOrWhiteSpace(savePath) || !File.Exists(savePath))
+                {
+                    return;
+                }
+
+                byte[] data = File.ReadAllBytes(savePath);
+                gb._memory.LoadBatterySaveFileImage(data);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private void UpdateBatterySaveAutosave()
+        {
+            var gb = _gb;
+            if (gb == null)
+            {
+                return;
+            }
+
+            if (!gb._memory.HasBatteryBackedSave)
+            {
+                return;
+            }
+
+            int version = gb._memory.SaveDirtyVersion;
+            if (version == _lastFlushedSaveVersion)
+            {
+                return;
+            }
+
+            long now = Environment.TickCount64;
+            if (version != _lastSeenSaveVersion)
+            {
+                _lastSeenSaveVersion = version;
+                _lastSeenSaveDirtyTick = now;
+            }
+
+            if (_lastSeenSaveDirtyTick == 0)
+            {
+                _lastSeenSaveDirtyTick = now;
+            }
+
+            if (now - _lastSeenSaveDirtyTick < SaveDebounceMs)
+            {
+                return;
+            }
+
+            if (TryFlushBatterySave(gb, force: false))
+            {
+                _lastFlushedSaveVersion = version;
+            }
+        }
+
+        private bool TryFlushBatterySave(Gameboy gb, bool force)
+        {
+            try
+            {
+                if (!gb._memory.HasBatteryBackedSave)
+                {
+                    return false;
+                }
+
+                int version = gb._memory.SaveDirtyVersion;
+                if (!force && version == _lastFlushedSaveVersion)
+                {
+                    return false;
+                }
+
+                string? savePath = GetSaveFilePath();
+                if (string.IsNullOrWhiteSpace(savePath))
+                {
+                    return false;
+                }
+
+                byte[] image = gb._memory.GetBatterySaveFileImage();
+                if (image.Length == 0)
+                {
+                    return false;
+                }
+
+                string tmp = savePath + ".tmp";
+                File.WriteAllBytes(tmp, image);
+                File.Move(tmp, savePath, overwrite: true);
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 

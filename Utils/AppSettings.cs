@@ -10,6 +10,9 @@ public sealed class AppSettings
 
     public string? LastRomDirectory { get; set; }
 
+    // Separate from LastRomDirectory; used for exports (tiles/BG/WIN/OBJ).
+    public string? LastExportDirectory { get; set; }
+
     public bool AudioEnabled { get; set; } = true;
     public float AudioVolume { get; set; } = 1.0f;
 
@@ -27,6 +30,15 @@ public sealed class AppSettings
 
     public int WindowWidth { get; set; } = 1280;
     public int WindowHeight { get; set; } = 720;
+
+    // ImGuiTexInspect options (debug viewer)
+    public bool InspectorShowGrid { get; set; } = true;
+    public bool InspectorShowTooltip { get; set; } = true;
+    public bool InspectorAutoReadTexture { get; set; } = true;
+    public bool InspectorForceNearest { get; set; } = true;
+
+    // 0=ImGui, 1=Black, 2=White, 3=Checkered, 4=CustomColor
+    public int InspectorAlphaMode { get; set; } = 0;
 }
 
 public static class SettingsStore

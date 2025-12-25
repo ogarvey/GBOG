@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 
 namespace GBOG.ImGuiTexInspect.Core
 {
@@ -19,6 +20,11 @@ namespace GBOG.ImGuiTexInspect.Core
     {
         public InspectorFlags ToSet { get; set; }
         public InspectorFlags ToClear { get; set; }
+
+        public InspectorAlphaMode? AlphaMode { get; set; }
+
+        public Vector2? GridCellSizeTexels { get; set; }
+        public float? MinimumGridScale { get; set; }
     }
 
     /// <summary>

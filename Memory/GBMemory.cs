@@ -3,9 +3,11 @@ using GBOG.Utils;
 using Serilog;
 using Serilog.Core;
 using System;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Channels;
 
 namespace GBOG.Memory
@@ -24,6 +26,11 @@ namespace GBOG.Memory
 	public class GBMemory
 	{
 		private int _videoDebugDirty;
+		private int _saveDirtyVersion;
+		private byte _cartType;
+		private byte _ramSizeCode;
+		private bool _hasBatteryBackedSave;
+		private bool _mbc3HasTimer;
 
 		public void MarkVideoDebugDirty(VideoDebugDirtyFlags flags)
 		{
@@ -34,6 +41,345 @@ namespace GBOG.Memory
 		{
 			int v = System.Threading.Interlocked.Exchange(ref _videoDebugDirty, 0);
 			return (VideoDebugDirtyFlags)v;
+		}
+
+		public bool HasBatteryBackedSave => _hasBatteryBackedSave;
+		public bool HasMbc3Rtc => _mbc3HasTimer;
+
+		/// <summary>
+		/// True when the loaded cartridge both has a battery and declares SRAM.
+		/// (RTC-only battery carts like MBC3 type 0x0F will return false here.)
+		/// </summary>
+		public bool HasBatteryBackedSram => _hasBatteryBackedSave && SaveRamByteCount > 0;
+
+		public byte[] GetBatterySaveFileImage()
+		{
+			if (!HasBatteryBackedSave)
+			{
+				return Array.Empty<byte>();
+			}
+
+			int ramBytes = SaveRamByteCount;
+			int rtcBytes = HasMbc3Rtc ? 48 : 0;
+			if (ramBytes == 0 && rtcBytes == 0)
+			{
+				return Array.Empty<byte>();
+			}
+
+			var file = new byte[ramBytes + rtcBytes];
+			if (ramBytes > 0)
+			{
+				byte[] sram = GetSaveRamImage();
+				Array.Copy(sram, 0, file, 0, Math.Min(ramBytes, sram.Length));
+			}
+			if (rtcBytes > 0)
+			{
+				WriteMbc3RtcTrailer(file.AsSpan(ramBytes, rtcBytes));
+			}
+			return file;
+		}
+
+		public void LoadBatterySaveFileImage(byte[] file)
+		{
+			if (!HasBatteryBackedSave)
+			{
+				return;
+			}
+			if (file == null || file.Length == 0)
+			{
+				return;
+			}
+
+			int expectedRam = SaveRamByteCount;
+			bool hasRtc = HasMbc3Rtc;
+			if (!TrySplitSaveFile(file.Length, expectedRam, hasRtc, out int ramPart, out int rtcPart))
+			{
+				// Fallback: if the file is at least the expected SRAM size, just load the first bytes.
+				ramPart = Math.Min(file.Length, expectedRam);
+				rtcPart = 0;
+			}
+
+			if (ramPart > 0 && expectedRam > 0)
+			{
+				int loadLen = Math.Min(expectedRam, ramPart);
+				var sramSlice = new byte[loadLen];
+				Array.Copy(file, 0, sramSlice, 0, loadLen);
+				LoadSaveRamImage(sramSlice);
+			}
+
+			if (hasRtc && (rtcPart == 44 || rtcPart == 48))
+			{
+				var trailer = file.AsSpan(file.Length - rtcPart, rtcPart);
+				LoadMbc3RtcTrailer(trailer);
+			}
+		}
+
+		private static bool TrySplitSaveFile(int fileLen, int expectedRam, bool hasRtc, out int ramPart, out int rtcPart)
+		{
+			ramPart = 0;
+			rtcPart = 0;
+
+			if (!hasRtc)
+			{
+				// No RTC expected.
+				ramPart = Math.Min(fileLen, expectedRam);
+				rtcPart = 0;
+				return ramPart > 0;
+			}
+
+			// RTC trailers are 44 or 48 bytes.
+			foreach (int candidateRtc in new[] { 48, 44 })
+			{
+				if (fileLen < candidateRtc)
+				{
+					continue;
+				}
+				int candidateRam = fileLen - candidateRtc;
+				if (expectedRam == 0)
+				{
+					// RTC-only cart.
+					ramPart = 0;
+					rtcPart = candidateRtc;
+					return candidateRam == 0;
+				}
+				// Accept exact-sized SRAM, or padded to a multiple of 8KB.
+				if (candidateRam == expectedRam || (candidateRam >= expectedRam && (candidateRam % 0x2000) == 0))
+				{
+					ramPart = candidateRam;
+					rtcPart = candidateRtc;
+					return true;
+				}
+			}
+
+			// No RTC trailer detected.
+			ramPart = Math.Min(fileLen, expectedRam);
+			rtcPart = 0;
+			return ramPart > 0;
+		}
+
+		private static uint ReadDwordLE(ReadOnlySpan<byte> s, int offset)
+		{
+			return BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(offset, 4));
+		}
+
+		private static void WriteDwordLE(Span<byte> s, int offset, uint value)
+		{
+			BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(offset, 4), value);
+		}
+
+		private void WriteMbc3RtcTrailer(Span<byte> trailer)
+		{
+			// VBA-M compatible: always write 48 bytes.
+			if (trailer.Length != 48)
+			{
+				return;
+			}
+
+			uint timeS = (uint)((byte)_mbc3RtcSeconds);
+			uint timeM = (uint)((byte)_mbc3RtcMinutes);
+			uint timeH = (uint)((byte)_mbc3RtcHours);
+			uint timeDL = (uint)((byte)(_mbc3RtcDays & 0xFF));
+			uint timeDH = (uint)Mbc3RtcComposeDH();
+
+			WriteDwordLE(trailer, 0, timeS);
+			WriteDwordLE(trailer, 4, timeM);
+			WriteDwordLE(trailer, 8, timeH);
+			WriteDwordLE(trailer, 12, timeDL);
+			WriteDwordLE(trailer, 16, timeDH);
+
+			WriteDwordLE(trailer, 20, _mbc3RtcLatchedS);
+			WriteDwordLE(trailer, 24, _mbc3RtcLatchedM);
+			WriteDwordLE(trailer, 28, _mbc3RtcLatchedH);
+			WriteDwordLE(trailer, 32, _mbc3RtcLatchedDL);
+			WriteDwordLE(trailer, 36, _mbc3RtcLatchedDH);
+
+			uint unixTs = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+			WriteDwordLE(trailer, 40, unixTs);
+			WriteDwordLE(trailer, 44, 0);
+		}
+
+		private void LoadMbc3RtcTrailer(ReadOnlySpan<byte> trailer)
+		{
+			if (trailer.Length != 44 && trailer.Length != 48)
+			{
+				return;
+			}
+
+			byte timeS = (byte)(ReadDwordLE(trailer, 0) & 0xFF);
+			byte timeM = (byte)(ReadDwordLE(trailer, 4) & 0xFF);
+			byte timeH = (byte)(ReadDwordLE(trailer, 8) & 0xFF);
+			byte timeDL = (byte)(ReadDwordLE(trailer, 12) & 0xFF);
+			byte timeDH = (byte)(ReadDwordLE(trailer, 16) & 0xFF);
+
+			_mbc3RtcSeconds = timeS % 60;
+			_mbc3RtcMinutes = timeM % 60;
+			_mbc3RtcHours = timeH % 24;
+			_mbc3RtcDays = timeDL | (((timeDH & 0x01) != 0) ? 0x100 : 0);
+			_mbc3RtcHalt = (timeDH & 0x40) != 0;
+			_mbc3RtcCarry = (timeDH & 0x80) != 0;
+
+			_mbc3RtcLatchedS = (byte)(ReadDwordLE(trailer, 20) & 0xFF);
+			_mbc3RtcLatchedM = (byte)(ReadDwordLE(trailer, 24) & 0xFF);
+			_mbc3RtcLatchedH = (byte)(ReadDwordLE(trailer, 28) & 0xFF);
+			_mbc3RtcLatchedDL = (byte)(ReadDwordLE(trailer, 32) & 0xFF);
+			_mbc3RtcLatchedDH = (byte)(ReadDwordLE(trailer, 36) & 0xFF);
+
+			uint savedUnixTs = ReadDwordLE(trailer, 40);
+			if (!_mbc3RtcHalt && savedUnixTs != 0)
+			{
+				long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+				long delta = now - savedUnixTs;
+				if (delta > 0)
+				{
+					AdvanceMbc3RtcBySeconds(delta);
+				}
+			}
+		}
+
+		private void AdvanceMbc3RtcBySeconds(long deltaSeconds)
+		{
+			if (deltaSeconds <= 0)
+			{
+				return;
+			}
+
+			const long secondsPerDay = 24L * 60L * 60L;
+			const long daysPeriod = 512L;
+			const long periodSeconds = daysPeriod * secondsPerDay;
+
+			long currentTotal = ((long)_mbc3RtcDays * secondsPerDay) + ((long)_mbc3RtcHours * 3600L) + ((long)_mbc3RtcMinutes * 60L) + (long)_mbc3RtcSeconds;
+			long newTotal = currentTotal + deltaSeconds;
+			if (newTotal < 0)
+			{
+				newTotal = 0;
+			}
+
+			if (newTotal >= periodSeconds)
+			{
+				_mbc3RtcCarry = true;
+				newTotal %= periodSeconds;
+			}
+
+			int newDays = (int)(newTotal / secondsPerDay);
+			long rem = newTotal % secondsPerDay;
+			int newHours = (int)(rem / 3600L);
+			rem %= 3600L;
+			int newMinutes = (int)(rem / 60L);
+			int newSeconds = (int)(rem % 60L);
+
+			_mbc3RtcDays = newDays;
+			_mbc3RtcHours = newHours;
+			_mbc3RtcMinutes = newMinutes;
+			_mbc3RtcSeconds = newSeconds;
+		}
+
+		/// <summary>
+		/// Monotonically increasing version, incremented whenever battery-backed SRAM is modified.
+		/// Intended for autosave debounce logic.
+		/// </summary>
+		public int SaveDirtyVersion => Volatile.Read(ref _saveDirtyVersion);
+
+		/// <summary>
+		/// Total bytes of SRAM that should be persisted to disk for this cartridge.
+		/// For MBC2 this is 0x200 (512x4-bit, stored as 512 bytes).
+		/// </summary>
+		public int SaveRamByteCount
+		{
+			get
+			{
+				if (_mbc2)
+				{
+					return 0x200;
+				}
+
+				// Pan Docs RAM size codes (0x0149).
+				return _ramSizeCode switch
+				{
+					0x00 => 0,
+					0x01 => 0x0800,  // 2KB
+					0x02 => 0x2000,  // 8KB
+					0x03 => 0x8000,  // 32KB (4 banks)
+					0x04 => 0x20000, // 128KB (16 banks)
+					0x05 => 0x10000, // 64KB (8 banks)
+					_ => RamBanks?.Length ?? 0,
+				};
+			}
+		}
+
+		public byte[] GetSaveRamImage()
+		{
+			if (!HasBatteryBackedSram)
+			{
+				return Array.Empty<byte>();
+			}
+
+			int count = SaveRamByteCount;
+			if (count <= 0)
+			{
+				return Array.Empty<byte>();
+			}
+
+			if (_mbc2)
+			{
+				var ram = _mbc2Ram;
+				if (ram == null)
+				{
+					return new byte[count];
+				}
+				var image = new byte[count];
+				for (int i = 0; i < count && i < ram.Length; i++)
+				{
+					// MBC2 stores only low nibble; upper nibble reads as 1s.
+					image[i] = (byte)(0xF0 | (ram[i] & 0x0F));
+				}
+				return image;
+			}
+
+			var outBuf = new byte[count];
+			if (RamBanks != null)
+			{
+				Array.Copy(RamBanks, 0, outBuf, 0, Math.Min(count, RamBanks.Length));
+			}
+			return outBuf;
+		}
+
+		public void LoadSaveRamImage(byte[] image)
+		{
+			if (!HasBatteryBackedSram)
+			{
+				return;
+			}
+			if (image == null || image.Length == 0)
+			{
+				return;
+			}
+
+			if (_mbc2)
+			{
+				var ram = _mbc2Ram ??= new byte[0x200];
+				int max = Math.Min(ram.Length, image.Length);
+				for (int i = 0; i < max; i++)
+				{
+					ram[i] = (byte)(image[i] & 0x0F);
+				}
+				return;
+			}
+
+			if (RamBanks == null || RamBanks.Length == 0)
+			{
+				return;
+			}
+
+			Array.Copy(image, 0, RamBanks, 0, Math.Min(RamBanks.Length, image.Length));
+		}
+
+		private void MarkSaveDirtyIfBatteryBackedSave()
+		{
+			if (!HasBatteryBackedSave)
+			{
+				return;
+			}
+			Interlocked.Increment(ref _saveDirtyVersion);
 		}
 
 		public event EventHandler<char>? SerialDataReceived;
@@ -296,73 +642,93 @@ namespace GBOG.Memory
 			set { _memory[0xFF00] = value; }
 		}
 
+		// JOYP (FF00) select bits (bits 4-5). Note: on real hardware these are active-low selects.
+		// bit4 (P14): 0 selects directions
+		// bit5 (P15): 0 selects buttons
+		private byte _joypSelect = 0x30;
+
+		// Last computed low nibble used for edge-based interrupt triggering.
+		private byte _joypLastLowNibble = 0x0F;
+
 		public byte Joypad
 		{
 			get
 			{
-				try
-				{
-					SetJoypadState();
-				}
-				catch (Exception ex)
-				{
-					Console.WriteLine($"Encountered exception: {ex}");
-				}
-				return _JOYP;
+				// Reads should be side-effect free: the game sets select bits via writes, then reads the
+				// resulting low nibble. Interrupt triggering is handled on input transitions.
+				return BuildJoypValue();
 			}
 			set
 			{
-				_JOYP = value;
+				// Only bits 4-5 are writable (select lines). Bits 0-3 are read-only and reflect inputs.
+				_joypSelect = (byte)(value & 0b_0011_0000);
+				RefreshJoypRegister(allowInterrupt: false);
 			}
 		}
 
-		private void SetJoypadState()
+		private byte BuildDirectionNibble()
 		{
-			bool isDirection = Extensions.IsBitSet(_JOYP, 4);
-			bool isButton = Extensions.IsBitSet(_JOYP, 5);
+			// Active-low: 1 = not pressed, 0 = pressed.
+			byte v = 0b_0000_1111;
+			if (_joyPadKeys[0]) v = Extensions.BitReset(v, 0); // Right
+			if (_joyPadKeys[1]) v = Extensions.BitReset(v, 1); // Left
+			if (_joyPadKeys[2]) v = Extensions.BitReset(v, 2); // Up
+			if (_joyPadKeys[3]) v = Extensions.BitReset(v, 3); // Down
+			return v;
+		}
 
-			byte newJoypad = 0;
-			byte previousJoypad = _JOYP;
+		private byte BuildButtonNibble()
+		{
+			// Active-low: 1 = not pressed, 0 = pressed.
+			byte v = 0b_0000_1111;
+			if (_joyPadKeys[4]) v = Extensions.BitReset(v, 0); // A
+			if (_joyPadKeys[5]) v = Extensions.BitReset(v, 1); // B
+			if (_joyPadKeys[6]) v = Extensions.BitReset(v, 2); // Select
+			if (_joyPadKeys[7]) v = Extensions.BitReset(v, 3); // Start
+			return v;
+		}
 
-			if (isDirection || isButton)
+		private byte BuildJoypValue()
+		{
+			byte low = 0b_0000_1111;
+
+			// When neither group is selected, the low nibble reads as all 1s.
+			// When one or both are selected, the lines are effectively ANDed together.
+			if ((_joypSelect & 0b_0001_0000) == 0)
 			{
-				if (!isDirection)
-				{
-					newJoypad = 0b_0000_1111;
-					if (_joyPadKeys[0]) newJoypad = Extensions.BitReset(newJoypad, 0);
-					if (_joyPadKeys[1]) newJoypad = Extensions.BitReset(newJoypad, 1);
-					if (_joyPadKeys[2]) newJoypad = Extensions.BitReset(newJoypad, 2);
-					if (_joyPadKeys[3]) newJoypad = Extensions.BitReset(newJoypad, 3);
-				}
-				else
-				{
-					if (!isButton)
-					{
-						newJoypad = 0b_0000_1111;
-						if (_joyPadKeys[4]) newJoypad = Extensions.BitReset(newJoypad, 0);
-						if (_joyPadKeys[5]) newJoypad = Extensions.BitReset(newJoypad, 1);
-						if (_joyPadKeys[6]) newJoypad = Extensions.BitReset(newJoypad, 2);
-						if (_joyPadKeys[7]) newJoypad = Extensions.BitReset(newJoypad, 3);
-					}
-				}
-
-				// get lsb of newstate
-				byte lsb = (byte)(Extensions.GetLSB(newJoypad) & ~Extensions.GetLSB(previousJoypad));
-
-				// if lsb is 1, set interrupt
-				if (lsb != 0) IF |= (1 << (int)4);
-
-				var temp = newJoypad | (previousJoypad & 0b_0011_0000);
-
-				if ((temp & 0x30) == 0x10 || (temp & 0x30) == 0x20)
-				{
-					_JOYP = (byte)temp;
-				}
-				else
-				{
-					_JOYP = 0xff;
-				}
+				low &= BuildDirectionNibble();
 			}
+			if ((_joypSelect & 0b_0010_0000) == 0)
+			{
+				low &= BuildButtonNibble();
+			}
+
+			return (byte)(0b_1100_0000 | (_joypSelect & 0b_0011_0000) | low);
+		}
+
+		private void RefreshJoypRegister(bool allowInterrupt)
+		{
+			byte joyp = BuildJoypValue();
+			byte low = (byte)(joyp & 0x0F);
+
+			// Joypad interrupt triggers when the low nibble transitions from 0xF to non-0xF.
+			// (i.e., from "no pressed buttons in the selected group(s)" to "some pressed".)
+			if (allowInterrupt && _joypLastLowNibble == 0x0F && low != 0x0F)
+			{
+				IF |= (1 << 4);
+			}
+
+			_joypLastLowNibble = low;
+			_JOYP = joyp;
+		}
+
+		/// <summary>
+		/// Called by the host/UI after updating <see cref="_joyPadKeys"/>.
+		/// This updates the cached FF00 value and raises the joypad interrupt on the correct edge.
+		/// </summary>
+		public void NotifyJoypadStateChanged()
+		{
+			RefreshJoypRegister(allowInterrupt: true);
 		}
 
 		public bool[] _joyPadKeys { get; set; }
@@ -1428,7 +1794,7 @@ namespace GBOG.Memory
 		internal void TickBaseCycles(int baseCycles)
 		{
 			TickOamDma(baseCycles);
-			if (!_mbc3 || _mbc3RtcHalt)
+			if (!_mbc3 || !_mbc3HasTimer || _mbc3RtcHalt)
 			{
 				return;
 			}
@@ -1540,6 +1906,8 @@ namespace GBOG.Memory
 					break;
 				}
 			}
+
+			MarkSaveDirtyIfBatteryBackedSave();
 		}
 
 		public GBMemory(Gameboy gameBoy)
@@ -1722,10 +2090,10 @@ namespace GBOG.Memory
 				return _gameBoy.Apu.ReadRegister(address);
 			}
 
-			// Avoid JOYP side-effects (SetJoypadState / IF raising).
+			// JOYP: compute the value without triggering interrupts.
 			if (address == 0xFF00)
 			{
-				return _memory[0xFF00];
+				return BuildJoypValue();
 			}
 
 			if (address == 0xFF4D)
@@ -2070,6 +2438,7 @@ namespace GBOG.Memory
 					ramBank %= _ramBankSize;
 				}
 				RamBanks[(address - 0xA000) + (ramBank * 0x2000)] = value;
+				MarkSaveDirtyIfBatteryBackedSave();
 
 			}
 			if (_mbc2)
@@ -2078,6 +2447,7 @@ namespace GBOG.Memory
 				var ram = _mbc2Ram ??= new byte[0x200];
 				int index = GetMbc2RamIndex(address);
 				ram[index] = (byte)(value & 0x0F);
+				MarkSaveDirtyIfBatteryBackedSave();
 				return;
 			}
 			if (_mbc3)
@@ -2092,6 +2462,7 @@ namespace GBOG.Memory
 						bank %= _ramBankSize;
 					}
 					RamBanks[(bank * 0x2000) + (address - 0xA000)] = value;
+					MarkSaveDirtyIfBatteryBackedSave();
 					return;
 				}
 				if (sel >= 0x08 && sel <= 0x0C)
@@ -2106,6 +2477,7 @@ namespace GBOG.Memory
 				if (_ramEnabled)
 				{
 					RamBanks[0x2000 * _currentRamBank + (address - 0xA000)] = value;
+					MarkSaveDirtyIfBatteryBackedSave();
 				}
 			}
 		}
@@ -2346,6 +2718,11 @@ namespace GBOG.Memory
 
 		public void InitialiseGame(byte[] rom)
 		{
+			_saveDirtyVersion = 0;
+			_cartType = rom.Length > 0x147 ? rom[0x147] : (byte)0;
+			_ramSizeCode = rom.Length > 0x149 ? rom[0x149] : (byte)0;
+			_hasBatteryBackedSave = _cartType is 0x03 or 0x06 or 0x09 or 0x0F or 0x10 or 0x13 or 0x1B or 0x1E;
+
 			// Reset mapper state for the newly loaded cartridge.
 			_currentRomBank = 1;
 			_currentRamBank = 0;
@@ -2379,7 +2756,7 @@ namespace GBOG.Memory
 			_key1PrepareSpeedSwitch = false;
 			_memory[0xFF4D] = _isCgb ? BuildKey1Value() : (byte)0xFF;
 
-			var type = rom[0x147];
+			var type = _cartType;
 			switch (type)
 			{
 				case 0:
@@ -2412,6 +2789,7 @@ namespace GBOG.Memory
 				case 0x13:
 					// MBC3+RAM+BATTERY
 					_mbc3 = true;
+					_mbc3HasTimer = type is 0x0F or 0x10;
 					break;
 				case 0x19:
 				// MBC5
@@ -2504,7 +2882,7 @@ namespace GBOG.Memory
 			Array.Copy(rom, 0, _cartRom, 0, rom.Length);
 			Array.Copy(rom, 0, _memory, 0, Math.Min(0x8000, rom.Length));
 
-			var ramSize = rom[0x149];
+			var ramSize = _ramSizeCode;
 			switch (ramSize)
 			{
 				case 0x00:

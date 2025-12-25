@@ -48,6 +48,11 @@ namespace GBOG.ImGuiTexInspect.Core
         /// Width in UV coordinates of grid lines
         /// </summary>
         public Vector2 GridWidth { get; set; }
+
+        /// <summary>
+        /// Grid cell size expressed in texture texels. (1,1) draws per-texel grid; (8,8) draws an 8x8 "tile" grid.
+        /// </summary>
+        public Vector2 GridCellSizeTexels { get; set; }
         
         /// <summary>
         /// Color of grid lines (RGB + Alpha for visibility)
@@ -64,6 +69,7 @@ namespace GBOG.ImGuiTexInspect.Core
             DisableFinalAlpha = 0;
             ForceNearestSampling = false;
             GridWidth = Vector2.Zero;
+            GridCellSizeTexels = Vector2.One;
             GridColor = Vector4.Zero;
         }
 
@@ -90,10 +96,12 @@ namespace GBOG.ImGuiTexInspect.Core
             var clone = new ShaderOptions
             {
                 BackgroundColor = BackgroundColor,
+                CheckeredBackground = CheckeredBackground,
                 PremultiplyAlpha = PremultiplyAlpha,
                 DisableFinalAlpha = DisableFinalAlpha,
                 ForceNearestSampling = ForceNearestSampling,
                 GridWidth = GridWidth,
+                GridCellSizeTexels = GridCellSizeTexels,
                 GridColor = GridColor
             };
             

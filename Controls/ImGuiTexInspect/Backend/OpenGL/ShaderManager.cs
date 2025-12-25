@@ -27,6 +27,7 @@ namespace GBOG.ImGuiTexInspect.Backend.OpenGL
         private static int _locCheckeredBackground;
         private static int _locGrid;
         private static int _locGridWidth;
+        private static int _locGridCellSize;
 
         // Attribute locations
         private static uint _locPosition;
@@ -101,6 +102,7 @@ namespace GBOG.ImGuiTexInspect.Backend.OpenGL
                 CheckeredBackground = _locCheckeredBackground,
                 Grid = _locGrid,
                 GridWidth = _locGridWidth,
+                GridCellSize = _locGridCellSize,
                 Position = _locPosition,
                 UV = _locUV
             };
@@ -187,6 +189,7 @@ namespace GBOG.ImGuiTexInspect.Backend.OpenGL
             _locForceNearestSampling = _gl.GetUniformLocation(_shaderProgram, "ForceNearestSampling");
             _locGrid = _gl.GetUniformLocation(_shaderProgram, "Grid");
             _locGridWidth = _gl.GetUniformLocation(_shaderProgram, "GridWidth");
+            _locGridCellSize = _gl.GetUniformLocation(_shaderProgram, "GridCellSize");
 
             // Get attribute locations
             _locPosition = (uint)_gl.GetAttribLocation(_shaderProgram, "Position");
@@ -314,6 +317,7 @@ uniform bool ForceNearestSampling;
 uniform bool CheckeredBackground;
 uniform vec4 Grid;
 uniform vec2 GridWidth;
+uniform vec2 GridCellSize;
 varying vec2 Frag_UV;
 void main()
 {
@@ -323,7 +327,8 @@ void main()
         uv = (floor(texel) + vec2(0.5,0.5)) / TextureSize;
     else
         uv = Frag_UV;
-    vec2 texelEdge = step(mod(texel,vec2(1.0,1.0)),GridWidth);
+    vec2 cellSize = max(GridCellSize, vec2(1.0, 1.0));
+    vec2 texelEdge = step(mod(texel, cellSize), GridWidth);
     float isGrid = max(texelEdge.x, texelEdge.y);
     vec4 ct = ColorTransform * texture2D(Texture, uv) + ColorOffset;
     ct.rgb = ct.rgb * mix(1.0, ct.a, PremultiplyAlpha);
@@ -355,6 +360,7 @@ uniform bool ForceNearestSampling;
 uniform bool CheckeredBackground;
 uniform vec4 Grid;
 uniform vec2 GridWidth;
+uniform vec2 GridCellSize;
 in vec2 Frag_UV;
 out vec4 Out_Color;
 void main()
@@ -365,7 +371,8 @@ void main()
         uv = (floor(texel) + vec2(0.5,0.5)) / TextureSize;
     else
         uv = Frag_UV;
-    vec2 texelEdge = step(mod(texel,vec2(1.0,1.0)),GridWidth);
+    vec2 cellSize = max(GridCellSize, vec2(1.0, 1.0));
+    vec2 texelEdge = step(mod(texel, cellSize), GridWidth);
     float isGrid = max(texelEdge.x, texelEdge.y);
     vec4 ct = ColorTransform * texture(Texture, uv) + ColorOffset;
     ct.rgb = ct.rgb * mix(1.0, ct.a, PremultiplyAlpha);
@@ -398,6 +405,7 @@ uniform bool ForceNearestSampling;
 uniform bool CheckeredBackground;
 uniform vec4 Grid;
 uniform vec2 GridWidth;
+uniform vec2 GridCellSize;
 in vec2 Frag_UV;
 layout (location = 0) out vec4 Out_Color;
 void main()
@@ -408,7 +416,8 @@ void main()
         uv = (floor(texel) + vec2(0.5,0.5)) / TextureSize;
     else
         uv = Frag_UV;
-    vec2 texelEdge = step(mod(texel,vec2(1.0,1.0)),GridWidth);
+    vec2 cellSize = max(GridCellSize, vec2(1.0, 1.0));
+    vec2 texelEdge = step(mod(texel, cellSize), GridWidth);
     float isGrid = max(texelEdge.x, texelEdge.y);
     vec4 ct = ColorTransform * texture(Texture, uv) + ColorOffset;
     ct.rgb = ct.rgb * mix(1.0, ct.a, PremultiplyAlpha);
@@ -440,6 +449,7 @@ uniform bool ForceNearestSampling;
 uniform bool CheckeredBackground;
 uniform vec4 Grid;
 uniform vec2 GridWidth;
+uniform vec2 GridCellSize;
 in vec2 Frag_UV;
 layout (location = 0) out vec4 Out_Color;
 void main()
@@ -450,7 +460,8 @@ void main()
         uv = (floor(texel) + vec2(0.5,0.5)) / TextureSize;
     else
         uv = Frag_UV;
-    vec2 texelEdge = step(mod(texel,vec2(1.0,1.0)),GridWidth);
+    vec2 cellSize = max(GridCellSize, vec2(1.0, 1.0));
+    vec2 texelEdge = step(mod(texel, cellSize), GridWidth);
     float isGrid = max(texelEdge.x, texelEdge.y);
     vec4 ct = ColorTransform * texture(Texture, uv) + ColorOffset;
     ct.rgb = ct.rgb * mix(1.0, ct.a, PremultiplyAlpha);
@@ -490,6 +501,7 @@ void main()
         public int CheckeredBackground;
         public int Grid;
         public int GridWidth;
+        public int GridCellSize;
         public uint Position;
         public uint UV;
     }
