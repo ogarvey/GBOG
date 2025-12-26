@@ -30,6 +30,7 @@ namespace GBOG.Memory
 		private readonly byte[][] _videoDebugVramSnapshots = [new byte[VideoDebugVramBytes], new byte[VideoDebugVramBytes]];
 		private readonly byte[][] _videoDebugBgPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
 		private readonly byte[][] _videoDebugObjPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
+		private readonly byte[] _videoDebugLcdcSnapshots = new byte[2];
 		private int _videoDebugSnapshotIndex;
 		private int _videoDebugSnapshotVersion;
 
@@ -42,16 +43,18 @@ namespace GBOG.Memory
 			Buffer.BlockCopy(_gameBoy._ppu.VideoRam, 0, _videoDebugVramSnapshots[writeIndex], 0, VideoDebugVramBytes);
 			Buffer.BlockCopy(_cgbBgPaletteRam, 0, _videoDebugBgPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
 			Buffer.BlockCopy(_cgbObjPaletteRam, 0, _videoDebugObjPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
+			_videoDebugLcdcSnapshots[writeIndex] = _memory[0xFF40];
 			Volatile.Write(ref _videoDebugSnapshotIndex, writeIndex);
 			Interlocked.Increment(ref _videoDebugSnapshotVersion);
 		}
 
-		internal void GetVideoDebugSnapshot(out byte[] vram, out byte[] bgPalRam, out byte[] objPalRam)
+		internal void GetVideoDebugSnapshot(out byte[] vram, out byte[] bgPalRam, out byte[] objPalRam, out byte lcdc)
 		{
 			int idx = Volatile.Read(ref _videoDebugSnapshotIndex);
 			vram = _videoDebugVramSnapshots[idx];
 			bgPalRam = _videoDebugBgPaletteSnapshots[idx];
 			objPalRam = _videoDebugObjPaletteSnapshots[idx];
+			lcdc = _videoDebugLcdcSnapshots[idx];
 		}
 		public int CgbBgPaletteWriteCount { get; private set; }
 		public int CgbObjPaletteWriteCount { get; private set; }
@@ -3669,7 +3672,7 @@ namespace GBOG.Memory
 			// 8000-97FF from the selected VRAM bank.
 			bank = bank != 0 ? 1 : 0;
 			var tileData = new byte[0x1800];
-			GetVideoDebugSnapshot(out var vram, out _, out _);
+			GetVideoDebugSnapshot(out var vram, out _, out _, out _);
 			int src = (bank * 0x2000) + 0x0000; // 0x8000 within VRAM
 			Array.Copy(vram, src, tileData, 0, 0x1800);
 			return tileData;
@@ -3689,7 +3692,7 @@ namespace GBOG.Memory
 			}
 
 			var tileMap = new byte[0x400];
-			GetVideoDebugSnapshot(out var vram, out _, out _);
+			GetVideoDebugSnapshot(out var vram, out _, out _, out _);
 			int src = baseAddress - 0x8000; // VRAM bank 0
 			Array.Copy(vram, src, tileMap, 0, 0x400);
 			return tileMap;
@@ -3710,7 +3713,7 @@ namespace GBOG.Memory
 			}
 
 			int src = 0x2000 + (baseAddress - 0x8000);
-			GetVideoDebugSnapshot(out var vram, out _, out _);
+			GetVideoDebugSnapshot(out var vram, out _, out _, out _);
 			Array.Copy(vram, src, attrs, 0, 0x400);
 			return attrs;
 		}

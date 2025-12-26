@@ -714,7 +714,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
     var map = gb._memory.GetTileMap(mapBase);
 
-    gb._memory.GetVideoDebugSnapshot(out _, out var bgPalRam, out _);
+    gb._memory.GetVideoDebugSnapshot(out _, out var bgPalRam, out _, out _);
     var rgba = isCgb
       ? RenderCgbTileMapToRgba(map, gb._memory.GetCgbTileMapAttributes(mapBase), tileData, tileData1, useSignedTileNumbers, treatCi0Transparent, bgPalRam)
       : RenderTileMapToRgba(map, tileData, useSignedTileNumbers, palette, treatCi0Transparent, applyBgpShading, bgp);
@@ -734,7 +734,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     }
 
     bool isCgb = gb._memory.IsCgb;
-    gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPal);
+    gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPal, out _);
     var tileData = new byte[0x1800];
     Array.Copy(vram, 0x0000, tileData, 0, 0x1800);
     var tileData1 = isCgb ? new byte[0x1800] : Array.Empty<byte>();
@@ -765,7 +765,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     }
 
     bool isCgb = gb._memory.IsCgb;
-    gb._memory.GetVideoDebugSnapshot(out _, out _, out var objPalRam);
+    gb._memory.GetVideoDebugSnapshot(out _, out _, out var objPalRam, out _);
     var tileData0 = gb._memory.GetTileDataBank(0);
     var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
     var tileData = isCgb && info.VramBank != 0 ? tileData1 : tileData0;
@@ -1113,7 +1113,8 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
     if (gb._memory.IsCgb)
     {
-      gb._memory.GetVideoDebugSnapshot(out _, out var bgPalRam, out _);
+      gb._memory.GetVideoDebugSnapshot(out _, out var bgPalRam, out _, out var lcdc);
+      useSignedTileNumbers = (lcdc & 0x10) == 0;
       var attrMap = gb._memory.GetCgbTileMapAttributes(mapBase);
       byte attr = (uint)mapIndex < (uint)attrMap.Length ? attrMap[mapIndex] : (byte)0;
       int pal = attr & 0x07;
@@ -1234,7 +1235,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         return;
       }
 
-      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out _);
+      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out _, out _);
       _tileAtlasSnapshotVersion = snapVer;
 
       // Tile pattern data is 0x8000-0x97FF (384 tiles) per VRAM bank.
@@ -1355,7 +1356,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         return;
       }
 
-      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out _);
+      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out _, out var lcdc);
       _tileMapsSnapshotVersion = snapVer;
 
       var tileData = new byte[0x1800];
@@ -1368,14 +1369,17 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
       byte bgp = gb._memory.BGP;
 
+      bool bgMapSelect = (lcdc & 0x08) != 0;
+      bool winMapSelect = (lcdc & 0x40) != 0;
+      bool useSignedTileNumbers = (lcdc & 0x10) == 0;
+
       ushort bgMapBase = _bgMapSelectMode switch
       {
         TileMapSelectMode.Map9800 => (ushort)0x9800,
         TileMapSelectMode.Map9C00 => (ushort)0x9C00,
-        _ => (gb._memory.BGTileMapDisplaySelect ? (ushort)0x9C00 : (ushort)0x9800),
+        _ => (bgMapSelect ? (ushort)0x9C00 : (ushort)0x9800),
       };
-      ushort winMapBase = gb._memory.WindowTileMapDisplaySelect ? (ushort)0x9C00 : (ushort)0x9800;
-      bool useSignedTileNumbers = !gb._memory.BGWindowTileDataSelect;
+      ushort winMapBase = winMapSelect ? (ushort)0x9C00 : (ushort)0x9800;
 
       var bgMap = new byte[0x400];
       var winMap = new byte[0x400];
@@ -1440,7 +1444,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         return;
       }
 
-      gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPal);
+      gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPal, out _);
       _spriteLayerSnapshotVersion = snapVer;
 
       var tileData = new byte[0x1800];
