@@ -1314,24 +1314,18 @@ namespace GBOG.CPU
 
         public void LoadRom(string path)
         {
-            // Open the file as a stream of bytes
-            var rom = File.ReadAllBytes(path);
+            LoadRom(path, preferCgbWhenSupported: false);
+        }
 
-            // Create a buffer to hold the contents
-            // Read the file into the buffer
-            _memory.InitialiseGame(rom);
+        public void LoadRom(string path, bool preferCgbWhenSupported)
+        {
+            var rom = File.ReadAllBytes(path);
+            _memory.InitialiseGame(rom, preferCgbWhenSupported);
 
             // Set post-boot register state for DMG vs CGB so test ROMs that check the boot identifier work.
             // Many blargg ROMs use A's bit 4 to identify CGB.
             DoubleSpeed = false;
-            if (_memory.IsCgb)
-            {
-                A = 0x11;
-            }
-            else
-            {
-                A = 0x01;
-            }
+            A = _memory.IsCgb ? (byte)0x11 : (byte)0x01;
             _memory.RefreshKey1();
 
             // Warm up likely-to-JIT hotspots so the first rendered frames don't hitch.

@@ -41,5 +41,9 @@ public class HexEditorState
     public int SelectDragSubByte = 0;
     public float SelectCursorAnimationTime = 0f;
 
+	// One-shot request: scroll the view so this byte offset is visible.
+	// Set to -1 to disable. The hex editor will reset it to -1 after applying.
+	public int RequestScrollToByte = -1;
+
     public HexEditorHighlightFlags SelectionHighlightFlags = HexEditorHighlightFlags.FullSized | HexEditorHighlightFlags.Ascii;
 }

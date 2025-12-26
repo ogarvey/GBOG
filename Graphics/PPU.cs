@@ -23,7 +23,7 @@ namespace GBOG.Graphics
 		public PPU(Gameboy gb)
 		{
 			_gb = gb;
-			VideoRam = new byte[0x2000];
+			VideoRam = new byte[0x4000];
 			OAM = new byte[0xA0];
 			Screen = new Screen();
 			Scanline = 0;
@@ -226,33 +226,44 @@ namespace GBOG.Graphics
 			// Keep track of whether the BG/WIN pixel at each X uses color number 0.
 			// This is needed for OBJ-to-BG priority (sprite bit 7).
 			Span<bool> bgIsColor0 = stackalloc bool[160];
+			// In CGB mode, each BG/WIN pixel can also force priority over sprites (attr bit 7).
+			Span<bool> bgHasPriority = stackalloc bool[160];
 
 			// Always fill the scanline with BG palette color 0 (even if BG is disabled).
-			byte bgp = _gb._memory.BGP;
-			int bgShade0 = bgp & 0x03;
-			Color baseColor = MapColor(bgShade0);
+			Color baseColor;
+			if (_gb._memory.IsCgb)
+			{
+				baseColor = _gb._memory.GetCgbBgPaletteColor(0, 0);
+			}
+			else
+			{
+				byte bgp = _gb._memory.BGP;
+				int bgShade0 = bgp & 0x03;
+				baseColor = MapColor(bgShade0);
+			}
 			for (int x = 0; x < 160; x++)
 			{
 				bgIsColor0[x] = true;
+				bgHasPriority[x] = false;
 				Screen.DrawPixel(x, Scanline, baseColor);
 			}
 
 			// Render BG layer (if enabled)
 			if (_gb._memory.BGDisplay)
 			{
-				RenderBackground(bgIsColor0);
+				RenderBackground(bgIsColor0, bgHasPriority);
 			}
 
 			// Render Window (if enabled and active on this line)
 			if (_gb._memory.WindowDisplayEnable)
 			{
-				RenderWindow(bgIsColor0);
+				RenderWindow(bgIsColor0, bgHasPriority);
 			}
 
 			// Render sprites on top (if enabled)
 			if (_gb._memory.SpriteDisplay)
 			{
-				RenderSprites(bgIsColor0);
+				RenderSprites(bgIsColor0, bgHasPriority);
 			}
 		}
 
@@ -268,15 +279,17 @@ namespace GBOG.Graphics
 				WindowScanline = 0;
 
 				Span<bool> bgIsColor0 = stackalloc bool[160];
+				Span<bool> bgHasPriority = stackalloc bool[160];
 				for (int x = 0; x < 160; x++)
 				{
 					bgIsColor0[x] = true;
+					bgHasPriority[x] = false;
 					Screen.DrawPixel(x, 0, Color.White);
 				}
 
-				RenderBackground(bgIsColor0);
-				RenderWindow(bgIsColor0);
-				RenderSprites(bgIsColor0);
+				RenderBackground(bgIsColor0, bgHasPriority);
+				RenderWindow(bgIsColor0, bgHasPriority);
+				RenderSprites(bgIsColor0, bgHasPriority);
 			}
 			finally
 			{
@@ -285,7 +298,7 @@ namespace GBOG.Graphics
 			}
 		}
 
-		private void RenderBackground(Span<bool> bgIsColor0)
+		private void RenderBackground(Span<bool> bgIsColor0, Span<bool> bgHasPriority)
 		{
 			// Calculate which tiles are visible in the current scanline.
 			// Fetch the tile data using FetchTile method.
@@ -293,7 +306,8 @@ namespace GBOG.Graphics
 			byte lcdControl = _gb._memory.LCDC;
 			byte scx = _gb._memory.SCX;
 			byte scy = _gb._memory.SCY;
-			byte bgp = _gb._memory.BGP; // Background Palette Data
+			byte bgp = _gb._memory.BGP; // Background Palette Data (DMG)
+			bool isCgb = _gb._memory.IsCgb;
 
 			// Calculate the address of the background map
 			ushort bgMapAddr = (ushort)((lcdControl & 0x08) == 0x08 ? 0x9C00 : 0x9800);
@@ -316,8 +330,25 @@ namespace GBOG.Graphics
 				// Calculate the column of the tile in the background map
 				int mapCol = xPos / 8;
 
-				// Get the tile number from the background map
-				byte tileNum = ReadByte((ushort)(bgMapAddr + mapRow * 32 + mapCol));
+				int mapIndex = (bgMapAddr - 0x8000) + (mapRow * 32) + mapCol;
+				// Tile numbers are stored in VRAM bank 0.
+				byte tileNum = VideoRam[mapIndex];
+				byte attr = 0;
+				int tileVramBank = 0;
+				int bgPalette = 0;
+				bool xFlip = false;
+				bool yFlip = false;
+				bool priority = false;
+				if (isCgb)
+				{
+					// Attributes are stored in VRAM bank 1 at the same map index.
+					attr = VideoRam[0x2000 + mapIndex];
+					bgPalette = attr & 0x07;
+					tileVramBank = (attr & 0x08) != 0 ? 1 : 0;
+					xFlip = (attr & 0x20) != 0;
+					yFlip = (attr & 0x40) != 0;
+					priority = (attr & 0x80) != 0;
+				}
 
 				// Calculate the tile data address
 				ushort tileAddr;
@@ -331,17 +362,47 @@ namespace GBOG.Graphics
 					tileAddr = (ushort)(tileDataBaseAddr + tileNum * 16); // Treat tileNum as unsigned
 				}
 
+				int xInTile = xPos & 7;
+				int yInTile = yPos & 7;
+				if (xFlip) xInTile = 7 - xInTile;
+				if (yFlip) yInTile = 7 - yInTile;
 				// Get the color number directly from VRAM (avoid per-pixel allocations)
-				int colorNum = GetTileColorNumber(tileAddr, xPos & 7, yPos & 7);
+				int colorNum = isCgb
+					? GetTileColorNumber(tileVramBank, tileAddr, xInTile, yInTile)
+					: GetTileColorNumber(tileAddr, xInTile, yInTile);
 
 				bgIsColor0[pixel] = colorNum == 0;
-				// Map the color number to actual color using the background palette
-				int colorBits = (bgp >> (colorNum * 2)) & 0x03;
-				Color actualColor = MapColor(colorBits);
+				bgHasPriority[pixel] = priority;
+				Color actualColor;
+				if (isCgb)
+				{
+					actualColor = _gb._memory.GetCgbBgPaletteColor(bgPalette, colorNum);
+				}
+				else
+				{
+					// Map the color number to actual color using the background palette
+					int colorBits = (bgp >> (colorNum * 2)) & 0x03;
+					actualColor = MapColor(colorBits);
+				}
 
 				// Draw the pixel to the screen
 				Screen.DrawPixel(pixel, Scanline, actualColor);
 			}
+		}
+
+		private int GetTileColorNumber(int vramBank, ushort tileAddr, int xInTile, int yInTile)
+		{
+			int baseIndex = (vramBank * 0x2000) + (tileAddr - 0x8000);
+			int rowIndex = baseIndex + (yInTile * 2);
+			if ((uint)(rowIndex + 1) >= (uint)VideoRam.Length)
+			{
+				return 0;
+			}
+
+			byte byte1 = VideoRam[rowIndex];
+			byte byte2 = VideoRam[rowIndex + 1];
+			int bit = 7 - xInTile;
+			return ((byte1 >> bit) & 1) | (((byte2 >> bit) & 1) << 1);
 		}
 
 		private int GetTileColorNumber(ushort tileAddr, int xInTile, int yInTile)
@@ -364,12 +425,13 @@ namespace GBOG.Graphics
 			return _gb.DisplayPalette.GetShade(colorBits);
 		}
 
-		private void RenderWindow(Span<bool> bgIsColor0)
+		private void RenderWindow(Span<bool> bgIsColor0, Span<bool> bgHasPriority)
 		{
 			byte lcdControl = _gb._memory.LCDC;
 			byte wx = _gb._memory.WX;
 			byte wy = _gb._memory.WY;
-			byte bgp = _gb._memory.BGP; // Background Palette Data
+			byte bgp = _gb._memory.BGP; // Background Palette Data (DMG)
+			bool isCgb = _gb._memory.IsCgb;
 
 			// If the current scanline is below the window, exit
 			if (Scanline < wy) return;
@@ -397,20 +459,49 @@ namespace GBOG.Graphics
 				int xPos = pixel - (wx - 7); // Window's X position in relation to the current pixel
 				int mapCol = xPos / 8; // The column of the tile in the window map
 
-				// Get the tile number from the window map
-				byte tileNum = ReadByte((ushort)(windowMapAddr + mapRow * 32 + mapCol));
+				int mapIndex = (windowMapAddr - 0x8000) + (mapRow * 32) + mapCol;
+				byte tileNum = VideoRam[mapIndex];
+				byte attr = 0;
+				int tileVramBank = 0;
+				int bgPalette = 0;
+				bool xFlip = false;
+				bool yFlip = false;
+				bool priority = false;
+				if (isCgb)
+				{
+					attr = VideoRam[0x2000 + mapIndex];
+					bgPalette = attr & 0x07;
+					tileVramBank = (attr & 0x08) != 0 ? 1 : 0;
+					xFlip = (attr & 0x20) != 0;
+					yFlip = (attr & 0x40) != 0;
+					priority = (attr & 0x80) != 0;
+				}
 
 				// Calculate the tile data address
 				ushort tileAddr = useSignedTileNumbers ? (ushort)(tileDataBaseAddr + ((sbyte)tileNum + 128) * 16)
 																							 : (ushort)(tileDataBaseAddr + tileNum * 16);
 
-				// Fetch the tile data
-				int colorNum = GetTileColorNumber(tileAddr, xPos & 7, yPos & 7);
+				int xInTile = xPos & 7;
+				int yInTile = yPos & 7;
+				if (xFlip) xInTile = 7 - xInTile;
+				if (yFlip) yInTile = 7 - yInTile;
+				int colorNum = isCgb
+					? GetTileColorNumber(tileVramBank, tileAddr, xInTile, yInTile)
+					: GetTileColorNumber(tileAddr, xInTile, yInTile);
 
 				bgIsColor0[pixel] = colorNum == 0;
-				// Map the color number to actual color using the background palette
-				int colorBits = (bgp >> (colorNum * 2)) & 0x03;
-				Color actualColor = MapColor(colorBits);
+				bgHasPriority[pixel] = priority;
+				Color actualColor;
+				if (isCgb)
+				{
+					actualColor = _gb._memory.GetCgbBgPaletteColor(bgPalette, colorNum);
+				}
+				else
+				{
+					// Map the color number to actual color using the background palette
+					int colorBits = (bgp >> (colorNum * 2)) & 0x03;
+					actualColor = MapColor(colorBits);
+				}
 
 				// Draw the pixel to the screen
 				Screen.DrawPixel(pixel, Scanline, actualColor);
@@ -421,10 +512,11 @@ namespace GBOG.Graphics
 			}
 		}
 
-		private void RenderSprites(Span<bool> bgIsColor0)
+		private void RenderSprites(Span<bool> bgIsColor0, Span<bool> bgHasPriority)
 		{
 			byte lcdControl = _gb._memory.LCDC;
 			bool use8x16 = (lcdControl & 0x04) == 0x04; // 0x00 for 8x8 sprites, 0x04 for 8x16 sprites
+			bool isCgb = _gb._memory.IsCgb;
 
 			// Avoid per-scanline allocations by scanning OAM directly.
 			Span<SpriteEntry> visibleSprites = stackalloc SpriteEntry[10];
@@ -455,14 +547,17 @@ namespace GBOG.Graphics
 				}
 			}
 
-			// For overlapping pixels: lower X wins; if equal X, lower OAM index wins.
+			// For overlapping pixels, the priority rule depends on mode:
+			// - DMG: lower X wins; if equal X, lower OAM index wins.
+			// - CGB: controlled by OPRI (FF6C):
+			//   bit0=0 (default): lower OAM index wins (ignores X)
+			//   bit0=1: DMG-like coordinate priority
 			// Since later draws overwrite earlier ones, draw from lowest priority to highest.
-			// Sort by X descending then OAM index descending.
 			for (int i = 1; i < visibleCount; i++)
 			{
 				SpriteEntry key = visibleSprites[i];
 				int j = i - 1;
-				while (j >= 0 && CompareSpriteEntries(visibleSprites[j], key) > 0)
+				while (j >= 0 && CompareSpriteEntries(visibleSprites[j], key, isCgb) > 0)
 				{
 					visibleSprites[j + 1] = visibleSprites[j];
 					j--;
@@ -472,7 +567,7 @@ namespace GBOG.Graphics
 
 			for (int i = 0; i < visibleCount; i++)
 			{
-				RenderSprite(visibleSprites[i], use8x16, bgIsColor0);
+				RenderSprite(visibleSprites[i], use8x16, bgIsColor0, bgHasPriority, isCgb);
 			}
 		}
 
@@ -485,20 +580,29 @@ namespace GBOG.Graphics
 			public byte Flags;
 		}
 
-		private static int CompareSpriteEntries(SpriteEntry a, SpriteEntry b)
+		private int CompareSpriteEntries(SpriteEntry a, SpriteEntry b, bool isCgb)
 		{
+			if (isCgb && (_gb._memory.OPRI & 0x01) == 0)
+			{
+				// OAM priority mode: lower OAM index wins; ignore X.
+				return b.OamIndex.CompareTo(a.OamIndex);
+			}
+
+			// Coordinate priority: lower X wins; if equal X, lower OAM index wins.
 			int xCmp = b.X.CompareTo(a.X);
 			if (xCmp != 0) return xCmp;
 			return b.OamIndex.CompareTo(a.OamIndex);
 		}
 
-		private void RenderSprite(SpriteEntry sprite, bool use8x16, Span<bool> bgIsColor0)
+		private void RenderSprite(SpriteEntry sprite, bool use8x16, Span<bool> bgIsColor0, Span<bool> bgHasPriority, bool isCgb)
 		{
 			byte obp0 = _gb._memory.OBP0;
 			byte obp1 = _gb._memory.OBP1;
 
 			// Determine the palette to use
-			byte palette = (sprite.Flags & 0x10) == 0x10 ? obp1 : obp0;
+			byte dmgPalette = (sprite.Flags & 0x10) == 0x10 ? obp1 : obp0;
+			int cgbPaletteIndex = sprite.Flags & 0x07;
+			int tileVramBank = (sprite.Flags & 0x08) != 0 ? 1 : 0;
 
 			int spriteX = sprite.X;
 			int spriteY = sprite.Y;
@@ -545,18 +649,38 @@ namespace GBOG.Graphics
 					continue;
 				}
 				int tileCol = xFlip ? (7 - col) : col;
-				int colorNum = GetTileColorNumber(tileAddr, tileCol, tileRow);
+				int colorNum = isCgb
+					? GetTileColorNumber(tileVramBank, tileAddr, tileCol, tileRow)
+					: GetTileColorNumber(tileAddr, tileCol, tileRow);
 				if (colorNum == 0)
 				{
 					continue;
 				}
+				if (isCgb)
+				{
+					// BG attribute priority (bit7) can force BG/WIN over sprites.
+					if (bgHasPriority[x] && !bgIsColor0[x])
+					{
+						continue;
+					}
+					// Sprite priority bit behaves like DMG: behind BG/WIN unless BG color is 0.
+					if (behindBg && !bgIsColor0[x])
+					{
+						continue;
+					}
+					Color actualColor = _gb._memory.GetCgbObjPaletteColor(cgbPaletteIndex, colorNum);
+					Screen.DrawPixel(x, Scanline, actualColor);
+					continue;
+				}
+
+				// DMG priority handling.
 				if (behindBg && !bgIsColor0[x])
 				{
 					continue;
 				}
-				int colorBits = (palette >> (colorNum * 2)) & 0x03;
-				Color actualColor = MapColor(colorBits);
-				Screen.DrawPixel(x, Scanline, actualColor);
+				int colorBits = (dmgPalette >> (colorNum * 2)) & 0x03;
+				Color actualColorDmg = MapColor(colorBits);
+				Screen.DrawPixel(x, Scanline, actualColorDmg);
 			}
 		}
 
@@ -644,6 +768,11 @@ namespace GBOG.Graphics
 			// STAT mode interrupts trigger on transitions into Mode 0/1/2.
 			if (mode != currentMode)
 			{
+				if (mode == (int)GraphicsMode.Mode0_HBlank)
+				{
+					_gb._memory.TickHblankDmaIfActive();
+				}
+
 				if (reqInt)
 				{
 					_gb.RequestInterrupt(Interrupt.LCDStat);

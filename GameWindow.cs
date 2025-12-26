@@ -39,6 +39,8 @@ namespace GBOG
         private bool _audioEnabled = true;
         private float _audioVolume = 1.0f;
 
+        private bool _preferCgbWhenSupported;
+
         private string _displayPalettePreset = DisplayPalettes.PresetDmg;
         private Vector4 _customShade0 = new(1f, 1f, 1f, 1f);
         private Vector4 _customShade1 = new(0.6667f, 0.6667f, 0.6667f, 1f);
@@ -109,6 +111,13 @@ namespace GBOG
         ];
 
         private readonly Dictionary<string, HexEditorState> _memoryViewerStates = new();
+
+        private string _wramSearchHex = string.Empty;
+        private string _wramSearchError = string.Empty;
+        private byte[]? _wramSearchPattern;
+        private readonly List<int> _wramSearchResults = new();
+        private int _wramSearchSelectedIndex = -1;
+        private readonly byte[] _wramSearchBuffer = new byte[0x2000];
 
         public void Run()
         {
@@ -470,7 +479,7 @@ namespace GBOG
             _serialHandler = (_, data) => _serialOutput += data;
             gb._memory.SerialDataReceived += _serialHandler;
 
-            gb.LoadRom(_loadedRomPath);
+            gb.LoadRom(_loadedRomPath, _preferCgbWhenSupported);
 
             TryLoadBatterySave(gb);
             _lastFlushedSaveVersion = gb._memory.SaveDirtyVersion;
@@ -588,6 +597,15 @@ namespace GBOG
                 
                 if (ImGui.BeginMenu("Emulation"))
                 {
+                    bool preferCgb = _preferCgbWhenSupported;
+                    if (ImGui.MenuItem("Prefer CGB for dual-mode ROMs", string.Empty, preferCgb, true))
+                    {
+                        _preferCgbWhenSupported = !_preferCgbWhenSupported;
+                        SaveSettings();
+                    }
+
+                    ImGui.Separator();
+
                     bool canStart = !_gameRunning && (_gb != null || !string.IsNullOrWhiteSpace(_loadedRomPath));
                     if (ImGui.MenuItem("Start", "F5", _gameRunning && !_gamePaused, canStart))
                     {
@@ -671,6 +689,38 @@ namespace GBOG
 
             ImGui.Begin("Game View");
             ImGui.Text($"ROM: {(_loadedRomName ?? "None")}");
+
+            if (_gb != null)
+            {
+                var mem = _gb._memory;
+                string cartType = mem.CartRequiresCgb
+                    ? "CGB-only"
+                    : (mem.CartSupportsCgb ? "Dual-mode" : "DMG-only");
+                string mode = mem.IsCgb ? "CGB" : "DMG";
+                string modeReason = mem.CartRequiresCgb
+                    ? "(forced by ROM)"
+                    : (mem.CartSupportsCgb
+                        ? (_preferCgbWhenSupported ? "(preferred by setting)" : "(defaulting to DMG)"
+                        )
+                        : string.Empty);
+
+                ImGui.Text($"Emulation: {mode}  |  Cart: {cartType}  |  Prefer CGB: {(_preferCgbWhenSupported ? "On" : "Off")} {modeReason}");
+
+                // Display palette affects DMG rendering only. In CGB mode we use CGB palettes.
+                ImGui.Text($"Display palette: {_displayPalettePreset} (DMG-only)");
+
+                if (mem.IsCgb)
+                {
+                    var bg0c0 = mem.GetCgbBgPaletteColor(0, 0);
+                    var bg0c1 = mem.GetCgbBgPaletteColor(0, 1);
+                    var bg0c2 = mem.GetCgbBgPaletteColor(0, 2);
+                    var bg0c3 = mem.GetCgbBgPaletteColor(0, 3);
+                    var obj0c1 = mem.GetCgbObjPaletteColor(0, 1);
+                    ImGui.Text($"CGB palette writes: BG={mem.CgbBgPaletteWriteCount} OBJ={mem.CgbObjPaletteWriteCount}");
+                    ImGui.Text($"BG0: ({bg0c0.R},{bg0c0.G},{bg0c0.B}) ({bg0c1.R},{bg0c1.G},{bg0c1.B}) ({bg0c2.R},{bg0c2.G},{bg0c2.B}) ({bg0c3.R},{bg0c3.G},{bg0c3.B})");
+                    ImGui.Text($"OBJ0 col1: ({obj0c1.R},{obj0c1.G},{obj0c1.B})");
+                }
+            }
 
             if (_gb != null && _gameRunning && !_gamePaused)
             {
@@ -1050,6 +1100,13 @@ namespace GBOG
                     if (ImGui.BeginTabItem(region.Name))
                     {
                         var state = _memoryViewerStates[region.Name];
+
+                        // WRAM search (minimal: hex byte pattern -> results -> click to jump)
+                        if (region.BaseAddress == 0xC000 && region.Size == 0x2000)
+                        {
+                            RenderWramSearchControls(region, state);
+                        }
+
                         var avail = ImGui.GetContentRegionAvail();
                         if (HexEditor.BeginHexEditor($"##hex_{region.BaseAddress:X4}", state, avail))
                         {
@@ -1062,6 +1119,227 @@ namespace GBOG
             }
 
             ImGui.End();
+        }
+
+        private void RenderWramSearchControls(MemoryRegion region, HexEditorState state)
+        {
+            ImGui.Text("Search (hex bytes):");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(240);
+            ImGui.InputText("##wram_search", ref _wramSearchHex, 256);
+            ImGui.SameLine();
+            bool doSearch = ImGui.Button("Search##wram");
+            ImGui.SameLine();
+            if (ImGui.Button("Clear##wram"))
+            {
+                _wramSearchError = string.Empty;
+                _wramSearchPattern = null;
+                _wramSearchResults.Clear();
+                _wramSearchSelectedIndex = -1;
+            }
+
+            if (doSearch)
+            {
+                if (!TryParseHexPattern(_wramSearchHex, out var pattern, out var error))
+                {
+                    _wramSearchError = error;
+                    _wramSearchPattern = null;
+                    _wramSearchResults.Clear();
+                    _wramSearchSelectedIndex = -1;
+                }
+                else
+                {
+                    _wramSearchError = string.Empty;
+                    _wramSearchPattern = pattern;
+                    DoWramSearch(region, state, pattern);
+                }
+            }
+
+            if (!string.IsNullOrEmpty(_wramSearchError))
+            {
+                ImGui.TextDisabled(_wramSearchError);
+            }
+
+            if (_wramSearchPattern != null)
+            {
+                ImGui.Text($"Results: {_wramSearchResults.Count}  (pattern {_wramSearchPattern.Length} byte(s))");
+            }
+
+            if (_wramSearchResults.Count > 0)
+            {
+                // Keep the results list compact so the hex view remains usable.
+                float listHeight = Math.Min(160, ImGui.GetTextLineHeightWithSpacing() * 8);
+                if (ImGui.BeginChild("##wram_search_results", new Vector2(0, listHeight), ImGuiChildFlags.Borders))
+                {
+                    int maxToShow = Math.Min(_wramSearchResults.Count, 512);
+                    for (int i = 0; i < maxToShow; i++)
+                    {
+                        int off = _wramSearchResults[i];
+                        ushort addr = (ushort)(region.BaseAddress + off);
+                        bool selected = i == _wramSearchSelectedIndex;
+                        if (ImGui.Selectable($"{addr:X4} (+0x{off:X})##wram_res_{i}", selected))
+                        {
+                            _wramSearchSelectedIndex = i;
+                            JumpHexEditorToMatch(state, off, _wramSearchPattern?.Length ?? 1);
+                        }
+                    }
+                }
+                ImGui.EndChild();
+            }
+
+            ImGui.Separator();
+        }
+
+        private void DoWramSearch(MemoryRegion region, HexEditorState state, byte[] pattern)
+        {
+            _wramSearchResults.Clear();
+            _wramSearchSelectedIndex = -1;
+
+            // Prefer searching the frozen snapshot while edits are in progress.
+            byte[] haystack;
+            if (region.FreezeRefreshFrames > 0 && state.Bytes != null && state.Bytes.Length == region.Size)
+            {
+                haystack = state.Bytes;
+            }
+            else
+            {
+                // Refresh the whole region from live memory (WRAM is small: 8KB).
+                for (int i = 0; i < region.Size; i++)
+                {
+                    _wramSearchBuffer[i] = _gb!._memory.PeekByte((ushort)(region.BaseAddress + i));
+                }
+                // Keep the snapshot buffer in sync for subsequent browsing.
+                if (state.Bytes != null && state.Bytes.Length == region.Size)
+                {
+                    Array.Copy(_wramSearchBuffer, 0, state.Bytes, 0, region.Size);
+                }
+                haystack = _wramSearchBuffer;
+            }
+
+            if (pattern.Length == 0 || pattern.Length > region.Size)
+            {
+                return;
+            }
+
+            int lastStart = region.Size - pattern.Length;
+            for (int i = 0; i <= lastStart; i++)
+            {
+                bool match = true;
+                for (int j = 0; j < pattern.Length; j++)
+                {
+                    if (haystack[i + j] != pattern[j])
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match)
+                {
+                    _wramSearchResults.Add(i);
+                    if (_wramSearchResults.Count >= 4096)
+                    {
+                        // Safety cap; keeps UI responsive.
+                        break;
+                    }
+                }
+            }
+
+            if (_wramSearchResults.Count > 0)
+            {
+                _wramSearchSelectedIndex = 0;
+                JumpHexEditorToMatch(state, _wramSearchResults[0], pattern.Length);
+            }
+        }
+
+        private static void JumpHexEditorToMatch(HexEditorState state, int offset, int length)
+        {
+            int start = Math.Clamp(offset, 0, Math.Max(0, state.MaxBytes - 1));
+            int end = Math.Clamp(offset + Math.Max(1, length) - 1, 0, Math.Max(0, state.MaxBytes - 1));
+            state.SelectStartByte = start;
+            state.SelectStartSubByte = 0;
+            state.SelectEndByte = end;
+            state.SelectEndSubByte = 1;
+            state.LastSelectedByte = start;
+            state.RequestScrollToByte = start;
+        }
+
+        private static bool TryParseHexPattern(string input, out byte[] pattern, out string error)
+        {
+            pattern = Array.Empty<byte>();
+            error = string.Empty;
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                error = "Enter hex bytes like 'DE AD BE EF' or 'DEADBEEF'.";
+                return false;
+            }
+
+            string trimmed = input.Trim();
+
+            // If it contains whitespace or separators, parse as tokens.
+            bool tokenMode = trimmed.Any(char.IsWhiteSpace) || trimmed.Contains(',');
+            if (tokenMode)
+            {
+                var bytes = new List<byte>();
+                var tokens = trimmed
+                    .Split(new[] { ' ', '\t', '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries);
+
+                foreach (var t0 in tokens)
+                {
+                    string t = t0.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? t0[2..] : t0;
+                    if (t.Length == 0)
+                    {
+                        continue;
+                    }
+                    if (t.Length > 2)
+                    {
+                        error = $"Invalid byte token '{t0}'. Use 1-2 hex digits per byte.";
+                        return false;
+                    }
+                    if (!byte.TryParse(t, System.Globalization.NumberStyles.HexNumber, null, out var b))
+                    {
+                        error = $"Invalid hex byte '{t0}'.";
+                        return false;
+                    }
+                    bytes.Add(b);
+                }
+
+                if (bytes.Count == 0)
+                {
+                    error = "Enter hex bytes like 'DE AD' or 'DEADBEEF'.";
+                    return false;
+                }
+
+                pattern = bytes.ToArray();
+                return true;
+            }
+
+            // Otherwise, parse as a continuous hex string.
+            string s = trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? trimmed[2..] : trimmed;
+            s = s.Replace("_", string.Empty);
+            if ((s.Length & 1) != 0)
+            {
+                error = "Hex string must have an even number of digits.";
+                return false;
+            }
+            if (s.Length == 0)
+            {
+                error = "Enter hex bytes like 'DEADBEEF'.";
+                return false;
+            }
+
+            int count = s.Length / 2;
+            var outBytes = new byte[count];
+            for (int i = 0; i < count; i++)
+            {
+                string byteStr = s.Substring(i * 2, 2);
+                if (!byte.TryParse(byteStr, System.Globalization.NumberStyles.HexNumber, null, out outBytes[i]))
+                {
+                    error = $"Invalid hex byte '{byteStr}'.";
+                    return false;
+                }
+            }
+            pattern = outBytes;
+            return true;
         }
 
         private void RequestFontSize(float sizePixels)
@@ -1081,6 +1359,8 @@ namespace GBOG
             _audioEnabled = _settings.AudioEnabled;
             _audioVolume = Math.Clamp(_settings.AudioVolume, 0f, 1f);
             _fontSizePixels = Math.Clamp(_settings.FontSizePixels, MinFontSizePixels, MaxFontSizePixels);
+
+            _preferCgbWhenSupported = _settings.PreferCgbWhenSupported;
 
             _displayPalettePreset = string.IsNullOrWhiteSpace(_settings.DisplayPalettePreset)
                 ? DisplayPalettes.PresetDmg
@@ -1112,6 +1392,8 @@ namespace GBOG
             _settings.FontSizePixels = _fontSizePixels;
             _settings.WindowWidth = _width;
             _settings.WindowHeight = _height;
+
+            _settings.PreferCgbWhenSupported = _preferCgbWhenSupported;
 
             _settings.DisplayPalettePreset = _displayPalettePreset;
             _settings.CustomPalette0 = PackRgba(FromVector4(_customShade0));

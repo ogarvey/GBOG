@@ -352,6 +352,18 @@ public static class HexEditor
             bytesPerLine = state.BytesPerLine;
         }
 
+        // One-shot scroll request (used by tools like the Memory Viewer search).
+        if (state.RequestScrollToByte >= 0 && bytesPerLine > 0)
+        {
+            int clamped = Math.Clamp(state.RequestScrollToByte, 0, Math.Max(0, state.MaxBytes - 1));
+            int lineIndex = clamped / bytesPerLine;
+            float lineHeight = byteSize.Y + spacing.Y;
+            float targetY = (lineIndex * lineHeight) - (contentAvail.Y * 0.35f);
+            if (targetY < 0f) targetY = 0f;
+            ImGui.SetScrollY(targetY);
+            state.RequestScrollToByte = -1;
+        }
+
         int actualSeparators = bytesPerLine / state.Separators;
         if (bytesPerLine % state.Separators == 0)
             --actualSeparators;

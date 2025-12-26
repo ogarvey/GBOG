@@ -25,6 +25,8 @@ namespace GBOG.Memory
 
 	public class GBMemory
 	{
+		public int CgbBgPaletteWriteCount { get; private set; }
+		public int CgbObjPaletteWriteCount { get; private set; }
 		private int _videoDebugDirty;
 		private int _saveDirtyVersion;
 		private byte _cartType;
@@ -402,8 +404,17 @@ namespace GBOG.Memory
 		// 0xFF80 - 0xFFFE: Zero Page
 		// 0xFFFF - 0xFFFF: Interrupt enable register
 		private byte[] _memory = new byte[0x10000];
+		// CGB has 8 banks of 4KB WRAM (bank 0 fixed at C000-CFFF, bank 1-7 switchable at D000-DFFF).
+		// We model the full 32KB regardless of mode; DMG simply always uses bank 1 for D000-DFFF.
+		private readonly byte[] _wram = new byte[0x8000];
+
+		// CGB palette RAM: 8 palettes * 4 colors * 2 bytes = 64 bytes each (BG and OBJ).
+		private readonly byte[] _cgbBgPaletteRam = new byte[64];
+		private readonly byte[] _cgbObjPaletteRam = new byte[64];
 		private readonly Gameboy _gameBoy;
 		private bool _isCgb;
+		private bool _cartSupportsCgb;
+		private bool _cartRequiresCgb;
 		private bool _key1PrepareSpeedSwitch;
 		private int _serialControlWrites;
 		private int _serialTransferStarts;
@@ -413,6 +424,13 @@ namespace GBOG.Memory
 		private ushort _oamDmaSourceBase;
 		private int _oamDmaByteIndex;
 		private int _oamDmaDotCounter;
+
+		// CGB VRAM DMA (GDMA/HDMA) (FF51-FF55)
+		private bool _hdmaActive;
+		private bool _hdmaHblankMode;
+		private int _hdmaRemainingBlocks;
+		private ushort _hdmaSrc;
+		private ushort _hdmaDst;
 
 		public int SerialControlWrites => _serialControlWrites;
 		public int SerialTransferStarts => _serialTransferStarts;
@@ -1356,6 +1374,22 @@ namespace GBOG.Memory
 			}
 		}
 
+		// OPRI
+		// Object Priority Mode (CGB only).
+		// Bit 0: 0 = OAM priority (smaller OAM index wins), 1 = coordinate priority (lower X wins).
+		// Mapped to 0xFF6C.
+		public byte OPRI
+		{
+			get
+			{
+				return _memory[0xFF6C];
+			}
+			set
+			{
+				_memory[0xFF6C] = value;
+			}
+		}
+
 		// BCPS
 		// The BCPS register is used to store the background palette specification.
 		// The BCPS register is mapped to the memory address 0xFF68.
@@ -1769,17 +1803,156 @@ namespace GBOG.Memory
 			}
 			if (address >= 0x8000 && address <= 0x9FFF)
 			{
-				return _gameBoy._ppu.VideoRam[address - 0x8000];
+				int bank = GetCpuVramBank();
+				int offset = address - 0x8000;
+				return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
 			}
 			if (address >= 0xA000 && address <= 0xBFFF)
 			{
 				return ReadRam(address);
+			}
+			if (address >= 0xC000 && address <= 0xFDFF)
+			{
+				int idx = MapWramAddress(address);
+				return idx >= 0 ? _wram[idx] : (byte)0xFF;
 			}
 			if (address >= 0xFE00 && address <= 0xFE9F)
 			{
 				return _gameBoy._ppu.OAM[address - 0xFE00];
 			}
 			return _memory[address];
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private ushort GetHdmaSource()
+		{
+			ushort src = (ushort)((_memory[0xFF51] << 8) | (_memory[0xFF52] & 0xF0));
+			// Pan Docs: source range is 0000-7FF0 or A000-DFF0; we trust the game.
+			return src;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private ushort GetHdmaDestination()
+		{
+			ushort dst = (ushort)(0x8000 | ((_memory[0xFF53] & 0x1F) << 8) | (_memory[0xFF54] & 0xF0));
+			return dst;
+		}
+
+		private void UpdateHdmaRegsFromState()
+		{
+			_memory[0xFF51] = (byte)(_hdmaSrc >> 8);
+			_memory[0xFF52] = (byte)(_hdmaSrc & 0xF0);
+			_memory[0xFF53] = (byte)((_hdmaDst >> 8) & 0x1F);
+			_memory[0xFF54] = (byte)(_hdmaDst & 0xF0);
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private byte ReadHdma5Value()
+		{
+			if (!_isCgb)
+			{
+				return 0xFF;
+			}
+			if (_hdmaActive)
+			{
+				int remainingMinus1 = Math.Max(0, _hdmaRemainingBlocks - 1) & 0x7F;
+				// Bit7 reads 0 while active.
+				return (byte)remainingMinus1;
+			}
+			// Bit7 reads 1 when inactive.
+			return 0xFF;
+		}
+
+		private void WriteByteToVramForDma(ushort address, byte value)
+		{
+			if (address < 0x8000 || address > 0x9FFF)
+			{
+				return;
+			}
+			int bank = GetCpuVramBank();
+			int offset = address - 0x8000;
+			int idx = (bank * 0x2000) + offset;
+			if ((uint)idx >= (uint)_gameBoy._ppu.VideoRam.Length)
+			{
+				return;
+			}
+			_gameBoy._ppu.VideoRam[idx] = value;
+		}
+
+		private void TransferHdmaBlock()
+		{
+			ushort src = _hdmaSrc;
+			ushort dst = _hdmaDst;
+			for (int i = 0; i < 0x10; i++)
+			{
+				byte b = ReadByteForDma((ushort)(src + i));
+				WriteByteToVramForDma((ushort)(dst + i), b);
+			}
+			_hdmaSrc = (ushort)(src + 0x10);
+			_hdmaDst = (ushort)(dst + 0x10);
+			UpdateHdmaRegsFromState();
+			MarkVideoDebugDirty(dst < 0x9800 ? VideoDebugDirtyFlags.TileData : VideoDebugDirtyFlags.TileMaps);
+		}
+
+		private void StartGdmaOrHdma(byte hdma5Value)
+		{
+			int blocks = (hdma5Value & 0x7F) + 1;
+			bool hblankMode = (hdma5Value & 0x80) != 0;
+
+			_hdmaSrc = GetHdmaSource();
+			_hdmaDst = GetHdmaDestination();
+			_hdmaRemainingBlocks = blocks;
+			_hdmaHblankMode = hblankMode;
+			_hdmaActive = true;
+
+			if (!hblankMode)
+			{
+				// General-purpose DMA: transfer all blocks immediately.
+				for (int i = 0; i < blocks; i++)
+				{
+					TransferHdmaBlock();
+				}
+				_hdmaActive = false;
+				_hdmaHblankMode = false;
+				_hdmaRemainingBlocks = 0;
+				_memory[0xFF55] = 0xFF;
+				return;
+			}
+
+			// HBlank DMA: becomes active; transfer happens during Mode 0 HBlank.
+			_memory[0xFF55] = ReadHdma5Value();
+		}
+
+		internal void TickHblankDmaIfActive()
+		{
+			if (!_isCgb || !_hdmaActive || !_hdmaHblankMode)
+			{
+				return;
+			}
+			// Only during visible scanlines.
+			if (_memory[0xFF44] >= 144)
+			{
+				return;
+			}
+			if (_hdmaRemainingBlocks <= 0)
+			{
+				_hdmaActive = false;
+				_hdmaHblankMode = false;
+				_memory[0xFF55] = 0xFF;
+				return;
+			}
+			TransferHdmaBlock();
+			_hdmaRemainingBlocks--;
+			if (_hdmaRemainingBlocks <= 0)
+			{
+				_hdmaActive = false;
+				_hdmaHblankMode = false;
+				_memory[0xFF55] = 0xFF;
+			}
+			else
+			{
+				_memory[0xFF55] = ReadHdma5Value();
+			}
 		}
 
 		private void TickOamDma(int baseCycles)
@@ -1949,6 +2122,8 @@ namespace GBOG.Memory
 		}
 
 		public bool IsCgb => _isCgb;
+		public bool CartSupportsCgb => _cartSupportsCgb;
+		public bool CartRequiresCgb => _cartRequiresCgb;
 		public bool Key1PrepareSpeedSwitch => _key1PrepareSpeedSwitch;
 
 		private byte BuildKey1Value()
@@ -1996,6 +2171,121 @@ namespace GBOG.Memory
 				return;
 			}
 			_memory[0xFF4D] = BuildKey1Value();
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private int GetCpuVramBank()
+		{
+			return _isCgb ? (_memory[0xFF4F] & 0x01) : 0;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private int GetCpuWramBank()
+		{
+			if (!_isCgb)
+			{
+				return 1;
+			}
+			int bank = _memory[0xFF70] & 0x07;
+			if (bank == 0)
+			{
+				bank = 1;
+			}
+			return bank;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private int MapWramAddress(ushort address)
+		{
+			// Handle echo RAM (E000-FDFF) by mirroring to C000-DDFF.
+			if (address >= 0xE000 && address <= 0xFDFF)
+			{
+				address = (ushort)(address - 0x2000);
+			}
+
+			if (address >= 0xC000 && address <= 0xCFFF)
+			{
+				return address - 0xC000; // bank 0
+			}
+			if (address >= 0xD000 && address <= 0xDFFF)
+			{
+				int bank = GetCpuWramBank(); // 1..7
+				return 0x1000 + ((bank - 1) * 0x1000) + (address - 0xD000);
+			}
+
+			return -1;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private byte ReadCgbPaletteData(bool obj, int index)
+		{
+			index &= 0x3F;
+			return obj ? _cgbObjPaletteRam[index] : _cgbBgPaletteRam[index];
+		}
+
+		private void WriteCgbPaletteData(bool obj, byte value)
+		{
+			ushort specAddr = obj ? (ushort)0xFF6A : (ushort)0xFF68;
+			int index = _memory[specAddr] & 0x3F;
+			if (obj)
+			{
+				CgbObjPaletteWriteCount++;
+				_cgbObjPaletteRam[index] = value;
+			}
+			else
+			{
+				CgbBgPaletteWriteCount++;
+				_cgbBgPaletteRam[index] = value;
+			}
+
+			// Auto-increment if bit 7 is set.
+			if ((_memory[specAddr] & 0x80) != 0)
+			{
+				int next = (index + 1) & 0x3F;
+				_memory[specAddr] = (byte)((_memory[specAddr] & 0x80) | next);
+			}
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static byte Expand5To8(int v)
+		{
+			v &= 0x1F;
+			return (byte)((v << 3) | (v >> 2));
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static GBOG.CPU.Color DecodeBgr555(ushort word)
+		{
+			// CGB palette entries are 15-bit RGB555 in little-endian:
+			// bits 0-4 = Red, 5-9 = Green, 10-14 = Blue.
+			int r5 = word & 0x1F;
+			int g5 = (word >> 5) & 0x1F;
+			int b5 = (word >> 10) & 0x1F;
+			return new GBOG.CPU.Color
+			{
+				R = Expand5To8(r5),
+				G = Expand5To8(g5),
+				B = Expand5To8(b5),
+				A = 255,
+			};
+		}
+
+		internal GBOG.CPU.Color GetCgbBgPaletteColor(int paletteNumber, int colorNumber)
+		{
+			paletteNumber &= 0x07;
+			colorNumber &= 0x03;
+			int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
+			ushort word = (ushort)(_cgbBgPaletteRam[baseIndex] | (_cgbBgPaletteRam[baseIndex + 1] << 8));
+			return DecodeBgr555(word);
+		}
+
+		internal GBOG.CPU.Color GetCgbObjPaletteColor(int paletteNumber, int colorNumber)
+		{
+			paletteNumber &= 0x07;
+			colorNumber &= 0x03;
+			int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
+			ushort word = (ushort)(_cgbObjPaletteRam[baseIndex] | (_cgbObjPaletteRam[baseIndex + 1] << 8));
+			return DecodeBgr555(word);
 		}
 
 		internal void SetNr52Channel1Active(bool active)
@@ -2049,6 +2339,47 @@ namespace GBOG.Memory
 			{
 				return _isCgb ? BuildKey1Value() : (byte)0xFF;
 			}
+			if (address == 0xFF4F)
+			{
+				// VBK (CGB only): bit0 selects VRAM bank; bits7-1 read as 1.
+				return _isCgb ? (byte)(0xFE | (_memory[0xFF4F] & 0x01)) : (byte)0xFF;
+			}
+			if (address == 0xFF70)
+			{
+				// SVBK (CGB only): bits0-2 select WRAM bank; bits7-3 read as 1.
+				return _isCgb ? (byte)(0xF8 | (_memory[0xFF70] & 0x07)) : (byte)0xFF;
+			}
+			if (address == 0xFF68)
+			{
+				return _isCgb ? (byte)(_memory[0xFF68] & 0xBF) : (byte)0xFF;
+			}
+			if (address == 0xFF69)
+			{
+				return _isCgb ? ReadCgbPaletteData(obj: false, index: _memory[0xFF68]) : (byte)0xFF;
+			}
+			if (address == 0xFF6A)
+			{
+				return _isCgb ? (byte)(_memory[0xFF6A] & 0xBF) : (byte)0xFF;
+			}
+			if (address == 0xFF6B)
+			{
+				return _isCgb ? ReadCgbPaletteData(obj: true, index: _memory[0xFF6A]) : (byte)0xFF;
+			}
+			if (address == 0xFF6C)
+			{
+				// OPRI (CGB only): bit0 selects OBJ priority mode; other bits read as 1.
+				return _isCgb ? (byte)(0xFE | (_memory[0xFF6C] & 0x01)) : (byte)0xFF;
+			}
+			if (address == 0xFF55)
+			{
+				// HDMA5 (CGB only): reads as $FF when inactive; while active bit7=0 and low7=remaining-1.
+				return ReadHdma5Value();
+			}
+			if (address >= 0xFF51 && address <= 0xFF55)
+			{
+				// HDMA registers (CGB only).
+				return _isCgb ? _memory[address] : (byte)0xFF;
+			}
 			if (address < 0x4000)
 			{
 				if (_mbc1)
@@ -2097,9 +2428,28 @@ namespace GBOG.Memory
 				}
 				return _memory[address];
 			}
+			else if (address >= 0x8000 && address <= 0x9FFF)
+			{
+				int bank = GetCpuVramBank();
+				int offset = address - 0x8000;
+				return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
+			}
 			else if ((address >= 0xA000) && (address <= 0xBFFF))
 			{
 				return ReadRam(address);
+			}
+			else if (address >= 0xC000 && address <= 0xFDFF)
+			{
+				int idx = MapWramAddress(address);
+				return idx >= 0 ? _wram[idx] : (byte)0xFF;
+			}
+			else if (address >= 0xFE00 && address <= 0xFE9F)
+			{
+				return _gameBoy._ppu.OAM[address - 0xFE00];
+			}
+			else if (address >= 0xFEA0 && address <= 0xFEFF)
+			{
+				return 0xFF;
 			}
 			else if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
 			{
@@ -2134,6 +2484,42 @@ namespace GBOG.Memory
 			if (address == 0xFF4D)
 			{
 				return _isCgb ? BuildKey1Value() : (byte)0xFF;
+			}
+			if (address == 0xFF4F)
+			{
+				return _isCgb ? (byte)(0xFE | (_memory[0xFF4F] & 0x01)) : (byte)0xFF;
+			}
+			if (address == 0xFF70)
+			{
+				return _isCgb ? (byte)(0xF8 | (_memory[0xFF70] & 0x07)) : (byte)0xFF;
+			}
+			if (address == 0xFF68)
+			{
+				return _isCgb ? (byte)(_memory[0xFF68] & 0xBF) : (byte)0xFF;
+			}
+			if (address == 0xFF69)
+			{
+				return _isCgb ? ReadCgbPaletteData(obj: false, index: _memory[0xFF68]) : (byte)0xFF;
+			}
+			if (address == 0xFF6A)
+			{
+				return _isCgb ? (byte)(_memory[0xFF6A] & 0xBF) : (byte)0xFF;
+			}
+			if (address == 0xFF6B)
+			{
+				return _isCgb ? ReadCgbPaletteData(obj: true, index: _memory[0xFF6A]) : (byte)0xFF;
+			}
+			if (address >= 0xFF51 && address <= 0xFF55)
+			{
+				if (!_isCgb)
+				{
+					return 0xFF;
+				}
+				if (address == 0xFF55)
+				{
+					return ReadHdma5Value();
+				}
+				return _memory[address];
 			}
 
 			// Like ReadByteForDma: ignore CPU access restrictions and OAM-bug side effects.
@@ -2187,11 +2573,18 @@ namespace GBOG.Memory
 			}
 			if (address >= 0x8000 && address <= 0x9FFF)
 			{
-				return _gameBoy._ppu.VideoRam[address - 0x8000];
+				int bank = GetCpuVramBank();
+				int offset = address - 0x8000;
+				return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
 			}
 			if (address >= 0xA000 && address <= 0xBFFF)
 			{
 				return ReadRam(address);
+			}
+			if (address >= 0xC000 && address <= 0xFDFF)
+			{
+				int idx = MapWramAddress(address);
+				return idx >= 0 ? _wram[idx] : (byte)0xFF;
 			}
 			if (address >= 0xFE00 && address <= 0xFE9F)
 			{
@@ -2351,7 +2744,9 @@ namespace GBOG.Memory
 					return;
 				}
 				_memory[address] = value;
-				_gameBoy._ppu.VideoRam[address - 0x8000] = value;
+				int bank = GetCpuVramBank();
+				int offset = address - 0x8000;
+				_gameBoy._ppu.VideoRam[(bank * 0x2000) + offset] = value;
 				MarkVideoDebugDirty(address < 0x9800 ? VideoDebugDirtyFlags.TileData : VideoDebugDirtyFlags.TileMaps);
 				//_gameBoy.UpdateTile(address, value);
 			}
@@ -2362,10 +2757,20 @@ namespace GBOG.Memory
 					WriteRam(address, value);
 				}
 			}
-			else if ((address >= 0xE000) && (address < 0xFE00))
+			else if (address >= 0xC000 && address <= 0xFDFF)
 			{
+				// WRAM and its echo.
+				int idx = MapWramAddress(address);
+				if (idx >= 0)
+				{
+					_wram[idx] = value;
+				}
+
 				_memory[address] = value;
-				_memory[address - 0x2000] = value;
+				if (address >= 0xE000)
+				{
+					_memory[address - 0x2000] = value;
+				}
 				// Echo RAM mirrors WRAM; it is not cartridge RAM.
 			}
 			else if (address >= 0xFE00 && address < 0xFEA0)
@@ -2440,6 +2845,116 @@ namespace GBOG.Memory
 			else if (address == 0xFF4D)
 			{
 				WriteKey1(value);
+			}
+			else if (address == 0xFF4F)
+			{
+				// VBK (CGB only): bit0 selects VRAM bank.
+				if (_isCgb)
+				{
+					_memory[0xFF4F] = (byte)(value & 0x01);
+				}
+			}
+			else if (address == 0xFF70)
+			{
+				// SVBK (CGB only): bits0-2 select WRAM bank (0 maps to bank 1).
+				if (_isCgb)
+				{
+					_memory[0xFF70] = (byte)(value & 0x07);
+				}
+			}
+			else if (address == 0xFF68)
+			{
+				// BCPS (CGB only): bit7 auto-increment, bits0-5 index; bit6 unused.
+				if (_isCgb)
+				{
+					_memory[0xFF68] = (byte)(value & 0xBF);
+				}
+			}
+			else if (address == 0xFF69)
+			{
+				// BCPD (CGB only): palette data.
+				if (_isCgb)
+				{
+					WriteCgbPaletteData(obj: false, value);
+					MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
+				}
+			}
+			else if (address == 0xFF6A)
+			{
+				// OCPS (CGB only): bit7 auto-increment, bits0-5 index; bit6 unused.
+				if (_isCgb)
+				{
+					_memory[0xFF6A] = (byte)(value & 0xBF);
+				}
+			}
+			else if (address == 0xFF6B)
+			{
+				// OCPD (CGB only): palette data.
+				if (_isCgb)
+				{
+					WriteCgbPaletteData(obj: true, value);
+					MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
+				}
+			}
+			else if (address == 0xFF6C)
+			{
+				// OPRI (CGB only): bit0 selects OBJ priority mode.
+				if (_isCgb)
+				{
+					_memory[0xFF6C] = (byte)(value & 0x01);
+				}
+			}
+			else if (address == 0xFF51)
+			{
+				// HDMA1 (CGB only): source high.
+				if (_isCgb)
+				{
+					_memory[0xFF51] = value;
+				}
+			}
+			else if (address == 0xFF52)
+			{
+				// HDMA2 (CGB only): source low, lower 4 bits ignored.
+				if (_isCgb)
+				{
+					_memory[0xFF52] = (byte)(value & 0xF0);
+				}
+			}
+			else if (address == 0xFF53)
+			{
+				// HDMA3 (CGB only): destination high (bits 0-4), dest is 0x8000-0x9FF0.
+				if (_isCgb)
+				{
+					_memory[0xFF53] = (byte)(value & 0x1F);
+				}
+			}
+			else if (address == 0xFF54)
+			{
+				// HDMA4 (CGB only): destination low, lower 4 bits ignored.
+				if (_isCgb)
+				{
+					_memory[0xFF54] = (byte)(value & 0xF0);
+				}
+			}
+			else if (address == 0xFF55)
+			{
+				// HDMA5 (CGB only): start GDMA/HDMA or stop an active HBlank DMA.
+				if (_isCgb)
+				{
+					// If an HBlank DMA is active, writing with bit7=0 stops it.
+					if (_hdmaActive && _hdmaHblankMode && (value & 0x80) == 0)
+					{
+						_hdmaActive = false;
+						_hdmaHblankMode = false;
+						_hdmaRemainingBlocks = 0;
+						UpdateHdmaRegsFromState();
+						_memory[0xFF55] = 0xFF;
+					}
+					else
+					{
+						StartGdmaOrHdma(value);
+					}
+				}
 			}
 			else if (address == 0xFF04)
 			{
@@ -2804,7 +3319,7 @@ namespace GBOG.Memory
 			_memory[0xFFFF] = 0x00;
 		}
 
-		public void InitialiseGame(byte[] rom)
+		public void InitialiseGame(byte[] rom, bool preferCgbWhenSupported = false)
 		{
 			_saveDirtyVersion = 0;
 			_cartType = rom.Length > 0x147 ? rom[0x147] : (byte)0;
@@ -2841,11 +3356,59 @@ namespace GBOG.Memory
 			_mbc3RtcLatchedDH = 0;
 
 			// CGB support flag at 0x0143: 0x80 = supports CGB, 0xC0 = CGB only.
-			// A real DMG runs *everything* in DMG mode; a real CGB runs 0x80 carts in CGB mode by default.
-			// For our emulator/test harness, default to DMG behavior unless the ROM is CGB-only.
-			_isCgb = rom.Length > 0x143 && rom[0x143] == 0xC0;
+			// Allow user to choose DMG vs CGB for dual-mode (0x80) cartridges.
+			byte cgbFlag = rom.Length > 0x143 ? rom[0x143] : (byte)0x00;
+			_cartRequiresCgb = cgbFlag == 0xC0;
+			_cartSupportsCgb = cgbFlag == 0x80 || _cartRequiresCgb;
+			_isCgb = _cartRequiresCgb || (_cartSupportsCgb && preferCgbWhenSupported);
 			_key1PrepareSpeedSwitch = false;
 			_memory[0xFF4D] = _isCgb ? BuildKey1Value() : (byte)0xFF;
+
+			// Clear/init CGB backing stores. (Without a boot ROM, games expect a sane default.)
+			CgbBgPaletteWriteCount = 0;
+			CgbObjPaletteWriteCount = 0;
+			_hdmaActive = false;
+			_hdmaHblankMode = false;
+			_hdmaRemainingBlocks = 0;
+			_hdmaSrc = 0;
+			_hdmaDst = 0;
+			Array.Clear(_wram, 0, _wram.Length);
+			Array.Fill(_cgbBgPaletteRam, (byte)0xFF);
+			Array.Fill(_cgbObjPaletteRam, (byte)0xFF);
+
+			// CGB-only registers read as $FF in DMG mode.
+			if (_isCgb)
+			{
+				// VBK: bit0 selects VRAM bank; other bits read as 1.
+				_memory[0xFF4F] = 0xFE;
+				// SVBK: bits0-2 select WRAM bank; other bits read as 1. Default bank=1.
+				_memory[0xFF70] = 0xF9;
+				// Palette specs start at index 0.
+				_memory[0xFF68] = 0x00;
+				_memory[0xFF6A] = 0x00;
+				// OPRI defaults to 0 (OAM priority). Stored bits are masked; read returns 0xFE|bit0.
+				_memory[0xFF6C] = 0x00;
+				// HDMA registers.
+				_memory[0xFF51] = 0xFF;
+				_memory[0xFF52] = 0xFF;
+				_memory[0xFF53] = 0xFF;
+				_memory[0xFF54] = 0xFF;
+				_memory[0xFF55] = 0xFF;
+			}
+			else
+			{
+				_memory[0xFF4F] = 0xFF;
+				_memory[0xFF70] = 0xFF;
+				_memory[0xFF68] = 0xFF;
+				_memory[0xFF69] = 0xFF;
+				_memory[0xFF6A] = 0xFF;
+				_memory[0xFF6B] = 0xFF;
+				_memory[0xFF51] = 0xFF;
+				_memory[0xFF52] = 0xFF;
+				_memory[0xFF53] = 0xFF;
+				_memory[0xFF54] = 0xFF;
+				_memory[0xFF55] = 0xFF;
+			}
 
 			var type = _cartType;
 			switch (type)

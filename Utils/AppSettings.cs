@@ -22,6 +22,10 @@ public sealed class AppSettings
     // Preset keys: DMG, Pocket, Green, Blue, Custom
     public string DisplayPalettePreset { get; set; } = DisplayPalettes.PresetDmg;
 
+    // For dual-mode (CGB-supported, DMG-compatible) cartridges, prefer running in CGB mode.
+    // CGB-only (0xC0) cartridges always run in CGB mode regardless of this setting.
+    public bool PreferCgbWhenSupported { get; set; } = false;
+
     // Packed RGBA32: R in lowest byte, then G, B, A.
     public uint CustomPalette0 { get; set; } = 0xFFFFFFFF;
     public uint CustomPalette1 { get; set; } = 0xFFAAAAAA;
