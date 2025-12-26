@@ -1102,34 +1102,16 @@ public sealed class Apu
         public bool IsCpuWaveRamWindowDmg(int windowCycles, int phaseOffsetCycles = 0)
         {
             // dmg_sound wave tests time CPU accesses relative to CH3's internal wave RAM *byte*
-            // fetches (e.g. "2 clocks later"). Under instruction-granular stepping we can't
-            // observe sub-M-cycle bus timing directly, so approximate using the wave timer phase.
-            //
-            // A byte fetch happens only when moving onto an even sample index. That means the
-            // time since the last byte fetch depends on whether the last sample step was even
-            // (fetch) or odd (no fetch).
-            int period = CurrentPeriodCycles;
-            if (period <= 0)
+            // fetches (e.g. "2 clocks later"). With cycle-granular APU stepping, track this
+            // directly.
+            int cycles = _cyclesSinceLastWaveByteFetch + phaseOffsetCycles;
+            if (cycles < 0)
             {
-                return false;
+                cycles = 0;
             }
 
-            int t = _freqTimerCycles - phaseOffsetCycles;
-            if (t < 0)
-            {
-                t = 0;
-            }
-            if (t > period)
-            {
-                t = period;
-            }
-
-            int cyclesSinceLastSampleStep = period - t;
-            int cyclesSinceLastByteFetch = (_sampleIndex & 1) == 0
-                ? cyclesSinceLastSampleStep
-                : (period + cyclesSinceLastSampleStep);
-
-            return cyclesSinceLastByteFetch <= windowCycles;
+            // windowCycles is the specific "N cycles after fetch" point.
+            return cycles == windowCycles;
         }
 
         public WaveChannel(byte[] waveRam)

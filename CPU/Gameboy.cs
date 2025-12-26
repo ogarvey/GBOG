@@ -405,12 +405,8 @@ namespace GBOG.CPU
                                 {
                                     BeginMCycle();
                                     ApplyOamBugIfNeeded();
-                                    int baseCycles = GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
-                                    baseCyclesThisFrame += baseCycles;
-                                    UpdateTimer(CpuCyclesPerMCycle);
-                                    UpdateApu(baseCycles);
-                                    _ppu.Step(baseCycles);
-                                    _memory.TickBaseCycles(baseCycles);
+                                    baseCyclesThisFrame += GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
+                                    AdvancePerCpuCycle(CpuCyclesPerMCycle);
                                 }
 
                                 // The interrupt is handled between instructions; don't also fetch/execute an opcode this iteration.
@@ -454,13 +450,8 @@ namespace GBOG.CPU
                                     if (step(this))
                                     {
                                         ApplyOamBugIfNeeded();
-                                        int baseCycles = GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
-                                        baseCyclesThisFrame += baseCycles;
-                                        UpdateTimer(CpuCyclesPerMCycle);
-                                        UpdateApu(baseCycles);
-								//UpdateGraphics(baseCycles);
-								_ppu.Step(baseCycles);
-                                        _memory.TickBaseCycles(baseCycles);
+                                        baseCyclesThisFrame += GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
+                                        AdvancePerCpuCycle(CpuCyclesPerMCycle);
                                     }
                                     else
                                     {
@@ -478,13 +469,8 @@ namespace GBOG.CPU
                             // HALT: no CPU bus activity in our model, but still allow any pending
                             // OAM bug triggers from previous access to be applied (should be none).
                             ApplyOamBugIfNeeded();
-                            int baseCycles = GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
-                            baseCyclesThisFrame += baseCycles;
-                            UpdateTimer(CpuCyclesPerMCycle);
-                            UpdateApu(baseCycles);
-							//UpdateGraphics(baseCycles);
-							_ppu.Step(baseCycles);
-                            _memory.TickBaseCycles(baseCycles);
+                            baseCyclesThisFrame += GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
+                            AdvancePerCpuCycle(CpuCyclesPerMCycle);
 
                             // No instruction executed while halted; EI delay does not advance here.
                         }
@@ -666,6 +652,24 @@ namespace GBOG.CPU
             // In CGB double-speed, CPU runs twice as fast, while timer/PPU/APU remain on the base clock.
             // So each CPU t-cycle corresponds to 1/2 base cycles.
             return DoubleSpeed ? (cpuCycles / 2) : cpuCycles;
+        }
+
+        private void AdvancePerCpuCycle(int cpuCycles)
+        {
+            // Advance the system with t-cycle granularity.
+            // - Timer runs on CPU t-cycles and therefore is affected by double-speed.
+            // - APU/PPU/DMA run on the base clock; in double-speed, base advances every 2 t-cycles.
+            for (int t = 0; t < cpuCycles; t++)
+            {
+                UpdateTimer(1);
+
+                if (!DoubleSpeed || (t & 1) == 1)
+                {
+                    Apu.Step(1);
+                    _ppu.Step(1);
+                    _memory.TickBaseCycles(1);
+                }
+            }
         }
 
         private void UpdateApu(int baseCycles)
