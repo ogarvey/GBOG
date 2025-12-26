@@ -228,10 +228,12 @@ namespace GBOG.Graphics
 			Span<bool> bgIsColor0 = stackalloc bool[160];
 			// In CGB mode, each BG/WIN pixel can also force priority over sprites (attr bit 7).
 			Span<bool> bgHasPriority = stackalloc bool[160];
+			bool isCgb = _gb._memory.IsCgb;
+			bool lcdcBgWinPriority = (_gb._memory.LCDC & 0x01) != 0;
 
 			// Always fill the scanline with BG palette color 0 (even if BG is disabled).
 			Color baseColor;
-			if (_gb._memory.IsCgb)
+			if (isCgb)
 			{
 				baseColor = _gb._memory.GetCgbBgPaletteColor(0, 0);
 			}
@@ -248,14 +250,18 @@ namespace GBOG.Graphics
 				Screen.DrawPixel(x, Scanline, baseColor);
 			}
 
-			// Render BG layer (if enabled)
-			if (_gb._memory.BGDisplay)
+			// Render BG layer.
+			// DMG: LCDC.0 disables BG/WIN entirely.
+			// CGB: LCDC.0 controls BG/WIN priority, not enable.
+			if (isCgb || _gb._memory.BGDisplay)
 			{
 				RenderBackground(bgIsColor0, bgHasPriority);
 			}
 
-			// Render Window (if enabled and active on this line)
-			if (_gb._memory.WindowDisplayEnable)
+			// Render Window.
+			// DMG: LCDC.5 only works if LCDC.0 is set.
+			// CGB: LCDC.0 does not gate Window visibility.
+			if (_gb._memory.WindowDisplayEnable && (isCgb || _gb._memory.BGDisplay))
 			{
 				RenderWindow(bgIsColor0, bgHasPriority);
 			}
@@ -517,6 +523,7 @@ namespace GBOG.Graphics
 			byte lcdControl = _gb._memory.LCDC;
 			bool use8x16 = (lcdControl & 0x04) == 0x04; // 0x00 for 8x8 sprites, 0x04 for 8x16 sprites
 			bool isCgb = _gb._memory.IsCgb;
+			bool lcdcBgWinPriority = (lcdControl & 0x01) != 0;
 
 			// Avoid per-scanline allocations by scanning OAM directly.
 			Span<SpriteEntry> visibleSprites = stackalloc SpriteEntry[10];
@@ -567,7 +574,7 @@ namespace GBOG.Graphics
 
 			for (int i = 0; i < visibleCount; i++)
 			{
-				RenderSprite(visibleSprites[i], use8x16, bgIsColor0, bgHasPriority, isCgb);
+				RenderSprite(visibleSprites[i], use8x16, bgIsColor0, bgHasPriority, isCgb, lcdcBgWinPriority);
 			}
 		}
 
@@ -594,7 +601,7 @@ namespace GBOG.Graphics
 			return b.OamIndex.CompareTo(a.OamIndex);
 		}
 
-		private void RenderSprite(SpriteEntry sprite, bool use8x16, Span<bool> bgIsColor0, Span<bool> bgHasPriority, bool isCgb)
+		private void RenderSprite(SpriteEntry sprite, bool use8x16, Span<bool> bgIsColor0, Span<bool> bgHasPriority, bool isCgb, bool lcdcBgWinPriority)
 		{
 			byte obp0 = _gb._memory.OBP0;
 			byte obp1 = _gb._memory.OBP1;
@@ -658,16 +665,22 @@ namespace GBOG.Graphics
 				}
 				if (isCgb)
 				{
-					// BG attribute priority (bit7) can force BG/WIN over sprites.
-					if (bgHasPriority[x] && !bgIsColor0[x])
+					// CGB BG-to-OBJ priority rules (Pan Docs):
+					// - If BG color index is 0 => OBJ always has priority
+					// - Else if LCDC.0 is clear => OBJ always has priority
+					// - Else if both BG attr bit7 and OAM bit7 are clear => OBJ has priority
+					// - Else => BG has priority
+					if (!bgIsColor0[x] && lcdcBgWinPriority)
 					{
-						continue;
+						bool bgPrio = bgHasPriority[x];
+						bool objPrio = !behindBg; // OAM bit7 clear grants OBJ priority
+						if (!(objPrio && !bgPrio))
+						{
+							// BG wins for color indices 1-3.
+							continue;
+						}
 					}
-					// Sprite priority bit behaves like DMG: behind BG/WIN unless BG color is 0.
-					if (behindBg && !bgIsColor0[x])
-					{
-						continue;
-					}
+
 					Color actualColor = _gb._memory.GetCgbObjPaletteColor(cgbPaletteIndex, colorNum);
 					Screen.DrawPixel(x, Scanline, actualColor);
 					continue;

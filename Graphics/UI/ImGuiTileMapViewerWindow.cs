@@ -107,6 +107,10 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     public bool XFlip;
     public bool YFlip;
     public byte DmgPalette;
+
+    // CGB fields (ignored on DMG)
+    public int CgbPalette;
+    public int VramBank;
   }
 
   public void InvalidateAll()
@@ -688,7 +692,9 @@ public sealed unsafe class ImGuiTileMapViewerWindow
       Directory.CreateDirectory(dir);
     }
 
+    bool isCgb = gb._memory.IsCgb;
     var tileData = gb._memory.GetTileData();
+    var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
     byte bgp = gb._memory.BGP;
     bool useSignedTileNumbers = !gb._memory.BGWindowTileDataSelect;
 
@@ -703,7 +709,10 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     }
 
     var map = gb._memory.GetTileMap(mapBase);
-    var rgba = RenderTileMapToRgba(map, tileData, useSignedTileNumbers, palette, treatCi0Transparent, applyBgpShading, bgp);
+
+    var rgba = isCgb
+      ? RenderCgbTileMapToRgba(gb, map, gb._memory.GetCgbTileMapAttributes(mapBase), tileData, tileData1, useSignedTileNumbers, treatCi0Transparent)
+      : RenderTileMapToRgba(map, tileData, useSignedTileNumbers, palette, treatCi0Transparent, applyBgpShading, bgp);
 
     using var image = Image.LoadPixelData<Rgba32>(rgba, TileMapSizePixels, TileMapSizePixels);
     image.Save(path);
@@ -719,12 +728,16 @@ public sealed unsafe class ImGuiTileMapViewerWindow
       Directory.CreateDirectory(dir);
     }
 
+    bool isCgb = gb._memory.IsCgb;
     var tileData = gb._memory.GetTileData();
+    var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
     var oam = gb._memory.OAMRam;
     bool use8x16 = gb._memory.OBJSize;
     byte obp0 = gb._memory.OBP0;
     byte obp1 = gb._memory.OBP1;
-    var rgba = RenderSpriteLayerToRgba(oam, tileData, use8x16, palette, obp0, obp1);
+    var rgba = isCgb
+      ? RenderCgbSpriteLayerToRgba(gb, oam, tileData, tileData1, use8x16)
+      : RenderSpriteLayerToRgba(oam, tileData, use8x16, palette, obp0, obp1);
 
     using var image = Image.LoadPixelData<Rgba32>(rgba, ScreenWidth, ScreenHeight);
     image.Save(path);
@@ -740,7 +753,10 @@ public sealed unsafe class ImGuiTileMapViewerWindow
       Directory.CreateDirectory(dir);
     }
 
-    var tileData = gb._memory.GetTileData();
+    bool isCgb = gb._memory.IsCgb;
+    var tileData0 = gb._memory.GetTileDataBank(0);
+    var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
+    var tileData = isCgb && info.VramBank != 0 ? tileData1 : tileData0;
     int tileIndex = Math.Clamp(info.TileIndex, 0, 255);
     int baseAddr = tileIndex * 16;
 
@@ -763,8 +779,16 @@ public sealed unsafe class ImGuiTileMapViewerWindow
           continue;
         }
 
-        int shadeIndex = MapDmgPaletteToShade(info.DmgPalette, colorIndex);
-        image[x, y] = ToRgba32(palette, shadeIndex, transparent: false);
+        if (isCgb)
+        {
+          var c = gb._memory.GetCgbObjPaletteColor(info.CgbPalette, colorIndex);
+          image[x, y] = ToRgba32(c, transparent: false);
+        }
+        else
+        {
+          int shadeIndex = MapDmgPaletteToShade(info.DmgPalette, colorIndex);
+          image[x, y] = ToRgba32(palette, shadeIndex, transparent: false);
+        }
       }
     }
 
@@ -812,8 +836,10 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     info = default;
     try
     {
+      bool isCgb = gb._memory.IsCgb;
       var oam = gb._memory.OAMRam;
-      var tileData = gb._memory.GetTileData();
+      var tileData0 = gb._memory.GetTileDataBank(0);
+      var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
       bool use8x16 = gb._memory.OBJSize;
       int spriteHeight = use8x16 ? 16 : 8;
       byte obp0 = gb._memory.OBP0;
@@ -841,6 +867,10 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         bool xFlip = (attr & 0x20) != 0;
         bool useObp1 = (attr & 0x10) != 0;
         byte dmgPal = useObp1 ? obp1 : obp0;
+
+        int vramBank = isCgb && (attr & 0x08) != 0 ? 1 : 0;
+        int cgbPal = isCgb ? (attr & 0x07) : 0;
+        var tileData = vramBank == 0 ? tileData0 : tileData1;
 
         int localY = py - y;
         int localX = px - x;
@@ -873,6 +903,8 @@ public sealed unsafe class ImGuiTileMapViewerWindow
           XFlip = xFlip,
           YFlip = yFlip,
           DmgPalette = dmgPal,
+          CgbPalette = cgbPal,
+          VramBank = vramBank,
         };
         return true;
       }
@@ -1063,20 +1095,54 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     int mapIndex = (tileY * 32) + tileX;
     byte tileId = (uint)mapIndex < (uint)map.Length ? map[mapIndex] : (byte)0;
 
-    int tileOffset = GetTileOffset(tileId, useSignedTileNumbers);
-    int tileRowIndex = tileOffset + (inTileY * 2);
-    var tileData = gb._memory.GetTileData();
-    byte b1 = (uint)tileRowIndex < (uint)tileData.Length ? tileData[tileRowIndex] : (byte)0;
-    byte b2 = (uint)(tileRowIndex + 1) < (uint)tileData.Length ? tileData[tileRowIndex + 1] : (byte)0;
-    int bit = 7 - inTileX;
-    int colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
-    int shadeIndex = ApplyBgpShading ? MapDmgPaletteToShade(gb._memory.BGP, colorIndex) : colorIndex;
+    int colorIndex;
+    int shadeIndex;
+    string extra = string.Empty;
+
+    if (gb._memory.IsCgb)
+    {
+      var attrMap = gb._memory.GetCgbTileMapAttributes(mapBase);
+      byte attr = (uint)mapIndex < (uint)attrMap.Length ? attrMap[mapIndex] : (byte)0;
+      int pal = attr & 0x07;
+      int vramBank = (attr & 0x08) != 0 ? 1 : 0;
+      bool xFlip = (attr & 0x20) != 0;
+      bool yFlip = (attr & 0x40) != 0;
+      bool pri = (attr & 0x80) != 0;
+
+      var tileData0 = gb._memory.GetTileDataBank(0);
+      var tileData1 = gb._memory.GetTileDataBank(1);
+      var tileData = vramBank == 0 ? tileData0 : tileData1;
+
+      int tileOffset = GetTileOffset(tileId, useSignedTileNumbers);
+      int localX = xFlip ? (7 - inTileX) : inTileX;
+      int localY = yFlip ? (7 - inTileY) : inTileY;
+      int tileRowIndex = tileOffset + (localY * 2);
+      byte b1 = (uint)tileRowIndex < (uint)tileData.Length ? tileData[tileRowIndex] : (byte)0;
+      byte b2 = (uint)(tileRowIndex + 1) < (uint)tileData.Length ? tileData[tileRowIndex + 1] : (byte)0;
+      int bit = 7 - localX;
+      colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+      shadeIndex = colorIndex;
+
+      var rgb = gb._memory.GetCgbBgPaletteColor(pal, colorIndex);
+      extra = $"  Attr=0x{attr:X2} pal={pal} vbk={vramBank} flip={(xFlip ? "X" : "-")}{(yFlip ? "Y" : "-")} pri={(pri ? 1 : 0)} rgb=({rgb.R},{rgb.G},{rgb.B})";
+    }
+    else
+    {
+      int tileOffset = GetTileOffset(tileId, useSignedTileNumbers);
+      int tileRowIndex = tileOffset + (inTileY * 2);
+      var tileData = gb._memory.GetTileData();
+      byte b1 = (uint)tileRowIndex < (uint)tileData.Length ? tileData[tileRowIndex] : (byte)0;
+      byte b2 = (uint)(tileRowIndex + 1) < (uint)tileData.Length ? tileData[tileRowIndex + 1] : (byte)0;
+      int bit = 7 - inTileX;
+      colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+      shadeIndex = ApplyBgpShading ? MapDmgPaletteToShade(gb._memory.BGP, colorIndex) : colorIndex;
+    }
 
     ImGui.Text($"Pixel: ({px},{py})");
     ImGui.Text($"Tile: ({tileX},{tileY})  InTile: ({inTileX},{inTileY})");
     ImGui.Text($"MapBase: 0x{mapBase:X4}  TileId: 0x{tileId:X2} ({tileId})");
-    ImGui.Text($"TileData: {(useSignedTileNumbers ? "signed" : "unsigned")}  TileAddr: 0x{(0x8000 + tileOffset):X4}");
-    ImGui.Text($"CI: {colorIndex}  Shade: {shadeIndex}  BGP: 0x{gb._memory.BGP:X2}");
+    ImGui.Text($"TileData: {(useSignedTileNumbers ? "signed" : "unsigned")}");
+    ImGui.Text($"CI: {colorIndex}  Shade: {shadeIndex}  BGP: 0x{gb._memory.BGP:X2}{extra}");
   }
 
   private static void RenderSpriteExtraTooltip(Gameboy gb, int px, int py)
@@ -1098,6 +1164,12 @@ public sealed unsafe class ImGuiTileMapViewerWindow
   private static Rgba32 ToRgba32(DisplayPalette palette, int shadeIndex, bool transparent)
   {
     var c = palette.GetShade(shadeIndex);
+    byte a = transparent ? (byte)0 : c.A;
+    return new Rgba32(c.R, c.G, c.B, a);
+  }
+
+  private static Rgba32 ToRgba32(GBOG.CPU.Color c, bool transparent)
+  {
     byte a = transparent ? (byte)0 : c.A;
     return new Rgba32(c.R, c.G, c.B, a);
   }
@@ -1212,7 +1284,9 @@ public sealed unsafe class ImGuiTileMapViewerWindow
   {
     try
     {
+      bool isCgb = gb._memory.IsCgb;
       var tileData = gb._memory.GetTileData();
+      var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
 
       byte bgp = gb._memory.BGP;
 
@@ -1228,8 +1302,20 @@ public sealed unsafe class ImGuiTileMapViewerWindow
       var bgMap = gb._memory.GetTileMap(bgMapBase);
       var winMap = gb._memory.GetTileMap(winMapBase);
 
-      var rgbaBg = RenderTileMapToRgba(bgMap, tileData, useSignedTileNumbers, palette, TreatColor0AsTransparent, ApplyBgpShading, bgp);
-      var rgbaWin = RenderTileMapToRgba(winMap, tileData, useSignedTileNumbers, palette, TreatColor0AsTransparent, ApplyBgpShading, bgp);
+      byte[] rgbaBg;
+      byte[] rgbaWin;
+      if (isCgb)
+      {
+        var bgAttr = gb._memory.GetCgbTileMapAttributes(bgMapBase);
+        var winAttr = gb._memory.GetCgbTileMapAttributes(winMapBase);
+        rgbaBg = RenderCgbTileMapToRgba(gb, bgMap, bgAttr, tileData, tileData1, useSignedTileNumbers, TreatColor0AsTransparent);
+        rgbaWin = RenderCgbTileMapToRgba(gb, winMap, winAttr, tileData, tileData1, useSignedTileNumbers, TreatColor0AsTransparent);
+      }
+      else
+      {
+        rgbaBg = RenderTileMapToRgba(bgMap, tileData, useSignedTileNumbers, palette, TreatColor0AsTransparent, ApplyBgpShading, bgp);
+        rgbaWin = RenderTileMapToRgba(winMap, tileData, useSignedTileNumbers, palette, TreatColor0AsTransparent, ApplyBgpShading, bgp);
+      }
 
       if (_bgMapTextureId == 0)
       {
@@ -1264,13 +1350,17 @@ public sealed unsafe class ImGuiTileMapViewerWindow
   {
     try
     {
+      bool isCgb = gb._memory.IsCgb;
       var tileData = gb._memory.GetTileData();
+      var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
       var oam = gb._memory.OAMRam;
       bool use8x16 = gb._memory.OBJSize;
       byte obp0 = gb._memory.OBP0;
       byte obp1 = gb._memory.OBP1;
 
-      var rgba = RenderSpriteLayerToRgba(oam, tileData, use8x16, palette, obp0, obp1);
+      var rgba = isCgb
+        ? RenderCgbSpriteLayerToRgba(gb, oam, tileData, tileData1, use8x16)
+        : RenderSpriteLayerToRgba(oam, tileData, use8x16, palette, obp0, obp1);
 
       if (_spriteLayerTextureId == 0)
       {
@@ -1289,6 +1379,84 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     {
       // best-effort
     }
+  }
+
+  private static byte[] RenderCgbSpriteLayerToRgba(Gameboy gb, byte[] oam, byte[] tileData0, byte[] tileData1, bool use8x16)
+  {
+    var rgba = new byte[ScreenWidth * ScreenHeight * 4];
+    int spriteHeight = use8x16 ? 16 : 8;
+
+    // Draw in reverse OAM order so lower OAM index wins on overlap.
+    for (int spriteIndex = 39; spriteIndex >= 0; spriteIndex--)
+    {
+      int baseAddr = spriteIndex * 4;
+      if (baseAddr + 3 >= oam.Length)
+      {
+        continue;
+      }
+
+      int y = oam[baseAddr + 0] - 16;
+      int x = oam[baseAddr + 1] - 8;
+      int tile = oam[baseAddr + 2];
+      byte attr = oam[baseAddr + 3];
+
+      bool yFlip = (attr & 0x40) != 0;
+      bool xFlip = (attr & 0x20) != 0;
+
+      int vramBank = (attr & 0x08) != 0 ? 1 : 0;
+      int pal = attr & 0x07;
+      var bankTileData = vramBank == 0 ? tileData0 : tileData1;
+
+      int baseTile = use8x16 ? (tile & 0xFE) : tile;
+
+      for (int sy = 0; sy < spriteHeight; sy++)
+      {
+        int py = y + sy;
+        if ((uint)py >= (uint)ScreenHeight)
+        {
+          continue;
+        }
+
+        int localY = yFlip ? (spriteHeight - 1 - sy) : sy;
+        int tileY = localY;
+        int tileIndex = baseTile;
+        if (use8x16)
+        {
+          tileIndex = baseTile + (tileY >= 8 ? 1 : 0);
+          tileY &= 7;
+        }
+
+        int rowIndex = (tileIndex * 16) + (tileY * 2);
+        byte b1 = (uint)rowIndex < (uint)bankTileData.Length ? bankTileData[rowIndex] : (byte)0;
+        byte b2 = (uint)(rowIndex + 1) < (uint)bankTileData.Length ? bankTileData[rowIndex + 1] : (byte)0;
+
+        for (int sx = 0; sx < 8; sx++)
+        {
+          int px = x + sx;
+          if ((uint)px >= (uint)ScreenWidth)
+          {
+            continue;
+          }
+
+          int localX = xFlip ? (7 - sx) : sx;
+          int bit = 7 - localX;
+          int colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+          if (colorIndex == 0)
+          {
+            continue;
+          }
+
+          var c = gb._memory.GetCgbObjPaletteColor(pal, colorIndex);
+          int dst = (py * ScreenWidth + px) * 4;
+          rgba[dst + 0] = c.R;
+          rgba[dst + 1] = c.G;
+          rgba[dst + 2] = c.B;
+          rgba[dst + 3] = c.A;
+        }
+      }
+    }
+
+    return rgba;
   }
 
   private static byte[] RenderSpriteLayerToRgba(byte[] oam, byte[] tileData, bool use8x16, DisplayPalette palette, byte obp0, byte obp1)
@@ -1492,6 +1660,57 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             rgba[dst + 1] = c.G;
             rgba[dst + 2] = c.B;
             rgba[dst + 3] = c.A;
+          }
+        }
+      }
+    }
+
+    return rgba;
+  }
+
+  private static byte[] RenderCgbTileMapToRgba(Gameboy gb, byte[] tileMap, byte[] attrMap, byte[] tileData0, byte[] tileData1, bool useSignedTileNumbers, bool treatCi0Transparent)
+  {
+    var rgba = new byte[TileMapSizePixels * TileMapSizePixels * 4];
+
+    for (int mapY = 0; mapY < 32; mapY++)
+    {
+      for (int mapX = 0; mapX < 32; mapX++)
+      {
+        int mapIndex = (mapY * 32) + mapX;
+        byte tileId = (uint)mapIndex < (uint)tileMap.Length ? tileMap[mapIndex] : (byte)0;
+        byte attr = (uint)mapIndex < (uint)attrMap.Length ? attrMap[mapIndex] : (byte)0;
+
+        int pal = attr & 0x07;
+        int vramBank = (attr & 0x08) != 0 ? 1 : 0;
+        bool xFlip = (attr & 0x20) != 0;
+        bool yFlip = (attr & 0x40) != 0;
+
+        int tileBase = GetTileOffset(tileId, useSignedTileNumbers);
+        var tileData = vramBank == 0 ? tileData0 : tileData1;
+
+        for (int y = 0; y < 8; y++)
+        {
+          int localY = yFlip ? (7 - y) : y;
+          int rowIndex = tileBase + (localY * 2);
+          byte b1 = (uint)rowIndex < (uint)tileData.Length ? tileData[rowIndex] : (byte)0;
+          byte b2 = (uint)(rowIndex + 1) < (uint)tileData.Length ? tileData[rowIndex + 1] : (byte)0;
+
+          for (int x = 0; x < 8; x++)
+          {
+            int localX = xFlip ? (7 - x) : x;
+            int bit = 7 - localX;
+            int colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+            bool transparent = treatCi0Transparent && colorIndex == 0;
+            var c = gb._memory.GetCgbBgPaletteColor(pal, colorIndex);
+            var pxColor = ToRgba32(c, transparent);
+
+            int px = (mapX * 8) + x;
+            int py = (mapY * 8) + y;
+            int dst = (py * TileMapSizePixels + px) * 4;
+            rgba[dst + 0] = pxColor.R;
+            rgba[dst + 1] = pxColor.G;
+            rgba[dst + 2] = pxColor.B;
+            rgba[dst + 3] = pxColor.A;
           }
         }
       }

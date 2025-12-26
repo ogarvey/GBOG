@@ -2246,6 +2246,19 @@ namespace GBOG.Memory
 			}
 		}
 
+		private void AutoIncrementCgbPaletteIndex(bool obj)
+		{
+			ushort specAddr = obj ? (ushort)0xFF6A : (ushort)0xFF68;
+			byte spec = _memory[specAddr];
+			if ((spec & 0x80) == 0)
+			{
+				return;
+			}
+			int index = spec & 0x3F;
+			int next = (index + 1) & 0x3F;
+			_memory[specAddr] = (byte)((spec & 0x80) | next);
+		}
+
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static byte Expand5To8(int v)
 		{
@@ -2355,7 +2368,16 @@ namespace GBOG.Memory
 			}
 			if (address == 0xFF69)
 			{
-				return _isCgb ? ReadCgbPaletteData(obj: false, index: _memory[0xFF68]) : (byte)0xFF;
+				if (!_isCgb)
+				{
+					return 0xFF;
+				}
+				// CGB: palette RAM is blocked during Mode 3; reads return open bus.
+				if (IsVramBlockedForCpu())
+				{
+					return 0xFF;
+				}
+				return ReadCgbPaletteData(obj: false, index: _memory[0xFF68]);
 			}
 			if (address == 0xFF6A)
 			{
@@ -2363,7 +2385,16 @@ namespace GBOG.Memory
 			}
 			if (address == 0xFF6B)
 			{
-				return _isCgb ? ReadCgbPaletteData(obj: true, index: _memory[0xFF6A]) : (byte)0xFF;
+				if (!_isCgb)
+				{
+					return 0xFF;
+				}
+				// CGB: palette RAM is blocked during Mode 3; reads return open bus.
+				if (IsVramBlockedForCpu())
+				{
+					return 0xFF;
+				}
+				return ReadCgbPaletteData(obj: true, index: _memory[0xFF6A]);
 			}
 			if (address == 0xFF6C)
 			{
@@ -2875,6 +2906,12 @@ namespace GBOG.Memory
 				// BCPD (CGB only): palette data.
 				if (_isCgb)
 				{
+					// CGB: palette RAM is blocked during Mode 3; writes are ignored but auto-increment still applies.
+					if (IsVramBlockedForCpu())
+					{
+						AutoIncrementCgbPaletteIndex(obj: false);
+						return;
+					}
 					WriteCgbPaletteData(obj: false, value);
 					MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
 				}
@@ -2892,6 +2929,12 @@ namespace GBOG.Memory
 				// OCPD (CGB only): palette data.
 				if (_isCgb)
 				{
+					// CGB: palette RAM is blocked during Mode 3; writes are ignored but auto-increment still applies.
+					if (IsVramBlockedForCpu())
+					{
+						AutoIncrementCgbPaletteIndex(obj: true);
+						return;
+					}
 					WriteCgbPaletteData(obj: true, value);
 					MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
 				}
@@ -3581,9 +3624,16 @@ namespace GBOG.Memory
 
 		public byte[] GetTileData()
 		{
-			// 8000-97FF
+			return GetTileDataBank(0);
+		}
+
+		internal byte[] GetTileDataBank(int bank)
+		{
+			// 8000-97FF from the selected VRAM bank.
+			bank = bank != 0 ? 1 : 0;
 			var tileData = new byte[0x1800];
-			Array.Copy(_memory, 0x8000, tileData, 0, 0x1800);
+			int src = (bank * 0x2000) + 0x0000; // 0x8000 within VRAM
+			Array.Copy(_gameBoy._ppu.VideoRam, src, tileData, 0, 0x1800);
 			return tileData;
 		}
 
@@ -3601,8 +3651,28 @@ namespace GBOG.Memory
 			}
 
 			var tileMap = new byte[0x400];
-			Array.Copy(_memory, baseAddress, tileMap, 0, 0x400);
+			int src = baseAddress - 0x8000; // VRAM bank 0
+			Array.Copy(_gameBoy._ppu.VideoRam, src, tileMap, 0, 0x400);
 			return tileMap;
+		}
+
+		internal byte[] GetCgbTileMapAttributes(ushort baseAddress)
+		{
+			// Attributes are stored in VRAM bank 1 at the same map index.
+			if (baseAddress != 0x9800 && baseAddress != 0x9C00)
+			{
+				throw new ArgumentOutOfRangeException(nameof(baseAddress), "Tile map base must be 0x9800 or 0x9C00");
+			}
+
+			var attrs = new byte[0x400];
+			if (!_isCgb)
+			{
+				return attrs;
+			}
+
+			int src = 0x2000 + (baseAddress - 0x8000);
+			Array.Copy(_gameBoy._ppu.VideoRam, src, attrs, 0, 0x400);
+			return attrs;
 		}
 
 		internal void WriteOamByteDirect(int oamIndex, byte value)
