@@ -177,6 +177,9 @@ namespace GBOG.CPU
         internal OamAccessKind CurrentMCycleOamAccess { get; private set; } = OamAccessKind.None;
         internal bool CurrentMCycleIduInOamRange { get; private set; } = false;
 
+        internal bool CpuMicroStepActive { get; private set; } = false;
+        private int _cpuCyclesIntoMCycle = 0;
+
         // The registers can be accessed individually:
         public byte A { get => _registers[0]; set => _registers[0] = value; }
         public byte B { get => _registers[1]; set => _registers[1] = value; }
@@ -406,7 +409,7 @@ namespace GBOG.CPU
                                     BeginMCycle();
                                     ApplyOamBugIfNeeded();
                                     baseCyclesThisFrame += GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
-                                    AdvancePerCpuCycle(CpuCyclesPerMCycle);
+                                    FinishMCycle();
                                 }
 
                                 // The interrupt is handled between instructions; don't also fetch/execute an opcode this iteration.
@@ -447,11 +450,15 @@ namespace GBOG.CPU
                                 foreach (var step in steps)
                                 {
                                     BeginMCycle();
-                                    if (step(this))
+                                    CpuMicroStepActive = true;
+                                    bool executed = step(this);
+                                    CpuMicroStepActive = false;
+
+                                    if (executed)
                                     {
                                         ApplyOamBugIfNeeded();
                                         baseCyclesThisFrame += GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
-                                        AdvancePerCpuCycle(CpuCyclesPerMCycle);
+                                        FinishMCycle();
                                     }
                                     else
                                     {
@@ -470,7 +477,7 @@ namespace GBOG.CPU
                             // OAM bug triggers from previous access to be applied (should be none).
                             ApplyOamBugIfNeeded();
                             baseCyclesThisFrame += GetBaseCyclesFromCpuCycles(CpuCyclesPerMCycle);
-                            AdvancePerCpuCycle(CpuCyclesPerMCycle);
+                            FinishMCycle();
 
                             // No instruction executed while halted; EI delay does not advance here.
                         }
@@ -581,6 +588,7 @@ namespace GBOG.CPU
         {
             CurrentMCycleOamAccess = OamAccessKind.None;
             CurrentMCycleIduInOamRange = false;
+            _cpuCyclesIntoMCycle = 0;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -675,6 +683,32 @@ namespace GBOG.CPU
         private void UpdateApu(int baseCycles)
         {
             Apu.Step(baseCycles);
+        }
+
+        internal void AdvanceCpuCyclesWithinMCycle(int targetCpuCycle)
+        {
+            // Advance time within the current M-cycle up to the given t-cycle (0..4).
+            // Used to approximate the real CPU bus timing for memory-mapped IO without rewriting
+            // every opcode micro-op into explicit t-cycle operations.
+            targetCpuCycle = Math.Clamp(targetCpuCycle, 0, 4);
+            if (_cpuCyclesIntoMCycle >= targetCpuCycle)
+            {
+                return;
+            }
+
+            int delta = targetCpuCycle - _cpuCyclesIntoMCycle;
+            AdvancePerCpuCycle(delta);
+            _cpuCyclesIntoMCycle += delta;
+        }
+
+        private void FinishMCycle()
+        {
+            int remaining = 4 - _cpuCyclesIntoMCycle;
+            if (remaining > 0)
+            {
+                AdvancePerCpuCycle(remaining);
+            }
+            _cpuCyclesIntoMCycle = 0;
         }
 
         public bool TrySwitchCgbSpeed()

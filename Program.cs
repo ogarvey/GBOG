@@ -34,7 +34,20 @@ namespace GBOG
       }
 
       string romPath = args[1];
-      string logPath = args.Length > 2 ? args[2] : "serial_output.txt";
+      string logPath;
+      if (args.Length > 2)
+      {
+        logPath = args[2];
+      }
+      else
+      {
+        string headlessDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "HeadlessLogs");
+        headlessDir = Path.GetFullPath(headlessDir);
+        Directory.CreateDirectory(headlessDir);
+
+        string romBase = Path.GetFileNameWithoutExtension(romPath);
+        logPath = Path.Combine(headlessDir, $"{romBase}.txt");
+      }
       int timeoutSeconds = args.Length > 3 && int.TryParse(args[3], out int t) ? t : 60;
 
       Console.WriteLine($"Starting headless mode...");

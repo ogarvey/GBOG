@@ -19,7 +19,7 @@ public sealed class Apu
     // CPU bus accesses happen partway through an M-cycle, while we tick the APU at the end of
     // each M-cycle. For the extremely timing-sensitive DMG CH3 wave RAM behavior, apply a
     // small phase offset when checking the CPU-access window.
-    private const int DmgCh3CpuAccessPhaseOffsetCycles = 2;
+    private const int DmgCh3CpuAccessPhaseOffsetCycles = 0;
 
     // Frame sequencer
     private int _frameSeqCycleCounter;
@@ -458,22 +458,22 @@ public sealed class Apu
             return _waveRam[index & 0x0F];
         }
 
-        // DMG timing window: accesses only work very close to the channel's own wave RAM read.
-        // Use the wave timer phase as an approximation, since CPU/APU timing in this emulator
-        // is instruction-granular.
-        if (!IsCgb && !_ch3.IsCpuWaveRamWindowDmg(windowCycles: 2, phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles))
+        // Pan Docs:
+        // - DMG/MGB: wave RAM can only be accessed on the exact cycle CH3 reads a wave *byte*;
+        //   otherwise reads return $FF and writes are ignored.
+        // - CGB and later: wave RAM accesses are redirected to the byte CH3 is currently reading.
+        if (!IsCgb)
         {
-            return 0xFF;
+            if (!_ch3.IsCpuWaveRamWindowDmg(windowCycles: 1, phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles))
+            {
+                return 0xFF;
+            }
+
+            return _waveRam[index & 0x0F];
         }
 
-        // While playing, the CPU effectively accesses the byte CH3 is currently reading.
-        // This is the behavior relied on by dmg_sound wave tests.
-        int current = _ch3.GetDmgCpuVisibleWaveByteIndex(phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles);
-        if ((uint)current >= 16u)
-        {
-            return 0xFF;
-        }
-        return _waveRam[current];
+        int current = _ch3.CurrentWaveByteIndex;
+        return _waveRam[current & 0x0F];
     }
 
     private void WriteWaveRam(byte index, byte value)
@@ -484,17 +484,19 @@ public sealed class Apu
             return;
         }
 
-        if (!IsCgb && !_ch3.IsCpuWaveRamWindowDmg(windowCycles: 2, phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles))
+        if (!IsCgb)
         {
+            if (!_ch3.IsCpuWaveRamWindowDmg(windowCycles: 1, phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles))
+            {
+                return;
+            }
+
+            _waveRam[index & 0x0F] = value;
             return;
         }
 
-        int current = _ch3.GetDmgCpuVisibleWaveByteIndex(phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles);
-        if ((uint)current >= 16u)
-        {
-            return;
-        }
-        _waveRam[current] = value;
+        int current = _ch3.CurrentWaveByteIndex;
+        _waveRam[current & 0x0F] = value;
     }
 
     public void Step(int baseCycles)
@@ -1110,8 +1112,8 @@ public sealed class Apu
                 cycles = 0;
             }
 
-            // windowCycles is the specific "N cycles after fetch" point.
-            return cycles == windowCycles;
+            // Allow a short post-fetch window.
+            return cycles <= windowCycles;
         }
 
         public WaveChannel(byte[] waveRam)

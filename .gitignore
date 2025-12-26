@@ -98,6 +98,11 @@ StyleCopReport.xml
 *.svclog
 *.scc
 
+# Emulator headless outputs
+HeadlessLogs/
+headless_*.txt
+headless_*.console.txt
+
 # Chutzpah Test files
 _Chutzpah*
 

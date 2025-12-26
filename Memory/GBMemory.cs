@@ -2140,10 +2140,20 @@ namespace GBOG.Memory
 
 		public GBMemory(Gameboy gameBoy)
 		{
-			Log.Logger = new LoggerConfiguration()
-				.WriteTo.File("cpu.log",
-				outputTemplate: "{Message:lj}{NewLine}{Exception}")
-				.CreateLogger();
+			// Avoid continuously growing log files during normal runs.
+			// Set env var GBOG_CPU_LOG=1 to enable cpu.log for debugging.
+			if (Environment.GetEnvironmentVariable("GBOG_CPU_LOG") == "1")
+			{
+				Log.Logger = new LoggerConfiguration()
+					.WriteTo.File("cpu.log", outputTemplate: "{Message:lj}{NewLine}{Exception}")
+					.CreateLogger();
+			}
+			else
+			{
+				Log.Logger = new LoggerConfiguration()
+					.MinimumLevel.Warning()
+					.CreateLogger();
+			}
 			_gameBoy = gameBoy;
 			_joyPadKeys = new bool[8];
 
@@ -2365,6 +2375,11 @@ namespace GBOG.Memory
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public byte ReadByte(ushort address)
 		{
+			if (_gameBoy.CpuMicroStepActive)
+			{
+				_gameBoy.AdvanceCpuCyclesWithinMCycle(targetCpuCycle: 2);
+			}
+
 			// During OAM DMA on DMG, the CPU can access only HRAM (FF80-FFFE) and typically IE (FFFF).
 			// Reads elsewhere return open bus ($FF).
 			if (_oamDmaActive && !_isCgb && address < 0xFF80)
@@ -2797,6 +2812,11 @@ namespace GBOG.Memory
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public void WriteByte(ushort address, byte value)
 		{
+			if (_gameBoy.CpuMicroStepActive)
+			{
+				_gameBoy.AdvanceCpuCyclesWithinMCycle(targetCpuCycle: 2);
+			}
+
 			// During OAM DMA on DMG, the CPU can access only HRAM (FF80-FFFE) and typically IE (FFFF).
 			// Writes elsewhere are ignored.
 			if (_oamDmaActive && !_isCgb && address < 0xFF80)
