@@ -1027,6 +1027,8 @@ public sealed class Apu
         private int _freqTimerCycles;
         private int _sampleLatch; // 0..15
         private int _lastWaveByteIndex; // 0-15
+        private byte _sampleBufferByte;
+        private int _cyclesSinceLastWaveByteFetch;
 
         public int CyclesUntilNextWaveRamRead => _freqTimerCycles;
 
@@ -1069,22 +1071,8 @@ public sealed class Apu
 
         public int GetDmgCpuVisibleWaveByteIndex(int phaseOffsetCycles = 0)
         {
-            // CPU accesses happen slightly later within an M-cycle than our APU state snapshot.
-            // If an internal fetch would occur within that offset, the CPU-visible byte should
-            // be the next one rather than the last fetched one.
-            int period = CurrentPeriodCycles;
-            if (period <= 0)
-            {
-                return CurrentWaveByteIndex;
-            }
-
-            int t = _freqTimerCycles - phaseOffsetCycles;
-            if (t <= 0)
-            {
-                int nextSampleIndex = (_sampleIndex + 1) & 31;
-                return (nextSampleIndex >> 1) & 0x0F;
-            }
-
+            // While CH3 is running on DMG, CPU accesses effectively observe the last wave RAM
+            // byte that CH3 fetched into its internal sample buffer.
             return CurrentWaveByteIndex;
         }
 
@@ -1113,10 +1101,13 @@ public sealed class Apu
 
         public bool IsCpuWaveRamWindowDmg(int windowCycles, int phaseOffsetCycles = 0)
         {
-            // dmg_sound wave tests time CPU accesses relative to CH3's internal wave RAM fetches
-            // (e.g. "2 clocks later"). Approximate this by allowing access when we're within a
-            // small window after the timer reload point, i.e., when "cycles since last fetch" is
-            // small.
+            // dmg_sound wave tests time CPU accesses relative to CH3's internal wave RAM *byte*
+            // fetches (e.g. "2 clocks later"). Under instruction-granular stepping we can't
+            // observe sub-M-cycle bus timing directly, so approximate using the wave timer phase.
+            //
+            // A byte fetch happens only when moving onto an even sample index. That means the
+            // time since the last byte fetch depends on whether the last sample step was even
+            // (fetch) or odd (no fetch).
             int period = CurrentPeriodCycles;
             if (period <= 0)
             {
@@ -1133,8 +1124,12 @@ public sealed class Apu
                 t = period;
             }
 
-            int cyclesSinceLastFetch = period - t;
-            return cyclesSinceLastFetch <= windowCycles;
+            int cyclesSinceLastSampleStep = period - t;
+            int cyclesSinceLastByteFetch = (_sampleIndex & 1) == 0
+                ? cyclesSinceLastSampleStep
+                : (period + cyclesSinceLastSampleStep);
+
+            return cyclesSinceLastByteFetch <= windowCycles;
         }
 
         public WaveChannel(byte[] waveRam)
@@ -1157,6 +1152,8 @@ public sealed class Apu
             _freqTimerCycles = 0;
             _sampleLatch = 0;
             _lastWaveByteIndex = 0;
+            _sampleBufferByte = 0;
+            _cyclesSinceLastWaveByteFetch = 0;
         }
 
         public void OnPowerOff(bool resetLengthCounter)
@@ -1170,6 +1167,8 @@ public sealed class Apu
             _freqTimerCycles = 0;
             _sampleLatch = 0;
             _lastWaveByteIndex = 0;
+            _sampleBufferByte = 0;
+            _cyclesSinceLastWaveByteFetch = 0;
             if (resetLengthCounter)
             {
                 _lengthCounter = 0;
@@ -1187,6 +1186,8 @@ public sealed class Apu
             _freqTimerCycles = 0;
             _sampleLatch = 0;
             _lastWaveByteIndex = 0;
+            _sampleBufferByte = 0;
+            _cyclesSinceLastWaveByteFetch = 0;
             if (resetLengthCounter)
             {
                 _lengthCounter = 0;
@@ -1245,6 +1246,7 @@ public sealed class Apu
             _freqTimerCycles = Math.Max(2, (2048 - _period11) * 2);
             // Pan Docs: last sample buffer behavior is quirky; keep current _sampleLatch.
             _lastWaveByteIndex = 0;
+            _cyclesSinceLastWaveByteFetch = 0;
 
             if (!hadDac)
             {
@@ -1259,22 +1261,31 @@ public sealed class Apu
                 return;
             }
 
+            if (_cyclesSinceLastWaveByteFetch < 1_000_000)
+            {
+                _cyclesSinceLastWaveByteFetch += baseCycles;
+            }
+
             _freqTimerCycles -= baseCycles;
             while (_freqTimerCycles <= 0)
             {
                 _freqTimerCycles += Math.Max(2, (2048 - _period11) * 2);
                 _sampleIndex = (_sampleIndex + 1) & 31;
-                _sampleLatch = ReadNibble(_sampleIndex);
-            }
-        }
 
-        private int ReadNibble(int sampleIndex)
-        {
-            int byteIndex = (sampleIndex >> 1) & 0x0F;
-            _lastWaveByteIndex = byteIndex;
-            bool upper = (sampleIndex & 1) == 0;
-            byte b = _waveRam[byteIndex];
-            return upper ? (b >> 4) & 0x0F : b & 0x0F;
+                // Hardware fetches a new byte from wave RAM only on even sample indices.
+                if ((_sampleIndex & 1) == 0)
+                {
+                    int byteIndex = (_sampleIndex >> 1) & 0x0F;
+                    _lastWaveByteIndex = byteIndex;
+                    _sampleBufferByte = _waveRam[byteIndex];
+                    _cyclesSinceLastWaveByteFetch = 0;
+                    _sampleLatch = (_sampleBufferByte >> 4) & 0x0F;
+                }
+                else
+                {
+                    _sampleLatch = _sampleBufferByte & 0x0F;
+                }
+            }
         }
 
         private int CurrentPeriodCycles => Math.Max(2, (2048 - _period11) * 2);
