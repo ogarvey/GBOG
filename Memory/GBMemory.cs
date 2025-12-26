@@ -25,6 +25,34 @@ namespace GBOG.Memory
 
 	public class GBMemory
 	{
+		private const int VideoDebugVramBytes = 0x4000;
+		private const int VideoDebugPaletteBytes = 64;
+		private readonly byte[][] _videoDebugVramSnapshots = [new byte[VideoDebugVramBytes], new byte[VideoDebugVramBytes]];
+		private readonly byte[][] _videoDebugBgPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
+		private readonly byte[][] _videoDebugObjPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
+		private int _videoDebugSnapshotIndex;
+		private int _videoDebugSnapshotVersion;
+
+		internal int VideoDebugSnapshotVersion => Volatile.Read(ref _videoDebugSnapshotVersion);
+
+		internal void CaptureVideoDebugSnapshot()
+		{
+			// Called from the emulation thread at a stable point (VBlank).
+			int writeIndex = 1 - Volatile.Read(ref _videoDebugSnapshotIndex);
+			Buffer.BlockCopy(_gameBoy._ppu.VideoRam, 0, _videoDebugVramSnapshots[writeIndex], 0, VideoDebugVramBytes);
+			Buffer.BlockCopy(_cgbBgPaletteRam, 0, _videoDebugBgPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
+			Buffer.BlockCopy(_cgbObjPaletteRam, 0, _videoDebugObjPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
+			Volatile.Write(ref _videoDebugSnapshotIndex, writeIndex);
+			Interlocked.Increment(ref _videoDebugSnapshotVersion);
+		}
+
+		internal void GetVideoDebugSnapshot(out byte[] vram, out byte[] bgPalRam, out byte[] objPalRam)
+		{
+			int idx = Volatile.Read(ref _videoDebugSnapshotIndex);
+			vram = _videoDebugVramSnapshots[idx];
+			bgPalRam = _videoDebugBgPaletteSnapshots[idx];
+			objPalRam = _videoDebugObjPaletteSnapshots[idx];
+		}
 		public int CgbBgPaletteWriteCount { get; private set; }
 		public int CgbObjPaletteWriteCount { get; private set; }
 		private int _videoDebugDirty;
@@ -2283,6 +2311,15 @@ namespace GBOG.Memory
 			};
 		}
 
+		internal static GBOG.CPU.Color DecodeCgbPaletteColorFromRam(ReadOnlySpan<byte> palRam, int paletteNumber, int colorNumber)
+		{
+			paletteNumber &= 0x07;
+			colorNumber &= 0x03;
+			int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
+			ushort word = (ushort)(palRam[baseIndex] | (palRam[baseIndex + 1] << 8));
+			return DecodeBgr555(word);
+		}
+
 		internal GBOG.CPU.Color GetCgbBgPaletteColor(int paletteNumber, int colorNumber)
 		{
 			paletteNumber &= 0x07;
@@ -3632,8 +3669,9 @@ namespace GBOG.Memory
 			// 8000-97FF from the selected VRAM bank.
 			bank = bank != 0 ? 1 : 0;
 			var tileData = new byte[0x1800];
+			GetVideoDebugSnapshot(out var vram, out _, out _);
 			int src = (bank * 0x2000) + 0x0000; // 0x8000 within VRAM
-			Array.Copy(_gameBoy._ppu.VideoRam, src, tileData, 0, 0x1800);
+			Array.Copy(vram, src, tileData, 0, 0x1800);
 			return tileData;
 		}
 
@@ -3651,8 +3689,9 @@ namespace GBOG.Memory
 			}
 
 			var tileMap = new byte[0x400];
+			GetVideoDebugSnapshot(out var vram, out _, out _);
 			int src = baseAddress - 0x8000; // VRAM bank 0
-			Array.Copy(_gameBoy._ppu.VideoRam, src, tileMap, 0, 0x400);
+			Array.Copy(vram, src, tileMap, 0, 0x400);
 			return tileMap;
 		}
 
@@ -3671,7 +3710,8 @@ namespace GBOG.Memory
 			}
 
 			int src = 0x2000 + (baseAddress - 0x8000);
-			Array.Copy(_gameBoy._ppu.VideoRam, src, attrs, 0, 0x400);
+			GetVideoDebugSnapshot(out var vram, out _, out _);
+			Array.Copy(vram, src, attrs, 0, 0x400);
 			return attrs;
 		}
 

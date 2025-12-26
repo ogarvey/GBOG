@@ -214,6 +214,7 @@ namespace GBOG.Graphics
 				if (_gb._memory.LY == 144)
 				{
 					// Frame is complete; publish it for the renderer.
+					_gb._memory.CaptureVideoDebugSnapshot();
 					Screen.SwapBuffers();
 					_gb.RequestInterrupt(Interrupt.VBlank);
 				}
