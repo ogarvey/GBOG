@@ -2522,6 +2522,11 @@ namespace GBOG.Memory
 			{
 				return 0xFF;
 			}
+			else if (address >= 0xFF27 && address <= 0xFF2F)
+			{
+				// Unused sound register region always reads as 0xFF.
+				return 0xFF;
+			}
 			else if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
 			{
 				return _gameBoy.Apu.ReadRegister(address);
@@ -2540,6 +2545,11 @@ namespace GBOG.Memory
 		/// </summary>
 		public byte PeekByte(ushort address)
 		{
+			if (address >= 0xFF27 && address <= 0xFF2F)
+			{
+				return 0xFF;
+			}
+
 			// Prefer reflecting true register behavior for APU.
 			if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
 			{
@@ -2799,6 +2809,12 @@ namespace GBOG.Memory
 			{
 				_gameBoy.Apu.WriteRegister(address, value);
 				_memory[address] = value;
+				return;
+			}
+
+			// Unused sound registers: ignore writes.
+			if (address >= 0xFF27 && address <= 0xFF2F)
+			{
 				return;
 			}
 
@@ -3444,6 +3460,7 @@ namespace GBOG.Memory
 			_cartRequiresCgb = cgbFlag == 0xC0;
 			_cartSupportsCgb = cgbFlag == 0x80 || _cartRequiresCgb;
 			_isCgb = _cartRequiresCgb || (_cartSupportsCgb && preferCgbWhenSupported);
+			_gameBoy.Apu.IsCgb = _isCgb;
 			_key1PrepareSpeedSwitch = false;
 			_memory[0xFF4D] = _isCgb ? BuildKey1Value() : (byte)0xFF;
 

@@ -89,6 +89,7 @@ namespace GBOG
             if ((DateTime.UtcNow - start) > timeout)
             {
               Console.WriteLine("\nTimeout reached. Terminating emulation.");
+              gb.EndGame();
               break;
             }
 

@@ -12,6 +12,15 @@ public sealed class Apu
 
     private bool _powered;
 
+    // Hardware mode differences (DMG/MGB vs CGB).
+    // Set by GBMemory.InitialiseGame based on cartridge + user preference.
+    public bool IsCgb { get; set; }
+
+    // CPU bus accesses happen partway through an M-cycle, while we tick the APU at the end of
+    // each M-cycle. For the extremely timing-sensitive DMG CH3 wave RAM behavior, apply a
+    // small phase offset when checking the CPU-access window.
+    private const int DmgCh3CpuAccessPhaseOffsetCycles = 2;
+
     // Frame sequencer
     private int _frameSeqCycleCounter;
     private int _frameSeqStep;
@@ -48,16 +57,16 @@ public sealed class Apu
         _hpfL = new DcBlockFilter(sampleRate);
         _hpfR = new DcBlockFilter(sampleRate);
 
-        // Power-on defaults roughly matching GB post-boot state already set in memory.
-        // We’ll mirror whatever the emulator initialized in GBMemory by allowing external writes.
-        PowerOn();
+        // Initialize to a reasonable post-boot state for normal gameplay.
+        // Note: NR52 power-cycling behavior (writing bit7) differs from initial power-up.
+        HardResetToPostBootState();
     }
 
     public void SetSink(IAudioSink? sink) => _sink = sink;
 
     public bool Powered => _powered;
 
-    public void PowerOn()
+    private void HardResetToPostBootState()
     {
         _powered = true;
         // Keep wave RAM unchanged per Pan Docs.
@@ -120,17 +129,38 @@ public sealed class Apu
         _ch4.RefreshDac();
     }
 
+    private void PowerOnFromNr52()
+    {
+        _powered = true;
+
+        // Powering on via NR52 clears all APU registers (NR10-NR51) to 0
+        // (wave RAM unaffected) and resets the frame sequencer.
+        Array.Clear(_regs);
+        _frameSeqCycleCounter = 0;
+        _frameSeqStep = 0;
+
+        // Reset channel state machines but preserve length counters on DMG.
+        bool resetLengthCounters = IsCgb;
+        _ch1.OnPowerOn(resetLengthCounters);
+        _ch2.OnPowerOn(resetLengthCounters);
+        _ch3.OnPowerOn(resetLengthCounters);
+        _ch4.OnPowerOn(resetLengthCounters);
+    }
+
     public void PowerOff()
     {
         _powered = false;
 
-        _ch1.Reset(poweredOn: false);
-        _ch2.Reset(poweredOn: false);
-        _ch3.Reset(poweredOn: false);
-        _ch4.Reset(poweredOn: false);
-
-        // Turning off clears all APU registers (except NR52) and makes them read-only until re-enabled.
+        // Turning off clears all APU registers (NR10-NR51) and makes them read-only until re-enabled.
+        // Wave RAM is unaffected.
         Array.Clear(_regs);
+
+        // On DMG, length counters are preserved across power-off; on CGB they reset.
+        bool resetLengthCounters = IsCgb;
+        _ch1.OnPowerOff(resetLengthCounters);
+        _ch2.OnPowerOff(resetLengthCounters);
+        _ch3.OnPowerOff(resetLengthCounters);
+        _ch4.OnPowerOff(resetLengthCounters);
 
         // Note: DIV-APU not modeled via DIV edges; our frame sequencer is cycle-based.
     }
@@ -219,13 +249,37 @@ public sealed class Apu
             return;
         }
 
-        // If powered off, only NR52 is writable (plus wave RAM already handled above).
+        // If powered off, only NR52 is writable, plus length-timer loads on DMG, plus wave RAM.
+        // Pan Docs / dmg_sound: length counters persist on DMG and can be written while off.
         if (!_powered && address != 0xFF26)
         {
+            bool isLengthLoadRegister = address is 0xFF11 or 0xFF16 or 0xFF1B or 0xFF20;
+            if (!(isLengthLoadRegister && !IsCgb))
+            {
+                return;
+            }
+            // Do not store the written value in _regs while powered off; only update the internal length counter.
+            switch (address)
+            {
+                case 0xFF11:
+                    _ch1.WriteNr11(value);
+                    break;
+                case 0xFF16:
+                    _ch2.WriteNr11(value);
+                    break;
+                case 0xFF1B:
+                    _ch3.WriteNr31(value);
+                    break;
+                case 0xFF20:
+                    _ch4.WriteNr41(value);
+                    break;
+            }
             return;
         }
 
         int idx = address - 0xFF10;
+
+        byte oldValue = _regs[idx];
 
         switch (address)
         {
@@ -234,7 +288,7 @@ public sealed class Apu
                 bool enable = (value & 0x80) != 0;
                 if (enable && !_powered)
                 {
-                    PowerOn();
+                    PowerOnFromNr52();
                 }
                 else if (!enable && _powered)
                 {
@@ -247,6 +301,17 @@ public sealed class Apu
         }
 
         _regs[idx] = value;
+
+        // Length enable extra clocking quirk (DMG/CGB-04/05):
+        // If the next frame sequencer step does NOT clock length (odd step),
+        // and length enable transitions 0->1, decrement length once.
+        // Additionally, trigger events that load length from 0 can load max-1 in that case.
+        bool nextStepClocksLength = (_frameSeqStep & 1) == 0;
+        bool oldLenEnabled = (oldValue & 0x40) != 0;
+        bool newLenEnabled = (value & 0x40) != 0;
+        bool trigger = (value & 0x80) != 0;
+        bool lengthEnableTransition = !oldLenEnabled && newLenEnabled;
+        bool doExtraLengthClockOnEnable = lengthEnableTransition && !nextStepClocksLength;
 
         // Dispatch to channel logic
         switch (address)
@@ -266,10 +331,14 @@ public sealed class Apu
                 break;
             case 0xFF14:
                 _ch1.WriteNr14(value);
+                if (doExtraLengthClockOnEnable)
+                {
+                    _ch1.ClockLength();
+                }
                 if ((value & 0x80) != 0)
                 {
                     // Period uses NR13/NR14 bits 0-2.
-                    _ch1.Trigger();
+                    _ch1.Trigger(extraLengthClockIfReloadingFromZero: (!nextStepClocksLength && newLenEnabled));
                 }
                 break;
 
@@ -285,9 +354,13 @@ public sealed class Apu
                 break;
             case 0xFF19:
                 _ch2.WriteNr14(value);
+                if (doExtraLengthClockOnEnable)
+                {
+                    _ch2.ClockLength();
+                }
                 if ((value & 0x80) != 0)
                 {
-                    _ch2.Trigger();
+                    _ch2.Trigger(extraLengthClockIfReloadingFromZero: (!nextStepClocksLength && newLenEnabled));
                 }
                 break;
 
@@ -306,9 +379,17 @@ public sealed class Apu
                 break;
             case 0xFF1E:
                 _ch3.WriteNr34(value);
+                if (doExtraLengthClockOnEnable)
+                {
+                    _ch3.ClockLength();
+                }
                 if ((value & 0x80) != 0)
                 {
-                    _ch3.Trigger();
+                    if (_ch3.Active && !IsCgb && _ch3.IsDmgWaveFetchProximityWindow(windowCycles: 0, phaseOffsetCycles: 0))
+                    {
+                        ApplyDmgWaveTriggerCorruption();
+                    }
+                    _ch3.Trigger(extraLengthClockIfReloadingFromZero: (!nextStepClocksLength && newLenEnabled));
                 }
                 break;
 
@@ -324,9 +405,13 @@ public sealed class Apu
                 break;
             case 0xFF23:
                 _ch4.WriteNr44(value);
+                if (doExtraLengthClockOnEnable)
+                {
+                    _ch4.ClockLength();
+                }
                 if ((value & 0x80) != 0)
                 {
-                    _ch4.Trigger();
+                    _ch4.Trigger(extraLengthClockIfReloadingFromZero: (!nextStepClocksLength && newLenEnabled));
                 }
                 break;
 
@@ -343,23 +428,73 @@ public sealed class Apu
         _ch4.RefreshDac();
     }
 
+    private void ApplyDmgWaveTriggerCorruption()
+    {
+        // DMG wave RAM corruption when retriggering CH3 while active.
+        // See gbdev wiki / Pan Docs: it rewrites the first bytes based on the currently read byte.
+        int byteIndex = _ch3.GetDmgWaveCorruptionSourceByteIndex(phaseOffsetCycles: 0);
+        if ((uint)byteIndex >= 16u)
+        {
+            return;
+        }
+
+        if (byteIndex <= 3)
+        {
+            _waveRam[0] = _waveRam[byteIndex];
+            return;
+        }
+
+        int aligned = byteIndex & ~3;
+        for (int i = 0; i < 4; i++)
+        {
+            _waveRam[i] = _waveRam[(aligned + i) & 0x0F];
+        }
+    }
+
     private byte ReadWaveRam(byte index)
     {
-        // Simplified: lock wave RAM when CH3 active (DMG behavior is more nuanced).
-        if (_ch3.Active)
+        if (!_ch3.Active)
+        {
+            return _waveRam[index & 0x0F];
+        }
+
+        // DMG timing window: accesses only work very close to the channel's own wave RAM read.
+        // Use the wave timer phase as an approximation, since CPU/APU timing in this emulator
+        // is instruction-granular.
+        if (!IsCgb && !_ch3.IsCpuWaveRamWindowDmg(windowCycles: 2, phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles))
         {
             return 0xFF;
         }
-        return _waveRam[index & 0x0F];
+
+        // While playing, the CPU effectively accesses the byte CH3 is currently reading.
+        // This is the behavior relied on by dmg_sound wave tests.
+        int current = _ch3.GetDmgCpuVisibleWaveByteIndex(phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles);
+        if ((uint)current >= 16u)
+        {
+            return 0xFF;
+        }
+        return _waveRam[current];
     }
 
     private void WriteWaveRam(byte index, byte value)
     {
-        if (_ch3.Active)
+        if (!_ch3.Active)
+        {
+            _waveRam[index & 0x0F] = value;
+            return;
+        }
+
+        if (!IsCgb && !_ch3.IsCpuWaveRamWindowDmg(windowCycles: 2, phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles))
         {
             return;
         }
-        _waveRam[index & 0x0F] = value;
+
+        int current = _ch3.GetDmgCpuVisibleWaveByteIndex(phaseOffsetCycles: DmgCh3CpuAccessPhaseOffsetCycles);
+        if ((uint)current >= 16u)
+        {
+            return;
+        }
+        _waveRam[current] = value;
     }
 
     public void Step(int baseCycles)
@@ -566,6 +701,7 @@ public sealed class Apu
         private int _sweepTimer;
         private bool _sweepEnabled;
         private int _sweepShadow;
+        private bool _sweepNegateUsedSinceTrigger;
 
         public PulseChannel(bool hasSweep)
         {
@@ -602,12 +738,51 @@ public sealed class Apu
             _sweepTimer = 0;
             _sweepEnabled = false;
             _sweepShadow = 0;
+            _sweepNegateUsedSinceTrigger = false;
+        }
+
+        public void OnPowerOff(bool resetLengthCounter)
+        {
+            _active = false;
+            _dacEnabled = false;
+            _lengthEnabled = false;
+            _duty = 0;
+            if (resetLengthCounter)
+            {
+                _lengthCounter = 0;
+            }
+
+            _initialVolume = 0;
+            _envelopeIncrease = false;
+            _envelopePeriod = 0;
+
+            _period11 = 0;
+
+            _volume = 0;
+            _envelopeTimer = 0;
+
+            _dutyStep = 0;
+            _freqTimerCycles = 0;
+
+            _sweepPace = 0;
+            _sweepNegate = false;
+            _sweepShift = 0;
+            _sweepTimer = 0;
+            _sweepEnabled = false;
+            _sweepShadow = 0;
+            _sweepNegateUsedSinceTrigger = false;
+        }
+
+        public void OnPowerOn(bool resetLengthCounter)
+        {
+            // Registers are cleared and channels stay disabled.
+            OnPowerOff(resetLengthCounter);
         }
 
         public void RefreshDac()
         {
-            // DAC enabled if NRx2 & 0xF8 != 0
-            _dacEnabled = (_initialVolume != 0) || _envelopeIncrease || (_envelopePeriod != 0);
+            // DAC enabled if NRx2 & 0xF8 != 0 (upper 5 bits).
+            _dacEnabled = (_initialVolume != 0) || _envelopeIncrease;
             if (!_dacEnabled)
             {
                 _active = false;
@@ -620,9 +795,16 @@ public sealed class Apu
             {
                 return;
             }
+            bool oldNegate = _sweepNegate;
             _sweepPace = (value >> 4) & 0x07;
             _sweepNegate = (value & 0x08) != 0;
             _sweepShift = value & 0x07;
+
+            // Quirk: clearing negate after it has been used in a sweep calculation disables CH1.
+            if (oldNegate && !_sweepNegate && _sweepNegateUsedSinceTrigger)
+            {
+                _active = false;
+            }
         }
 
         public void WriteNr11(byte value)
@@ -650,18 +832,14 @@ public sealed class Apu
             _period11 = (_period11 & 0x0FF) | ((value & 0x07) << 8);
         }
 
-        public void Trigger()
+        public void Trigger(bool extraLengthClockIfReloadingFromZero)
         {
-            if (!_dacEnabled)
-            {
-                _active = false;
-                return;
-            }
+            bool hadDac = _dacEnabled;
 
             _active = true;
             if (_lengthCounter == 0)
             {
-                _lengthCounter = 64;
+                _lengthCounter = extraLengthClockIfReloadingFromZero ? 63 : 64;
             }
 
             _volume = _initialVolume;
@@ -675,15 +853,27 @@ public sealed class Apu
                 _sweepShadow = _period11;
                 _sweepTimer = (_sweepPace == 0) ? 8 : _sweepPace;
                 _sweepEnabled = (_sweepPace != 0) || (_sweepShift != 0);
+                _sweepNegateUsedSinceTrigger = false;
 
                 if (_sweepShift != 0)
                 {
                     int newPeriod = CalculateSweepNewPeriod();
+                    if (_sweepNegate)
+                    {
+                        _sweepNegateUsedSinceTrigger = true;
+                    }
                     if (newPeriod > 2047)
                     {
                         _active = false;
                     }
                 }
+            }
+
+            // If the DAC is off, the channel cannot remain enabled, but the trigger side-effects
+            // (length reload, sweep init, etc.) still occur.
+            if (!hadDac)
+            {
+                _active = false;
             }
         }
 
@@ -767,6 +957,10 @@ public sealed class Apu
                 }
 
                 int newPeriod = CalculateSweepNewPeriod();
+                if (_sweepNegate)
+                {
+                    _sweepNegateUsedSinceTrigger = true;
+                }
                 if (newPeriod > 2047)
                 {
                     _active = false;
@@ -832,6 +1026,116 @@ public sealed class Apu
         private int _sampleIndex; // 0-31
         private int _freqTimerCycles;
         private int _sampleLatch; // 0..15
+        private int _lastWaveByteIndex; // 0-15
+
+        public int CyclesUntilNextWaveRamRead => _freqTimerCycles;
+
+        public int CurrentWaveByteIndex => _lastWaveByteIndex & 0x0F;
+
+        public int GetDmgWaveCorruptionSourceByteIndex(int phaseOffsetCycles = 0)
+        {
+            // The corruption depends on which wave byte CH3 is reading when retriggered.
+            // With our stepping, the best approximation is to choose between the last fetched
+            // byte (just after a fetch) and the next-to-be-fetched byte (just before a fetch)
+            // based on the current timer phase.
+            int period = CurrentPeriodCycles;
+            if (period <= 0)
+            {
+                return CurrentWaveByteIndex;
+            }
+
+            int t = _freqTimerCycles - phaseOffsetCycles;
+            if (t < 0)
+            {
+                t = 0;
+            }
+            if (t > period)
+            {
+                t = period;
+            }
+
+            int cyclesUntilNextFetch = t;
+            int cyclesSinceLastFetch = period - t;
+
+            if (cyclesUntilNextFetch <= cyclesSinceLastFetch)
+            {
+                // Trigger is closer to the next fetch: use the next sample's containing byte.
+                int nextSampleIndex = (_sampleIndex + 1) & 31;
+                return (nextSampleIndex >> 1) & 0x0F;
+            }
+
+            return CurrentWaveByteIndex;
+        }
+
+        public int GetDmgCpuVisibleWaveByteIndex(int phaseOffsetCycles = 0)
+        {
+            // CPU accesses happen slightly later within an M-cycle than our APU state snapshot.
+            // If an internal fetch would occur within that offset, the CPU-visible byte should
+            // be the next one rather than the last fetched one.
+            int period = CurrentPeriodCycles;
+            if (period <= 0)
+            {
+                return CurrentWaveByteIndex;
+            }
+
+            int t = _freqTimerCycles - phaseOffsetCycles;
+            if (t <= 0)
+            {
+                int nextSampleIndex = (_sampleIndex + 1) & 31;
+                return (nextSampleIndex >> 1) & 0x0F;
+            }
+
+            return CurrentWaveByteIndex;
+        }
+
+        public bool IsDmgWaveFetchProximityWindow(int windowCycles, int phaseOffsetCycles = 0)
+        {
+            int period = CurrentPeriodCycles;
+            if (period <= 0)
+            {
+                return false;
+            }
+
+            int t = _freqTimerCycles - phaseOffsetCycles;
+            if (t < 0)
+            {
+                t = 0;
+            }
+            if (t > period)
+            {
+                t = period;
+            }
+
+            int cyclesUntilNextFetch = t;
+            int cyclesSinceLastFetch = period - t;
+            return Math.Min(cyclesUntilNextFetch, cyclesSinceLastFetch) <= windowCycles;
+        }
+
+        public bool IsCpuWaveRamWindowDmg(int windowCycles, int phaseOffsetCycles = 0)
+        {
+            // dmg_sound wave tests time CPU accesses relative to CH3's internal wave RAM fetches
+            // (e.g. "2 clocks later"). Approximate this by allowing access when we're within a
+            // small window after the timer reload point, i.e., when "cycles since last fetch" is
+            // small.
+            int period = CurrentPeriodCycles;
+            if (period <= 0)
+            {
+                return false;
+            }
+
+            int t = _freqTimerCycles - phaseOffsetCycles;
+            if (t < 0)
+            {
+                t = 0;
+            }
+            if (t > period)
+            {
+                t = period;
+            }
+
+            int cyclesSinceLastFetch = period - t;
+            return cyclesSinceLastFetch <= windowCycles;
+        }
 
         public WaveChannel(byte[] waveRam)
         {
@@ -852,6 +1156,41 @@ public sealed class Apu
             _sampleIndex = 0;
             _freqTimerCycles = 0;
             _sampleLatch = 0;
+            _lastWaveByteIndex = 0;
+        }
+
+        public void OnPowerOff(bool resetLengthCounter)
+        {
+            _active = false;
+            _dacEnabled = false;
+            _lengthEnabled = false;
+            _outputLevel = 0;
+            _period11 = 0;
+            _sampleIndex = 0;
+            _freqTimerCycles = 0;
+            _sampleLatch = 0;
+            _lastWaveByteIndex = 0;
+            if (resetLengthCounter)
+            {
+                _lengthCounter = 0;
+            }
+        }
+
+        public void OnPowerOn(bool resetLengthCounter)
+        {
+            _active = false;
+            _dacEnabled = false;
+            _lengthEnabled = false;
+            _outputLevel = 0;
+            _period11 = 0;
+            _sampleIndex = 0;
+            _freqTimerCycles = 0;
+            _sampleLatch = 0;
+            _lastWaveByteIndex = 0;
+            if (resetLengthCounter)
+            {
+                _lengthCounter = 0;
+            }
         }
 
         public void RefreshDac()
@@ -892,23 +1231,25 @@ public sealed class Apu
             _period11 = (_period11 & 0x0FF) | ((value & 0x07) << 8);
         }
 
-        public void Trigger()
+        public void Trigger(bool extraLengthClockIfReloadingFromZero)
         {
-            if (!_dacEnabled)
-            {
-                _active = false;
-                return;
-            }
+            bool hadDac = _dacEnabled;
 
             _active = true;
             if (_lengthCounter == 0)
             {
-                _lengthCounter = 256;
+                _lengthCounter = extraLengthClockIfReloadingFromZero ? 255 : 256;
             }
 
             _sampleIndex = 0;
             _freqTimerCycles = Math.Max(2, (2048 - _period11) * 2);
             // Pan Docs: last sample buffer behavior is quirky; keep current _sampleLatch.
+            _lastWaveByteIndex = 0;
+
+            if (!hadDac)
+            {
+                _active = false;
+            }
         }
 
         public void Step(int baseCycles)
@@ -930,10 +1271,13 @@ public sealed class Apu
         private int ReadNibble(int sampleIndex)
         {
             int byteIndex = (sampleIndex >> 1) & 0x0F;
+            _lastWaveByteIndex = byteIndex;
             bool upper = (sampleIndex & 1) == 0;
             byte b = _waveRam[byteIndex];
             return upper ? (b >> 4) & 0x0F : b & 0x0F;
         }
+
+        private int CurrentPeriodCycles => Math.Max(2, (2048 - _period11) * 2);
 
         public void ClockLength()
         {
@@ -1020,9 +1364,51 @@ public sealed class Apu
             _freqTimerCycles = 0;
         }
 
+        public void OnPowerOff(bool resetLengthCounter)
+        {
+            _active = false;
+            _dacEnabled = false;
+            _lengthEnabled = false;
+            _initialVolume = 0;
+            _envelopeIncrease = false;
+            _envelopePeriod = 0;
+            _volume = 0;
+            _envelopeTimer = 0;
+            _clockShift = 0;
+            _width7 = false;
+            _clockDivider = 0;
+            _lfsr = 0x7FFF;
+            _freqTimerCycles = 0;
+            if (resetLengthCounter)
+            {
+                _lengthCounter = 0;
+            }
+        }
+
+        public void OnPowerOn(bool resetLengthCounter)
+        {
+            _active = false;
+            _dacEnabled = false;
+            _lengthEnabled = false;
+            _initialVolume = 0;
+            _envelopeIncrease = false;
+            _envelopePeriod = 0;
+            _volume = 0;
+            _envelopeTimer = 0;
+            _clockShift = 0;
+            _width7 = false;
+            _clockDivider = 0;
+            _lfsr = 0x7FFF;
+            _freqTimerCycles = 0;
+            if (resetLengthCounter)
+            {
+                _lengthCounter = 0;
+            }
+        }
+
         public void RefreshDac()
         {
-            _dacEnabled = (_initialVolume != 0) || _envelopeIncrease || (_envelopePeriod != 0);
+            _dacEnabled = (_initialVolume != 0) || _envelopeIncrease;
             if (!_dacEnabled)
             {
                 _active = false;
@@ -1054,18 +1440,14 @@ public sealed class Apu
             _lengthEnabled = (value & 0x40) != 0;
         }
 
-        public void Trigger()
+        public void Trigger(bool extraLengthClockIfReloadingFromZero)
         {
-            if (!_dacEnabled)
-            {
-                _active = false;
-                return;
-            }
+            bool hadDac = _dacEnabled;
 
             _active = true;
             if (_lengthCounter == 0)
             {
-                _lengthCounter = 64;
+                _lengthCounter = extraLengthClockIfReloadingFromZero ? 63 : 64;
             }
 
             _volume = _initialVolume;
@@ -1073,6 +1455,11 @@ public sealed class Apu
 
             _lfsr = 0x7FFF;
             _freqTimerCycles = Math.Max(8, ComputePeriodCycles());
+
+            if (!hadDac)
+            {
+                _active = false;
+            }
         }
 
         public void Step(int baseCycles)
