@@ -27,13 +27,13 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version:  '8.0.x' # Adjust to your . NET version
+        dotnet-version:  '10.0.x' # Adjust to your . NET version
         
     - name: Restore dependencies
-      run:  dotnet restore
+      run:  dotnet restore GBOG.csproj
       
     - name:  Publish ${{ matrix.os-name }}
-      run: dotnet publish --configuration Release --runtime ${{ matrix.platform }} --self-contained true --output ./publish/${{ matrix.platform }}
+      run: dotnet publish GBOG.csproj --configuration Release --runtime ${{ matrix.platform }} --self-contained true --output ./publish/${{ matrix.platform }}
       
     - name: Create Release Archive (Windows)
       if: runner.os == 'Windows'
