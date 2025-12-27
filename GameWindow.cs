@@ -85,6 +85,10 @@ namespace GBOG
         private bool _showCpuStateWindow;
         private bool _showMemoryViewerWindow;
         private bool _showTileDataViewerWindow;
+        private bool _showJoypadMacroWindow;
+
+        private string _macroText = string.Empty;
+        private string _macroError = string.Empty;
 
         private readonly ImGuiTileMapViewerWindow _tileViewer = new();
 
@@ -281,32 +285,21 @@ namespace GBOG
                 return;
             }
 
-            var keys = _gb._memory._joyPadKeys;
-            if (keys == null || keys.Length < 8)
-            {
-                return;
-            }
-
             if (GLFW.GetWindowAttrib(_window, GLFW.GLFW_FOCUSED) == 0)
             {
-                Array.Clear(keys, 0, keys.Length);
-                _gb._memory.NotifyJoypadStateChanged();
+                for (int i = 0; i < 8; i++) _gb.SetPhysicalJoypadKey(i, false);
                 return;
             }
 
-            keys[0] = IsKeyDown(GlfwKey.Right) || IsKeyDown(GlfwKey.D); // Right
-            keys[1] = IsKeyDown(GlfwKey.Left) || IsKeyDown(GlfwKey.A);  // Left
-            keys[2] = IsKeyDown(GlfwKey.Up) || IsKeyDown(GlfwKey.W);    // Up
-            keys[3] = IsKeyDown(GlfwKey.Down) || IsKeyDown(GlfwKey.S);  // Down
+            _gb.SetPhysicalJoypadKey(0, IsKeyDown(GlfwKey.Right) || IsKeyDown(GlfwKey.D)); // Right
+            _gb.SetPhysicalJoypadKey(1, IsKeyDown(GlfwKey.Left) || IsKeyDown(GlfwKey.A));  // Left
+            _gb.SetPhysicalJoypadKey(2, IsKeyDown(GlfwKey.Up) || IsKeyDown(GlfwKey.W));    // Up
+            _gb.SetPhysicalJoypadKey(3, IsKeyDown(GlfwKey.Down) || IsKeyDown(GlfwKey.S));  // Down
 
-            keys[4] = IsKeyDown(GlfwKey.Z);         // A
-            keys[5] = IsKeyDown(GlfwKey.X);         // B
-            keys[6] = IsKeyDown(GlfwKey.Backspace); // Select
-            keys[7] = IsKeyDown(GlfwKey.Enter);     // Start
-
-            // Force JOYP refresh so edge-triggered interrupt can fire even if the game
-            // doesn't read FF00 this frame.
-            _gb._memory.NotifyJoypadStateChanged();
+            _gb.SetPhysicalJoypadKey(4, IsKeyDown(GlfwKey.Z));         // A
+            _gb.SetPhysicalJoypadKey(5, IsKeyDown(GlfwKey.X));         // B
+            _gb.SetPhysicalJoypadKey(6, IsKeyDown(GlfwKey.Backspace)); // Select
+            _gb.SetPhysicalJoypadKey(7, IsKeyDown(GlfwKey.Enter));     // Start
         }
 
         private void HandleGlobalShortcuts()
@@ -598,6 +591,11 @@ namespace GBOG
                         _showTileDataViewerWindow = !_showTileDataViewerWindow;
                     }
 
+                    if (ImGui.MenuItem("Joypad Macro", string.Empty, _showJoypadMacroWindow, true))
+                    {
+                        _showJoypadMacroWindow = !_showJoypadMacroWindow;
+                    }
+
                     ImGui.Separator();
 
                     if (ImGui.MenuItem("Increase Font Size", string.Empty, false, canIncrease))
@@ -805,6 +803,7 @@ namespace GBOG
             RenderCpuStateWindow();
             RenderMemoryViewerWindow();
             RenderTileDataViewerWindow();
+            RenderJoypadMacroWindow();
         }
 
         private void RenderPaletteMenu()
@@ -920,6 +919,51 @@ namespace GBOG
         private void RenderTileDataViewerWindow()
         {
             _tileViewer.Render(ref _showTileDataViewerWindow, _gb, _gl, GetCurrentDisplayPalette(), _settings, SaveSettings);
+        }
+
+        private void RenderJoypadMacroWindow()
+        {
+            if (!_showJoypadMacroWindow) return;
+
+            if (ImGui.Begin("Joypad Macro", ref _showJoypadMacroWindow))
+            {
+                if (_gb == null)
+                {
+                    ImGui.Text("No Gameboy instance.");
+                    ImGui.End();
+                    return;
+                }
+
+                ImGui.TextWrapped("Format: [Buttons] [HoldFrames] [GapFrames]");
+                ImGui.TextWrapped("Buttons: A, B, S (Select), T (Start), U, D, L, R (joined by +)");
+                ImGui.TextWrapped("Example: A+B 10 5");
+
+                ImGui.InputTextMultiline("##macro", ref _macroText, 1024, new Vector2(-1, 200));
+
+                if (ImGui.Button("Run"))
+                {
+                    if (_gb.MacroExecutor.ParseAndEnqueue(_macroText, out _macroError))
+                    {
+                        _macroError = string.Empty;
+                    }
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Clear Queue"))
+                {
+                    _gb.MacroExecutor.Clear();
+                    _macroError = string.Empty;
+                }
+
+                if (!string.IsNullOrEmpty(_macroError))
+                {
+                    ImGui.TextColored(new Vector4(1, 0, 0, 1), _macroError);
+                }
+
+                ImGui.Separator();
+                ImGui.Text($"Status: {(_gb.MacroExecutor.IsRunning ? "Running" : "Idle")}");
+                ImGui.Text($"Queue: {_gb.MacroExecutor.QueueCount} commands");
+            }
+            ImGui.End();
         }
 
         private void EnsureMemoryViewerStates()

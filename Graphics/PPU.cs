@@ -27,7 +27,7 @@ namespace GBOG.Graphics
 			VideoRam = new byte[0x4000];
 			OAM = new byte[0xA0];
 			Screen = new Screen();
-			Scanline = 0;
+			Scanline = 0x99;
 			_scanlineCounter = 456;
 		}
 
@@ -234,6 +234,15 @@ namespace GBOG.Graphics
 		public void Step(int cycles)
 		{
 			_scanlineCounter -= cycles;
+
+			// Handle scanline 153 quirk: LY becomes 0 after 4 cycles.
+			// Note: only the LY register is affected; the PPU remains in Mode 1 (VBlank)
+			// for the full duration of the scanline.
+			if (Scanline == 153 && _gb._memory.LY == 153 && _scanlineCounter <= 452)
+			{
+				_gb._memory.LY = 0;
+			}
+
 			SetLCDStatus();
 
 			if (!_gb._memory.LCDEnabled)
@@ -243,18 +252,30 @@ namespace GBOG.Graphics
 
 			if (_scanlineCounter <= 0)
 			{
-				_gb._memory.LY++;
-				if (_gb._memory.LY > 153)
+				_scanlineCounter += 456;
+				Scanline++;
+
+				if (Scanline > 153)
 				{
-					_gb._memory.LY = 0;
+					Scanline = 0;
 					// VBlank has fully completed; games typically perform VRAM/palette updates during VBlank.
 					// Capture a snapshot here so debug viewers reflect the post-VBlank state used for the next frame.
 					_gb._memory.CaptureVideoDebugSnapshot();
 				}
 
-				_scanlineCounter += 456;
-				
-				if (_gb._memory.LY == 144)
+				// Update LY register.
+				// If we just finished scanline 152, LY becomes 153.
+				// If we just finished scanline 153, LY is already 0 (from the quirk) or should become 0.
+				if (Scanline == 0)
+				{
+					_gb._memory.LY = 0;
+				}
+				else
+				{
+					_gb._memory.LY = (byte)Scanline;
+				}
+
+				if (Scanline == 144)
 				{
 					// Frame is complete; publish it for the renderer.
 					Screen.SwapBuffers();
@@ -787,7 +808,6 @@ namespace GBOG.Graphics
 				return;
 			}
 
-			Scanline = _gb._memory.LY;
 			var currentMode = lcdStatus & 0b11;
 			int mode;
 			bool reqInt = false;
@@ -841,7 +861,7 @@ namespace GBOG.Graphics
 			}
 
 			// LYC=LY coincidence flag is constantly updated; interrupt triggers on 0->1 edge.
-			bool coincidence = Scanline == _gb._memory.LYC;
+			bool coincidence = _gb._memory.LY == _gb._memory.LYC;
 			if (coincidence)
 			{
 				lcdStatus |= 0b0000_0100;

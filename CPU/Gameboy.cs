@@ -61,6 +61,9 @@ namespace GBOG.CPU
         public Apu Apu { get; }
         private AudioOutput? _audioOutput;
 
+        public JoypadMacroExecutor MacroExecutor { get; } = new();
+        private readonly bool[] _physicalJoypadKeys = new bool[8];
+
         private DisplayPalette _displayPalette = DisplayPalettes.Dmg;
         public DisplayPalette DisplayPalette => _displayPalette;
 
@@ -352,6 +355,15 @@ namespace GBOG.CPU
                 _audioOutput.Volume = _audioVolume;
             }
         }
+
+        public void SetPhysicalJoypadKey(int index, bool pressed)
+        {
+            if (index >= 0 && index < 8)
+            {
+                _physicalJoypadKeys[index] = pressed;
+            }
+        }
+
         public EventHandler<bool>? OnGraphicsRAMAccessed;
         private bool _exit = false;
 
@@ -450,6 +462,12 @@ namespace GBOG.CPU
 
                     int baseCyclesThisFrame = 0;
                     int instructionsThisFrame = 0;
+
+                    // Update joypad state for this frame by merging physical keys and macro executor.
+                    var keys = _memory._joyPadKeys;
+                    Array.Copy(_physicalJoypadKeys, keys, 8);
+                    MacroExecutor.Update(keys);
+                    _memory.NotifyJoypadStateChanged();
 
                     // For frame advance, we want to stop at the start of the next VBlank (LY=144).
                     // If the LCD is off, we just run a standard frame's worth of cycles.
