@@ -19,8 +19,6 @@ jobs:
             os-name: Linux-x64
           - platform: osx-x64
             os-name: MacOS-x64
-          - platform: osx-arm64
-            os-name: MacOS-ARM64
     
     steps:
     - name: Checkout code
