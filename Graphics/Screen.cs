@@ -74,5 +74,14 @@ namespace GBOG.Graphics
 		{
 			return _frontPixels;
 		}
+
+		public byte[] GetFrontPixels() => _frontPixels;
+		public byte[] GetBackPixels() => _backPixels;
+
+		public void SetPixels(byte[] front, byte[] back)
+		{
+			_frontPixels = front;
+			_backPixels = back;
+		}
 	}
 }

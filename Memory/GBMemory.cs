@@ -9,6 +9,7 @@ using System.Drawing;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
+using System.IO;
 
 namespace GBOG.Memory
 {
@@ -27,9 +28,11 @@ namespace GBOG.Memory
 	{
 		private const int VideoDebugVramBytes = 0x4000;
 		private const int VideoDebugPaletteBytes = 64;
+		private const int VideoDebugOamBytes = 0xA0;
 		private readonly byte[][] _videoDebugVramSnapshots = [new byte[VideoDebugVramBytes], new byte[VideoDebugVramBytes]];
 		private readonly byte[][] _videoDebugBgPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
 		private readonly byte[][] _videoDebugObjPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
+		private readonly byte[][] _videoDebugOamSnapshots = [new byte[VideoDebugOamBytes], new byte[VideoDebugOamBytes]];
 		private readonly byte[] _videoDebugLcdcSnapshots = new byte[2];
 		private int _videoDebugSnapshotIndex;
 		private int _videoDebugSnapshotVersion;
@@ -43,17 +46,19 @@ namespace GBOG.Memory
 			Buffer.BlockCopy(_gameBoy._ppu.VideoRam, 0, _videoDebugVramSnapshots[writeIndex], 0, VideoDebugVramBytes);
 			Buffer.BlockCopy(_cgbBgPaletteRam, 0, _videoDebugBgPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
 			Buffer.BlockCopy(_cgbObjPaletteRam, 0, _videoDebugObjPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
+			Buffer.BlockCopy(_gameBoy._ppu.OAM, 0, _videoDebugOamSnapshots[writeIndex], 0, VideoDebugOamBytes);
 			_videoDebugLcdcSnapshots[writeIndex] = _memory[0xFF40];
 			Volatile.Write(ref _videoDebugSnapshotIndex, writeIndex);
 			Interlocked.Increment(ref _videoDebugSnapshotVersion);
 		}
 
-		internal void GetVideoDebugSnapshot(out byte[] vram, out byte[] bgPalRam, out byte[] objPalRam, out byte lcdc)
+		internal void GetVideoDebugSnapshot(out byte[] vram, out byte[] bgPalRam, out byte[] objPalRam, out byte[] oam, out byte lcdc)
 		{
 			int idx = Volatile.Read(ref _videoDebugSnapshotIndex);
 			vram = _videoDebugVramSnapshots[idx];
 			bgPalRam = _videoDebugBgPaletteSnapshots[idx];
 			objPalRam = _videoDebugObjPaletteSnapshots[idx];
+			oam = _videoDebugOamSnapshots[idx];
 			lcdc = _videoDebugLcdcSnapshots[idx];
 		}
 		public int CgbBgPaletteWriteCount { get; private set; }
@@ -145,6 +150,155 @@ namespace GBOG.Memory
 				var trailer = file.AsSpan(file.Length - rtcPart, rtcPart);
 				LoadMbc3RtcTrailer(trailer);
 			}
+		}
+
+		public void SaveState(BinaryWriter writer)
+		{
+			writer.Write(_memory);
+			writer.Write(_currentRomBank);
+			writer.Write(RamBanks.Length);
+			writer.Write(RamBanks);
+			writer.Write(_romBankingMode);
+			writer.Write(_currentRamBank);
+			writer.Write(_ramEnabled);
+			writer.Write(_mbc1);
+			writer.Write(_mbc2);
+			writer.Write(_mbc3);
+			writer.Write(_mbc5);
+			writer.Write(_romBankSize);
+			writer.Write(_romBankCount);
+			writer.Write(_ramBankSize);
+			writer.Write(_RTCEnabled);
+			writer.Write(_multicart);
+			writer.Write(_mbc1m);
+
+			bool hasMbc2Ram = _mbc2Ram != null;
+			writer.Write(hasMbc2Ram);
+			if (hasMbc2Ram)
+			{
+				writer.Write(_mbc2Ram!.Length);
+				writer.Write(_mbc2Ram!);
+			}
+
+			writer.Write(_mbc5RomBank);
+			writer.Write(_mbc5HasRumble);
+			writer.Write(_mbc5Rumble);
+
+			writer.Write(_mbc3RamBankOrRtcSelect);
+			writer.Write(_mbc3LatchArmed);
+			writer.Write(_mbc3Latched);
+			writer.Write(_mbc3RtcSubCycleCounter);
+			writer.Write(_mbc3RtcSeconds);
+			writer.Write(_mbc3RtcMinutes);
+			writer.Write(_mbc3RtcHours);
+			writer.Write(_mbc3RtcDays);
+			writer.Write(_mbc3RtcHalt);
+			writer.Write(_mbc3RtcCarry);
+			writer.Write(_mbc3RtcLatchedS);
+			writer.Write(_mbc3RtcLatchedM);
+			writer.Write(_mbc3RtcLatchedH);
+			writer.Write(_mbc3RtcLatchedDL);
+			writer.Write(_mbc3RtcLatchedDH);
+
+			writer.Write(_cgbBgPaletteRam);
+			writer.Write(_cgbObjPaletteRam);
+			writer.Write(_isCgb);
+			writer.Write(_cartSupportsCgb);
+			writer.Write(_cartRequiresCgb);
+			writer.Write(_key1PrepareSpeedSwitch);
+			writer.Write(_serialControlWrites);
+			writer.Write(_serialTransferStarts);
+
+			writer.Write(_wram.Length);
+			writer.Write(_wram);
+
+			writer.Write(_oamDmaActive);
+			writer.Write(_oamDmaSourceBase);
+			writer.Write(_oamDmaByteIndex);
+			writer.Write(_oamDmaDotCounter);
+
+			writer.Write(_hdmaActive);
+			writer.Write(_hdmaHblankMode);
+			writer.Write(_hdmaRemainingBlocks);
+			writer.Write(_hdmaSrc);
+			writer.Write(_hdmaDst);
+		}
+
+		public void LoadState(BinaryReader reader)
+		{
+			_memory = reader.ReadBytes(0x10000);
+			_currentRomBank = reader.ReadByte();
+			int ramBanksLen = reader.ReadInt32();
+			RamBanks = reader.ReadBytes(ramBanksLen);
+			_romBankingMode = reader.ReadByte();
+			_currentRamBank = reader.ReadByte();
+			_ramEnabled = reader.ReadBoolean();
+			_mbc1 = reader.ReadBoolean();
+			_mbc2 = reader.ReadBoolean();
+			_mbc3 = reader.ReadBoolean();
+			_mbc5 = reader.ReadBoolean();
+			_romBankSize = reader.ReadInt32();
+			_romBankCount = reader.ReadInt32();
+			_ramBankSize = reader.ReadInt32();
+			_RTCEnabled = reader.ReadBoolean();
+			_multicart = reader.ReadBoolean();
+			_mbc1m = reader.ReadBoolean();
+
+			bool hasMbc2Ram = reader.ReadBoolean();
+			if (hasMbc2Ram)
+			{
+				int mbc2RamLen = reader.ReadInt32();
+				_mbc2Ram = reader.ReadBytes(mbc2RamLen);
+			}
+			else
+			{
+				_mbc2Ram = null;
+			}
+
+			_mbc5RomBank = reader.ReadUInt16();
+			_mbc5HasRumble = reader.ReadBoolean();
+			_mbc5Rumble = reader.ReadBoolean();
+
+			_mbc3RamBankOrRtcSelect = reader.ReadByte();
+			_mbc3LatchArmed = reader.ReadBoolean();
+			_mbc3Latched = reader.ReadBoolean();
+			_mbc3RtcSubCycleCounter = reader.ReadInt32();
+			_mbc3RtcSeconds = reader.ReadInt32();
+			_mbc3RtcMinutes = reader.ReadInt32();
+			_mbc3RtcHours = reader.ReadInt32();
+			_mbc3RtcDays = reader.ReadInt32();
+			_mbc3RtcHalt = reader.ReadBoolean();
+			_mbc3RtcCarry = reader.ReadBoolean();
+			_mbc3RtcLatchedS = reader.ReadByte();
+			_mbc3RtcLatchedM = reader.ReadByte();
+			_mbc3RtcLatchedH = reader.ReadByte();
+			_mbc3RtcLatchedDL = reader.ReadByte();
+			_mbc3RtcLatchedDH = reader.ReadByte();
+
+			_cgbBgPaletteRam.AsSpan().Clear();
+			reader.ReadBytes(64).CopyTo(_cgbBgPaletteRam);
+			_cgbObjPaletteRam.AsSpan().Clear();
+			reader.ReadBytes(64).CopyTo(_cgbObjPaletteRam);
+			_isCgb = reader.ReadBoolean();
+			_cartSupportsCgb = reader.ReadBoolean();
+			_cartRequiresCgb = reader.ReadBoolean();
+			_key1PrepareSpeedSwitch = reader.ReadBoolean();
+			_serialControlWrites = reader.ReadInt32();
+			_serialTransferStarts = reader.ReadInt32();
+
+			int wramLen = reader.ReadInt32();
+			reader.ReadBytes(wramLen).CopyTo(_wram, 0);
+
+			_oamDmaActive = reader.ReadBoolean();
+			_oamDmaSourceBase = reader.ReadUInt16();
+			_oamDmaByteIndex = reader.ReadInt32();
+			_oamDmaDotCounter = reader.ReadInt32();
+
+			_hdmaActive = reader.ReadBoolean();
+			_hdmaHblankMode = reader.ReadBoolean();
+			_hdmaRemainingBlocks = reader.ReadInt32();
+			_hdmaSrc = reader.ReadUInt16();
+			_hdmaDst = reader.ReadUInt16();
 		}
 
 		private static bool TrySplitSaveFile(int fileLen, int expectedRam, bool hasRtc, out int ramPart, out int rtcPart)
@@ -3709,7 +3863,7 @@ namespace GBOG.Memory
 			// 8000-97FF from the selected VRAM bank.
 			bank = bank != 0 ? 1 : 0;
 			var tileData = new byte[0x1800];
-			GetVideoDebugSnapshot(out var vram, out _, out _, out _);
+			GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
 			int src = (bank * 0x2000) + 0x0000; // 0x8000 within VRAM
 			Array.Copy(vram, src, tileData, 0, 0x1800);
 			return tileData;
@@ -3729,7 +3883,7 @@ namespace GBOG.Memory
 			}
 
 			var tileMap = new byte[0x400];
-			GetVideoDebugSnapshot(out var vram, out _, out _, out _);
+			GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
 			int src = baseAddress - 0x8000; // VRAM bank 0
 			Array.Copy(vram, src, tileMap, 0, 0x400);
 			return tileMap;
@@ -3750,7 +3904,7 @@ namespace GBOG.Memory
 			}
 
 			int src = 0x2000 + (baseAddress - 0x8000);
-			GetVideoDebugSnapshot(out var vram, out _, out _, out _);
+			GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
 			Array.Copy(vram, src, attrs, 0, 0x400);
 			return attrs;
 		}

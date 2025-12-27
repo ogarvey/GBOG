@@ -11,6 +11,7 @@ using System.Runtime.CompilerServices;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using System.IO;
 using Log = Serilog.Log;
 
 namespace GBOG.CPU
@@ -43,8 +44,6 @@ namespace GBOG.CPU
         private byte[] _registers = new byte[8];
         private OpcodeHandler _opcodeHandler;
         private int _scanlineCounter;
-        private byte[,,] _display;
-        private byte[] _pixels;
 
         public GBMemory _memory { get; }
         public PPU _ppu { get; }
@@ -259,8 +258,6 @@ namespace GBOG.CPU
             //  .WriteTo.File("log.txt",
             //  outputTemplate: "{Message:lj}{NewLine}{Exception}")
             //  .CreateLogger();
-            _display = new byte[160, 144, 4];
-            _pixels = new byte[160 * 144 * 4];
 
             Apu = new Apu(sampleRate: 44100);
 
@@ -301,6 +298,52 @@ namespace GBOG.CPU
             }
         }
 
+        public void SaveState(BinaryWriter writer)
+        {
+            writer.Write(_registers);
+            writer.Write(_scanlineCounter);
+            writer.Write(_mClockCount);
+            writer.Write(_timerPeriod);
+            writer.Write(DoubleSpeed);
+            writer.Write(InterruptMasterEnabled);
+            writer.Write(_imeEnableDelayInstructions);
+            writer.Write(Halt);
+            writer.Write(DIVCounter);
+            writer.Write(SP);
+            writer.Write(PC);
+            writer.Write((int)CurrentMCycleOamAccess);
+            writer.Write(CurrentMCycleIduInOamRange);
+            writer.Write(CpuMicroStepActive);
+            writer.Write(_cpuCyclesIntoMCycle);
+
+            _memory.SaveState(writer);
+            _ppu.SaveState(writer);
+            Apu.SaveState(writer);
+        }
+
+        public void LoadState(BinaryReader reader)
+        {
+            _registers = reader.ReadBytes(8);
+            _scanlineCounter = reader.ReadInt32();
+            _mClockCount = reader.ReadInt32();
+            _timerPeriod = reader.ReadInt32();
+            DoubleSpeed = reader.ReadBoolean();
+            InterruptMasterEnabled = reader.ReadBoolean();
+            _imeEnableDelayInstructions = reader.ReadInt32();
+            Halt = reader.ReadBoolean();
+            DIVCounter = reader.ReadInt32();
+            SP = reader.ReadUInt16();
+            PC = reader.ReadUInt16();
+            CurrentMCycleOamAccess = (OamAccessKind)reader.ReadInt32();
+            CurrentMCycleIduInOamRange = reader.ReadBoolean();
+            CpuMicroStepActive = reader.ReadBoolean();
+            _cpuCyclesIntoMCycle = reader.ReadInt32();
+
+            _memory.LoadState(reader);
+            _ppu.LoadState(reader);
+            Apu.LoadState(reader);
+        }
+
         public void SetAudioVolume(float volume)
         {
             _audioVolume = Math.Clamp(volume, 0f, 1f);
@@ -315,12 +358,33 @@ namespace GBOG.CPU
         private readonly ManualResetEventSlim _pauseEvent = new(initialState: true);
         private readonly object _runLock = new();
         private Task<bool>? _runTask;
+        private bool _frameAdvanceRequested = false;
 
         public bool IsPaused => !_pauseEvent.IsSet;
 
         public void Pause() => _pauseEvent.Reset();
 
         public void Resume() => _pauseEvent.Set();
+
+        public void RequestFrameAdvance()
+        {
+            if (IsPaused)
+            {
+                _frameAdvanceRequested = true;
+                _pauseEvent.Set();
+            }
+        }
+
+        public void WaitForPause()
+        {
+            if (_runTask == null || _runTask.IsCompleted) return;
+            // Wait for the emulation thread to stop at the next instruction boundary.
+            // We can't easily wait on the thread itself without blocking it, 
+            // but we can check if it's currently waiting on the pause event.
+            // However, the simplest way is to just wait a bit or use another signal.
+            // For now, let's just sleep a tiny bit to let it hit the break.
+            Thread.Sleep(10);
+        }
 
         private async Task<bool> DoLoop()
         {
@@ -359,6 +423,9 @@ namespace GBOG.CPU
                         break;
                     }
 
+                    bool isFrameAdvance = _frameAdvanceRequested;
+                    _frameAdvanceRequested = false;
+
                     long frameHostStart = Stopwatch.GetTimestamp();
 
                     long threadCpuStart100ns = 0;
@@ -384,8 +451,32 @@ namespace GBOG.CPU
                     int baseCyclesThisFrame = 0;
                     int instructionsThisFrame = 0;
 
-                    while (baseCyclesThisFrame < MaxBaseCyclesPerFrame)
+                    // For frame advance, we want to stop at the start of the next VBlank (LY=144).
+                    // If the LCD is off, we just run a standard frame's worth of cycles.
+                    bool stopAtVBlank = isFrameAdvance && _memory.LCDEnabled;
+                    bool hasLeftVBlank = stopAtVBlank && _memory.LY < 144;
+
+                    while (true)
                     {
+                        if (stopAtVBlank)
+                        {
+                            if (hasLeftVBlank)
+                            {
+                                if (_memory.LY >= 144) break;
+                            }
+                            else
+                            {
+                                if (_memory.LY < 144) hasLeftVBlank = true;
+                            }
+
+                            // Safety cap to prevent infinite loops if LY doesn't advance as expected.
+                            if (baseCyclesThisFrame >= MaxBaseCyclesPerFrame * 2) break;
+                        }
+                        else
+                        {
+                            if (baseCyclesThisFrame >= MaxBaseCyclesPerFrame) break;
+                        }
+
                         // If paused mid-frame, break out so the outer loop can block.
                         if (!_pauseEvent.IsSet)
                         {
@@ -520,7 +611,6 @@ namespace GBOG.CPU
                         {
                             emuStartTicks = now0;
                             emuTicksAccFixed = 0;
-                            continue;
                         }
 
                         while (true)
@@ -578,6 +668,11 @@ namespace GBOG.CPU
                         Gc1Collections = gc1,
                         Gc2Collections = gc2,
                     };
+
+                    if (isFrameAdvance)
+                    {
+                        _pauseEvent.Reset();
+                    }
                 }
             }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             return true;
@@ -884,470 +979,10 @@ namespace GBOG.CPU
             _mClockCount = _timerPeriod;
         }
 
-        public void UpdateGraphics(int cycles)
-        {
-            // during each scanline, the STAT interrupt can be called multiple times for each mode, but make sure it only fires once and only once per scanline,
-            SetLCDStatus();
-
-            if (_memory.LCDEnabled)
-            {
-                _scanlineCounter -= cycles;
-            }
-            else
-            {
-                return;
-            }
-
-            if (_scanlineCounter <= 0)
-            {
-                _memory.LY++;
-                byte currentLine = _memory.LY;
-                _scanlineCounter = 456;
-
-                if (currentLine == 144)
-                {
-                    // VBlank
-                    _memory.IFVBlank = true;
-                }
-                else if (currentLine > 153)
-                {
-                    _memory.LY = 0;
-                }
-                else if (currentLine < 144)
-                {
-                    DrawScanline();
-                }
-            }
-        }
         public void RequestInterrupt(Interrupt interrupt)
         {
             byte req = (byte)(_memory.IF | 0xE0);
             _memory.IF = (byte)(req | 1 << (int)interrupt);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void DrawScanline()
-        {
-            if (_memory.BGDisplay)
-            {
-                DrawBackground();
-            }
-
-            if (_memory.SpriteDisplay)
-            {
-                DrawSprites();
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void DrawSprites()
-        {
-            bool use8x16 = _memory.OBJSize;
-
-            for (int sprite = 0; sprite < 40; sprite++)
-            {
-                byte index = (byte)(sprite * 4);
-                byte yPos = (byte)(_memory.ReadByte((ushort)(0xFE00 + index)) - 16);
-                byte xPos = (byte)(_memory.ReadByte((ushort)(0xFE00 + index + 1)) - 8);
-                byte tileLocation = _memory.ReadByte((ushort)(0xFE00 + index + 2));
-                byte attributes = _memory.ReadByte((ushort)(0xFE00 + index + 3));
-
-                bool yFlip = attributes.TestBit(6);
-                bool xFlip = attributes.TestBit(5);
-
-                int ySize = use8x16 ? 16 : 8;
-
-                int scanline = _memory.LY;
-
-                if (scanline >= yPos && scanline < (yPos + ySize))
-                {
-                    int line = scanline - yPos;
-
-                    if (yFlip)
-                    {
-                        line -= ySize;
-                        line *= -1;
-                    }
-
-                    line *= 2;
-                    ushort dataAddress = (ushort)(0x8000 + (tileLocation * 16) + line);
-                    byte data1 = _memory.ReadByte(dataAddress);
-                    byte data2 = _memory.ReadByte((ushort)(dataAddress + 1));
-
-                    for (int tilePixel = 7; tilePixel >= 0; tilePixel--)
-                    {
-                        int colorBit = tilePixel;
-
-                        if (xFlip)
-                        {
-                            colorBit -= 7;
-                            colorBit *= -1;
-                        }
-
-                        int colorNum = 0;
-                        colorNum |= data2.TestBit(colorBit) ? 1 : 0;
-                        colorNum <<= 1;
-                        colorNum |= data1.TestBit(colorBit) ? 1 : 0;
-
-                        Color color = GetColor((byte)colorNum, 0xFF48);
-
-                        int red = 0;
-                        int green = 0;
-                        int blue = 0;
-                        byte alpha = 255;
-
-                        switch (color)
-                        {
-                            case Color color1 when color1.R == Color.White.R && color1.G == Color.White.G && color1.B == Color.White.B:
-                                red = 255;
-                                green = 255;
-                                blue = 255;
-                                alpha = 0;
-                                break;
-                            case Color color2 when color2.R == Color.LightGray.R && color2.G == Color.LightGray.G && color2.B == Color.LightGray.B:
-                                red = 0xCC;
-                                green = 0xCC;
-                                blue = 0xCC;
-                                break;
-                            case Color color3 when color3.R == Color.DarkGray.R && color3.G == Color.DarkGray.G && color3.B == Color.DarkGray.B:
-                                red = 0x77;
-                                green = 0x77;
-                                blue = 0x77;
-                                break;
-                            case Color color4 when color4.R == Color.Black.R && color4.G == Color.Black.G && color4.B == Color.Black.B:
-                                red = 0;
-                                green = 0;
-                                blue = 0;
-                                break;
-                        }
-
-                        int xPix = 0 - tilePixel;
-                        xPix += 7;
-
-                        int pixel = xPos + xPix;
-
-                        if (scanline < 0 || scanline > 143 || pixel < 0 || pixel > 159)
-                        {
-                            continue;
-                        }
-
-                        _display[pixel, scanline, 0] = (byte)red;
-                        _display[pixel, scanline, 1] = (byte)green;
-                        _display[pixel, scanline, 2] = (byte)blue;
-                        _display[pixel, scanline, 3] = alpha;
-
-                        // alternatively, use the colorNum directly in a 160*144 array to represent the pixel
-                        // use pixel and finalY to determine the position in the array
-                    }
-                    _pixels = Flatten(_display);
-                }
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void DrawBackground()
-        {
-            ushort tileData = 0;
-            ushort backgroundMemory = 0;
-            bool unsigned = true;
-
-            byte scrollX = _memory.SCX;
-            byte scrollY = _memory.SCY;
-            byte windowX = _memory.WX;
-            byte windowY = _memory.WY;
-
-            bool usingWindow = false;
-
-            if (_memory.WindowDisplayEnable)
-            {
-                if (windowY <= _memory.LY)
-                    usingWindow = true;
-            }
-
-            if (_memory.BGWindowTileDataSelect)
-            {
-                tileData = 0x8000;
-            }
-            else
-            {
-                tileData = 0x8800;
-                unsigned = false;
-            }
-
-            if (usingWindow)
-            {
-                if (_memory.WindowTileMapDisplaySelect)
-                {
-                    backgroundMemory = 0x9C00;
-                }
-                else
-                {
-                    backgroundMemory = 0x9800;
-                }
-            }
-            else
-            {
-                if (_memory.BGWindowTileDataSelect)
-                {
-                    backgroundMemory = 0x9C00;
-                }
-                else
-                {
-                    backgroundMemory = 0x9800;
-                }
-            }
-
-            byte yPos;
-
-            if (usingWindow)
-            {
-                yPos = (byte)(_memory.LY - windowY);
-            }
-            else
-            {
-                yPos = (byte)(scrollY + _memory.LY);
-            }
-
-
-            for (int pixel = 0; pixel < 160; pixel++)
-            {
-                byte xPos = (byte)(pixel + scrollX);
-
-                if (usingWindow)
-                {
-                    if (pixel >= windowX)
-                    {
-                        xPos = (byte)(pixel - windowX);
-                      }
-                }
-
-                ushort tileRow = (ushort)((yPos / 8) * 32);
-                ushort tileCol = (ushort)(xPos / 8);
-                // tileData memory location to use
-                ushort tileLocation = tileData;
-                // backroundMemory = tilemap to use
-                ushort tileAddress = (ushort)(backgroundMemory + tileRow + tileCol);
-                int tileNum;
-
-                if (unsigned)
-                {
-                    tileNum = _memory.ReadByte(tileAddress);
-                }
-                else
-                {
-                    tileNum = (sbyte)_memory.ReadByte(tileAddress);
-                }
-
-
-                if (unsigned)
-                {
-                    tileLocation += (ushort)(tileNum * 16);
-                }
-                else
-                {
-                    tileLocation += (ushort)((tileNum + 128) * 16);
-                }
-
-                byte line = (byte)(yPos % 8);
-                line *= 2;
-
-                byte data1 = _memory.ReadByte((ushort)(tileLocation + line));
-                byte data2 = _memory.ReadByte((ushort)(tileLocation + line + 1));
-
-                int colorBit = xPos % 8;
-                colorBit -= 7;
-                colorBit *= -1;
-
-                int colorNum = 0;
-                colorNum |= data2.TestBit(colorBit) ? 1 : 0;
-                colorNum <<= 1;
-                colorNum |= data1.TestBit(colorBit) ? 1 : 0;
-
-                Color color = GetColor((byte)colorNum, 0xFF47);
-
-                int red = 0;
-                int green = 0;
-                int blue = 0;
-
-                switch (color)
-                {
-                    case Color color1 when color1.R == Color.White.R && color1.G == Color.White.G && color1.B == Color.White.B:
-                        red = 255;
-                        green = 255;
-                        blue = 255;
-                        break;
-                    case Color color2 when color2.R == Color.LightGray.R && color2.G == Color.LightGray.G && color2.B == Color.LightGray.B:
-                        red = 0xCC;
-                        green = 0xCC;
-                        blue = 0xCC;
-                        break;
-                    case Color color3 when color3.R == Color.DarkGray.R && color3.G == Color.DarkGray.G && color3.B == Color.DarkGray.B:
-                        red = 0x77;
-                        green = 0x77;
-                        blue = 0x77;
-                        break;
-                    case Color color4 when color4.R == Color.Black.R && color4.G == Color.Black.G && color4.B == Color.Black.B:
-                        red = 0;
-                        green = 0;
-                        blue = 0;
-                        break;
-                }
-
-                int finalY = _memory.LY;
-
-                if (finalY < 0 || finalY > 143 || pixel < 0 || pixel > 159)
-                {
-                    continue;
-                }
-
-                _display[pixel, finalY, 0] = (byte)red;
-                _display[pixel, finalY, 1] = (byte)green;
-                _display[pixel, finalY, 2] = (byte)blue;
-                _display[pixel, finalY, 3] = 0xFF;
-
-
-                // alternatively, use the colorNum directly in a 160*144 array to represent the pixel
-                // use pixel and finalY to determine the position in the array
-                //_pixels[pixel + finalY * 160] = (byte)colorNum;
-            }
-            _pixels = Flatten(_display);
-        }
-
-        private byte[] Flatten(byte[,,] display)
-        {
-            byte[] pixels = new byte[160 * 144 * 4];
-            int index = 0;
-            for (int y = 0; y < 144; y++)
-            {
-                for (int x = 0; x < 160; x++)
-                {
-                    pixels[index++] = display[x, y, 0];
-                    pixels[index++] = display[x, y, 1];
-                    pixels[index++] = display[x, y, 2];
-                    pixels[index++] = display[x, y, 3];
-                }
-            }
-            return pixels;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private Color GetColor(byte colorNum, ushort address)
-        {
-            byte palette = _memory.ReadByte(address);
-            byte hi = 0;
-            byte lo = 0;
-
-            switch (colorNum)
-            {
-                case 0:
-                    hi = 1;
-                    lo = 0;
-                    break;
-                case 1:
-                    hi = 3;
-                    lo = 2;
-                    break;
-                case 2:
-                    hi = 5;
-                    lo = 4;
-                    break;
-                case 3:
-                    hi = 7;
-                    lo = 6;
-                    break;
-            }
-
-            int color = 0;
-            color |= palette.TestBit(hi) ? 1 : 0;
-            color <<= 1;
-            color |= palette.TestBit(lo) ? 1 : 0;
-
-            switch (color)
-            {
-                case 0:
-                    return Color.White;
-                case 1:
-                    return Color.LightGray;
-                case 2:
-                    return Color.DarkGray;
-                case 3:
-                    return Color.Black;
-            }
-
-            return Color.Black;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void SetLCDStatus()
-        {
-            byte status = _memory.LCDStatus;
-
-            if (!_memory.LCDEnabled)
-            {
-                _scanlineCounter = 456;
-                _memory.LY = 0;
-                status &= 0b1111_1100;
-                status |= 0b01;
-                _memory.LCDStatus = status;
-                return;
-            }
-
-            byte currentLine = _memory.LY;
-            byte currentMode = (byte)(status & 0b11);
-            byte mode;
-            bool reqInt = false;
-
-            if (currentLine >= 144)
-            {
-                mode = 0;
-                status |= 0b01;
-                reqInt = status.TestBit(4);
-            }
-            else
-            {
-                int mode2Bounds = 456 - 80;
-                int mode3Bounds = mode2Bounds - 172;
-
-                if (_scanlineCounter >= mode2Bounds)
-                {
-                    mode = (byte)2;
-                    status |= 0b10;
-                    reqInt = status.TestBit(5);
-                }
-                else if (_scanlineCounter >= mode3Bounds)
-                {
-                    mode = (byte)3;
-                    status |= 0b11;
-                }
-                else
-                {
-                    mode = (byte)0;
-                    status &= 0b1111_1100;
-                    reqInt = status.TestBit(3);
-                }
-            }
-
-            if (reqInt && mode != currentMode)
-            {
-                _memory.IFLCDStat = true;
-                _memory.IF = 0x02;
-            }
-
-            if (_memory.LY == _memory.LYC)
-            {
-                status |= 0b100;
-                if (status.TestBit(6))
-                {
-                    _memory.IFLCDStat = true;
-                    _memory.IF = 0x02;
-                }
-            }
-            else
-            {
-                status &= 0b1111_1011;
-            }
-
-            _memory.LCDStatus = status;
         }
 
         public void LoadRom(string path)

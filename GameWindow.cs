@@ -31,6 +31,8 @@ namespace GBOG
         private string? _loadedRomPath;
         private bool _gameRunning = false;
         private bool _gamePaused = false;
+        private bool _frameAdvanceJustRequested = false;
+        private int _saveStateSlot = 0;
 
         private EventHandler<char>? _serialHandler;
 
@@ -326,7 +328,11 @@ namespace GBOG
             // Emulation shortcuts
             if (ImGui.IsKeyPressed(ImGuiKey.F5))
             {
-                if (_gb != null && _gameRunning && _gamePaused)
+                if (io.KeyShift)
+                {
+                    SaveState();
+                }
+                else if (_gb != null && _gameRunning && _gamePaused)
                 {
                     _gb.Resume();
                     _gamePaused = false;
@@ -347,7 +353,11 @@ namespace GBOG
 
             if (ImGui.IsKeyPressed(ImGuiKey.F6))
             {
-                if (_gb != null && _gameRunning && !_gamePaused)
+                if (io.KeyShift)
+                {
+                    LoadState();
+                }
+                else if (_gb != null && _gameRunning && !_gamePaused)
                 {
                     _gb.Pause();
                     _gamePaused = true;
@@ -359,6 +369,15 @@ namespace GBOG
                 if (_gb != null && _gameRunning)
                 {
                     StopEmulation(clearLoadedRom: false);
+                }
+            }
+
+            if (ImGui.IsKeyPressed(ImGuiKey.F8))
+            {
+                if (_gamePaused)
+                {
+                    _gb?.RequestFrameAdvance();
+                    _frameAdvanceJustRequested = true;
                 }
             }
 
@@ -634,11 +653,42 @@ namespace GBOG
                         _gamePaused = false;
                     }
 
+                    if (ImGui.MenuItem("Frame Advance", "F8", false, _gamePaused))
+                    {
+                        _gb?.RequestFrameAdvance();
+                        _frameAdvanceJustRequested = true;
+                    }
+
                     bool canStop = _gb != null && _gameRunning;
                     if (ImGui.MenuItem("Stop", "F7", false, canStop))
                     {
                         StopEmulation(clearLoadedRom: false);
                     }
+
+                    ImGui.Separator();
+
+                    if (ImGui.BeginMenu("Save State Slot"))
+                    {
+                        for (int i = 0; i <= 9; i++)
+                        {
+                            if (ImGui.MenuItem($"Slot {i}", string.Empty, _saveStateSlot == i))
+                            {
+                                _saveStateSlot = i;
+                            }
+                        }
+                        ImGui.EndMenu();
+                    }
+
+                    bool canSaveLoad = _gb != null;
+                    if (ImGui.MenuItem("Save State", "Shift+F5", false, canSaveLoad))
+                    {
+                        SaveState();
+                    }
+                    if (ImGui.MenuItem("Load State", "Shift+F6", false, canSaveLoad))
+                    {
+                        LoadState();
+                    }
+
                     ImGui.EndMenu();
                 }
 
@@ -722,9 +772,13 @@ namespace GBOG
                 }
             }
 
-            if (_gb != null && _gameRunning && !_gamePaused)
+            if (_gb != null && _gameRunning)
             {
-                UpdateTexture();
+                if (!_gamePaused || (_gb.IsPaused && _frameAdvanceJustRequested))
+                {
+                    UpdateTexture();
+                    _frameAdvanceJustRequested = false;
+                }
             }
 
             {
@@ -1587,6 +1641,76 @@ namespace GBOG
             {
                 return false;
             }
+        }
+
+        private void SaveState()
+        {
+            if (_gb == null || string.IsNullOrWhiteSpace(_loadedRomPath)) return;
+
+            bool wasRunning = _gameRunning && !_gamePaused;
+            if (wasRunning)
+            {
+                _gb.Pause();
+                _gb.WaitForPause();
+            }
+
+            string path = GetSaveStatePath(_saveStateSlot);
+            try
+            {
+                using var stream = File.Create(path);
+                using var writer = new BinaryWriter(stream);
+                _gb.SaveState(writer);
+                Console.WriteLine($"Saved state to {path}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to save state: {ex.Message}");
+            }
+            finally
+            {
+                if (wasRunning) _gb.Resume();
+            }
+        }
+
+        private void LoadState()
+        {
+            if (_gb == null || string.IsNullOrWhiteSpace(_loadedRomPath)) return;
+
+            string path = GetSaveStatePath(_saveStateSlot);
+            if (!File.Exists(path))
+            {
+                Console.WriteLine($"Save state file not found: {path}");
+                return;
+            }
+
+            bool wasRunning = _gameRunning && !_gamePaused;
+            if (wasRunning)
+            {
+                _gb.Pause();
+                _gb.WaitForPause();
+            }
+
+            try
+            {
+                using var stream = File.OpenRead(path);
+                using var reader = new BinaryReader(stream);
+                _gb.LoadState(reader);
+                Console.WriteLine($"Loaded state from {path}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to load state: {ex.Message}");
+            }
+            finally
+            {
+                if (wasRunning) _gb.Resume();
+            }
+        }
+
+        private string GetSaveStatePath(int slot)
+        {
+            if (string.IsNullOrWhiteSpace(_loadedRomPath)) return string.Empty;
+            return Path.ChangeExtension(_loadedRomPath, $".s{slot}");
         }
 
         private void LoadRomCallback(object? sender, DialogResult result)

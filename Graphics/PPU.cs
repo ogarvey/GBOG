@@ -1,5 +1,6 @@
 ﻿using GBOG.CPU;
 using GBOG.Utils;
+using System.IO;
 
 namespace GBOG.Graphics
 {
@@ -28,6 +29,45 @@ namespace GBOG.Graphics
 			Screen = new Screen();
 			Scanline = 0;
 			_scanlineCounter = 456;
+		}
+
+		public void SaveState(BinaryWriter writer)
+		{
+			writer.Write(_scanlineCounter);
+			writer.Write(Scanline);
+			writer.Write(WindowScanline);
+			writer.Write(VideoRam.Length);
+			writer.Write(VideoRam);
+			writer.Write(OAM.Length);
+			writer.Write(OAM);
+			writer.Write(_prevMode);
+			writer.Write(_prevCoincidence);
+
+			// Save Screen state
+			writer.Write(Screen.GetFrontPixels().Length);
+			writer.Write(Screen.GetFrontPixels());
+			writer.Write(Screen.GetBackPixels().Length);
+			writer.Write(Screen.GetBackPixels());
+		}
+
+		public void LoadState(BinaryReader reader)
+		{
+			_scanlineCounter = reader.ReadInt32();
+			Scanline = reader.ReadInt32();
+			WindowScanline = reader.ReadInt32();
+			int vramLen = reader.ReadInt32();
+			VideoRam = reader.ReadBytes(vramLen);
+			int oamLen = reader.ReadInt32();
+			OAM = reader.ReadBytes(oamLen);
+			_prevMode = reader.ReadInt32();
+			_prevCoincidence = reader.ReadBoolean();
+
+			// Load Screen state
+			int frontLen = reader.ReadInt32();
+			byte[] front = reader.ReadBytes(frontLen);
+			int backLen = reader.ReadInt32();
+			byte[] back = reader.ReadBytes(backLen);
+			Screen.SetPixels(front, back);
 		}
 
 		internal int GetOamScanRowForCurrentMCycle()

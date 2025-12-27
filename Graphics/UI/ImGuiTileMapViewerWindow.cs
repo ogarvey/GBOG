@@ -60,6 +60,9 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
   private TileMapSelectMode _bgMapSelectMode = TileMapSelectMode.FollowLcdc;
 
+  private int _cgbTileAtlasPaletteIndex = 0; // For CGB: which palette to display (0-7)
+  private bool _cgbTileAtlasPaletteIsObj = false; // For CGB: whether to use BG or OBJ palettes
+
   public bool AutoRefresh { get; set; } = true;
 
   private bool _inspectShowGrid = true;
@@ -115,6 +118,10 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     // CGB fields (ignored on DMG)
     public int CgbPalette;
     public int VramBank;
+
+    // Screen position of the 8x8 tile region to export (top-left corner)
+    public int ScreenX;
+    public int ScreenY;
   }
 
   public void InvalidateAll()
@@ -189,6 +196,26 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     {
       TreatColor0AsTransparent = ci0Transparent;
       InvalidateAll();
+    }
+
+    if (gb._memory.IsCgb)
+    {
+      ImGui.SameLine();
+      bool isObj = _cgbTileAtlasPaletteIsObj;
+      if (ImGui.Checkbox("OBJ Pal", ref isObj))
+      {
+        _cgbTileAtlasPaletteIsObj = isObj;
+        _tileDataAtlasValid = false;
+      }
+
+      ImGui.SameLine();
+      int paletteIndex = _cgbTileAtlasPaletteIndex;
+      string label = _cgbTileAtlasPaletteIsObj ? "OBJ Pal##atlas" : "BG Pal##atlas";
+      if (ImGui.SliderInt(label, ref paletteIndex, 0, 7))
+      {
+        _cgbTileAtlasPaletteIndex = paletteIndex;
+        _tileDataAtlasValid = false;
+      }
     }
 
     ImGui.SameLine();
@@ -714,7 +741,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
     var map = gb._memory.GetTileMap(mapBase);
 
-    gb._memory.GetVideoDebugSnapshot(out _, out var bgPalRam, out _, out _);
+    gb._memory.GetVideoDebugSnapshot(out _, out var bgPalRam, out _, out _, out _);
     var rgba = isCgb
       ? RenderCgbTileMapToRgba(map, gb._memory.GetCgbTileMapAttributes(mapBase), tileData, tileData1, useSignedTileNumbers, treatCi0Transparent, bgPalRam)
       : RenderTileMapToRgba(map, tileData, useSignedTileNumbers, palette, treatCi0Transparent, applyBgpShading, bgp);
@@ -734,7 +761,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     }
 
     bool isCgb = gb._memory.IsCgb;
-    gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPal, out _);
+    gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPal, out _, out _);
     var tileData = new byte[0x1800];
     Array.Copy(vram, 0x0000, tileData, 0, 0x1800);
     var tileData1 = isCgb ? new byte[0x1800] : Array.Empty<byte>();
@@ -765,42 +792,52 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     }
 
     bool isCgb = gb._memory.IsCgb;
-    gb._memory.GetVideoDebugSnapshot(out _, out _, out var objPalRam, out _);
-    var tileData0 = gb._memory.GetTileDataBank(0);
-    var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
-    var tileData = isCgb && info.VramBank != 0 ? tileData1 : tileData0;
-    int tileIndex = Math.Clamp(info.TileIndex, 0, 255);
-    int baseAddr = tileIndex * 16;
+    // Get the snapshot once to ensure consistency between tile data and palette
+    gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPalRam, out var oam, out _);
+    
+    var tileData0 = new byte[0x1800];
+    Array.Copy(vram, 0x0000, tileData0, 0, 0x1800);
+    
+    var tileData1 = isCgb ? new byte[0x1800] : Array.Empty<byte>();
+    if (isCgb)
+    {
+      Array.Copy(vram, 0x2000, tileData1, 0, 0x1800);
+    }
+    
+    // Render the full sprite layer using the same logic as the sprite viewer.
+    // This ensures we get exactly what's displayed, including overlapping sprites.
+    bool use8x16 = gb._memory.OBJSize;
+    byte obp0 = gb._memory.OBP0;
+    byte obp1 = gb._memory.OBP1;
+    
+    var spriteLayerRgba = isCgb
+      ? RenderCgbSpriteLayerToRgba(oam, tileData0, tileData1, use8x16, objPalRam)
+      : RenderSpriteLayerToRgba(oam, tileData0, use8x16, palette, obp0, obp1);
 
+    // Extract the 8x8 region at the sprite tile's screen position
     using var image = new Image<Rgba32>(8, 8);
     for (int y = 0; y < 8; y++)
     {
-      int srcY = info.YFlip ? (7 - y) : y;
-      int rowIndex = baseAddr + (srcY * 2);
-      byte b1 = (uint)rowIndex < (uint)tileData.Length ? tileData[rowIndex] : (byte)0;
-      byte b2 = (uint)(rowIndex + 1) < (uint)tileData.Length ? tileData[rowIndex + 1] : (byte)0;
-
+      int srcY = info.ScreenY + y;
+      if ((uint)srcY >= (uint)ScreenHeight)
+      {
+        continue;
+      }
+      
       for (int x = 0; x < 8; x++)
       {
-        int srcX = info.XFlip ? (7 - x) : x;
-        int bit = 7 - srcX;
-        int colorIndex = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
-        if (colorIndex == 0)
+        int srcX = info.ScreenX + x;
+        if ((uint)srcX >= (uint)ScreenWidth)
         {
-          image[x, y] = new Rgba32(0, 0, 0, 0);
           continue;
         }
-
-        if (isCgb)
-        {
-          var c = GBMemory.DecodeCgbPaletteColorFromRam(objPalRam, info.CgbPalette, colorIndex);
-          image[x, y] = ToRgba32(c, transparent: false);
-        }
-        else
-        {
-          int shadeIndex = MapDmgPaletteToShade(info.DmgPalette, colorIndex);
-          image[x, y] = ToRgba32(palette, shadeIndex, transparent: false);
-        }
+        
+        int srcIdx = (srcY * ScreenWidth + srcX) * 4;
+        image[x, y] = new Rgba32(
+          spriteLayerRgba[srcIdx + 0],
+          spriteLayerRgba[srcIdx + 1],
+          spriteLayerRgba[srcIdx + 2],
+          spriteLayerRgba[srcIdx + 3]);
       }
     }
 
@@ -849,20 +886,31 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     try
     {
       bool isCgb = gb._memory.IsCgb;
-      var oam = gb._memory.OAMRam;
-      var tileData0 = gb._memory.GetTileDataBank(0);
-      var tileData1 = isCgb ? gb._memory.GetTileDataBank(1) : Array.Empty<byte>();
+      // Use snapshot data to ensure consistency between OAM, tile data, and palettes
+      gb._memory.GetVideoDebugSnapshot(out var vram, out _, out _, out var oam, out _);
+      
+      var tileData0 = new byte[0x1800];
+      Array.Copy(vram, 0x0000, tileData0, 0, 0x1800);
+      
+      var tileData1 = isCgb ? new byte[0x1800] : Array.Empty<byte>();
+      if (isCgb)
+      {
+        Array.Copy(vram, 0x2000, tileData1, 0, 0x1800);
+      }
+      
       bool use8x16 = gb._memory.OBJSize;
       int spriteHeight = use8x16 ? 16 : 8;
       byte obp0 = gb._memory.OBP0;
       byte obp1 = gb._memory.OBP1;
 
-      for (int spriteIndex = 0; spriteIndex < 40; spriteIndex++)
+      // Iterate in reverse (39 to 0) to find the topmost sprite, matching RenderCgbSpriteLayerToRgba order.
+      // Lower OAM indices are drawn last (on top).
+      for (int spriteIndex = 39; spriteIndex >= 0; spriteIndex--)
       {
         int baseAddr = spriteIndex * 4;
         if (baseAddr + 3 >= oam.Length)
         {
-          break;
+          continue;
         }
 
         int y = oam[baseAddr + 0] - 16;
@@ -917,6 +965,9 @@ public sealed unsafe class ImGuiTileMapViewerWindow
           DmgPalette = dmgPal,
           CgbPalette = cgbPal,
           VramBank = vramBank,
+          // Store the screen position of the 8x8 tile (not the click position)
+          ScreenX = x,
+          ScreenY = use8x16 ? (y + (localY >= 8 ? 8 : 0)) : y,
         };
         return true;
       }
@@ -1113,7 +1164,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
     if (gb._memory.IsCgb)
     {
-      gb._memory.GetVideoDebugSnapshot(out _, out var bgPalRam, out _, out var lcdc);
+      gb._memory.GetVideoDebugSnapshot(out _, out var bgPalRam, out _, out _, out var lcdc);
       useSignedTileNumbers = (lcdc & 0x10) == 0;
       var attrMap = gb._memory.GetCgbTileMapAttributes(mapBase);
       byte attr = (uint)mapIndex < (uint)attrMap.Length ? attrMap[mapIndex] : (byte)0;
@@ -1235,7 +1286,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         return;
       }
 
-      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out _, out _);
+      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out var objPal, out _, out _);
       _tileAtlasSnapshotVersion = snapVer;
 
       // Tile pattern data is 0x8000-0x97FF (384 tiles) per VRAM bank.
@@ -1297,8 +1348,11 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
             if (isCgb)
             {
-              // In CGB mode, colorize using BG palette 0 from the per-frame snapshot.
-              var c = GBOG.Memory.GBMemory.DecodeCgbPaletteColorFromRam(bgPal, 0, ci);
+              // In CGB mode, colorize using the selected palette from the per-frame snapshot.
+              // Clamp the palette index to valid range (0-7).
+              int palIndex = Math.Max(0, Math.Min(7, _cgbTileAtlasPaletteIndex));
+              byte[] activePal = _cgbTileAtlasPaletteIsObj ? objPal : bgPal;
+              var c = GBOG.Memory.GBMemory.DecodeCgbPaletteColorFromRam(activePal, palIndex, ci);
               var px = ToRgba32(c, transparent);
               rgba[dst + 0] = px.R;
               rgba[dst + 1] = px.G;
@@ -1356,7 +1410,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         return;
       }
 
-      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out _, out var lcdc);
+      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out _, out _, out var lcdc);
       _tileMapsSnapshotVersion = snapVer;
 
       var tileData = new byte[0x1800];
@@ -1444,7 +1498,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         return;
       }
 
-      gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPal, out _);
+      gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPal, out _, out _);
       _spriteLayerSnapshotVersion = snapVer;
 
       var tileData = new byte[0x1800];
