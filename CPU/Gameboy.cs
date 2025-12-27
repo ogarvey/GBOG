@@ -775,11 +775,6 @@ namespace GBOG.CPU
             }
         }
 
-        private void UpdateApu(int baseCycles)
-        {
-            Apu.Step(baseCycles);
-        }
-
         internal void AdvanceCpuCyclesWithinMCycle(int targetCpuCycle)
         {
             // Advance time within the current M-cycle up to the given t-cycle (0..4).
