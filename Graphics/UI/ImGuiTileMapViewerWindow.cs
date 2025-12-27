@@ -49,6 +49,10 @@ public sealed unsafe class ImGuiTileMapViewerWindow
   private int _tileMapsSnapshotVersion;
   private int _spriteLayerSnapshotVersion;
 
+  private byte[]? _cgbTileAtlasGuessedPalettes;
+  private bool[]? _cgbTileAtlasGuessedIsObj;
+  private bool[]? _cgbTileAtlasTileFound;
+
   private Gameboy? _lastGbForInspectors;
 
   private enum TileMapSelectMode
@@ -62,6 +66,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
   private int _cgbTileAtlasPaletteIndex = 0; // For CGB: which palette to display (0-7)
   private bool _cgbTileAtlasPaletteIsObj = false; // For CGB: whether to use BG or OBJ palettes
+  private bool _cgbTileAtlasAutoPalette = true; // For CGB: try to pick the "correct" palette for each tile
 
   public bool AutoRefresh { get; set; } = true;
 
@@ -118,6 +123,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     // CGB fields (ignored on DMG)
     public int CgbPalette;
     public int VramBank;
+    public bool IsObj;
 
     // Screen position of the 8x8 tile region to export (top-left corner)
     public int ScreenX;
@@ -201,20 +207,31 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     if (gb._memory.IsCgb)
     {
       ImGui.SameLine();
-      bool isObj = _cgbTileAtlasPaletteIsObj;
-      if (ImGui.Checkbox("OBJ Pal", ref isObj))
+      bool autoPal = _cgbTileAtlasAutoPalette;
+      if (ImGui.Checkbox("Auto Pal", ref autoPal))
       {
-        _cgbTileAtlasPaletteIsObj = isObj;
+        _cgbTileAtlasAutoPalette = autoPal;
         _tileDataAtlasValid = false;
       }
 
-      ImGui.SameLine();
-      int paletteIndex = _cgbTileAtlasPaletteIndex;
-      string label = _cgbTileAtlasPaletteIsObj ? "OBJ Pal##atlas" : "BG Pal##atlas";
-      if (ImGui.SliderInt(label, ref paletteIndex, 0, 7))
+      if (!_cgbTileAtlasAutoPalette)
       {
-        _cgbTileAtlasPaletteIndex = paletteIndex;
-        _tileDataAtlasValid = false;
+        ImGui.SameLine();
+        bool isObj = _cgbTileAtlasPaletteIsObj;
+        if (ImGui.Checkbox("OBJ Pal", ref isObj))
+        {
+          _cgbTileAtlasPaletteIsObj = isObj;
+          _tileDataAtlasValid = false;
+        }
+
+        ImGui.SameLine();
+        int paletteIndex = _cgbTileAtlasPaletteIndex;
+        string label = _cgbTileAtlasPaletteIsObj ? "OBJ Pal##atlas" : "BG Pal##atlas";
+        if (ImGui.SliderInt(label, ref paletteIndex, 0, 7))
+        {
+          _cgbTileAtlasPaletteIndex = paletteIndex;
+          _tileDataAtlasValid = false;
+        }
       }
     }
 
@@ -378,6 +395,11 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         float w = MathF.Max(1f, avail.X);
         float h = w / atlasAspect;
         ImGui.Image(new ImTextureRef(null, _tileDataTextureId), new Vector2(w, h));
+
+        if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+        {
+          TryStartAtlasTileExportAtMouse(gb, displayPalette, settings, saveSettings);
+        }
       }
 
       ImGui.TableNextColumn();
@@ -793,7 +815,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
 
     bool isCgb = gb._memory.IsCgb;
     // Get the snapshot once to ensure consistency between tile data and palette
-    gb._memory.GetVideoDebugSnapshot(out var vram, out _, out var objPalRam, out var oam, out _);
+    gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPalRam, out var objPalRam, out var oam, out _);
     
     var tileData0 = new byte[0x1800];
     Array.Copy(vram, 0x0000, tileData0, 0, 0x1800);
@@ -802,6 +824,40 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     if (isCgb)
     {
       Array.Copy(vram, 0x2000, tileData1, 0, 0x1800);
+    }
+
+    if (info.SpriteIndex == -1)
+    {
+      // Export single tile from atlas using the provided palette info
+      using var tileImage = new Image<Rgba32>(8, 8);
+      var bankData = info.VramBank == 0 ? tileData0 : tileData1;
+      var tiles = GraphicUtils.ConvertGBTileData(bankData);
+      if (info.TileIndex < 0 || info.TileIndex >= tiles.Count) return;
+      
+      var src = tiles[info.TileIndex];
+      for (int y = 0; y < 8; y++)
+      {
+        for (int x = 0; x < 8; x++)
+        {
+          byte ci = src[y * 8 + x];
+          // For atlas export, we usually don't want transparency unless it's explicitly requested.
+          // But here we'll follow the TreatColor0AsTransparent setting for consistency.
+          bool transparent = false; 
+          
+          if (isCgb)
+          {
+            var activePal = info.IsObj ? objPalRam : bgPalRam;
+            var c = GBOG.Memory.GBMemory.DecodeCgbPaletteColorFromRam(activePal, info.CgbPalette, ci);
+            tileImage[x, y] = ToRgba32(c, transparent);
+          }
+          else
+          {
+            tileImage[x, y] = ToRgba32(palette, MapDmgPaletteToShade(info.DmgPalette, ci), transparent);
+          }
+        }
+      }
+      tileImage.Save(path);
+      return;
     }
     
     // Render the full sprite layer using the same logic as the sprite viewer.
@@ -842,6 +898,78 @@ public sealed unsafe class ImGuiTileMapViewerWindow
     }
 
     image.Save(path);
+  }
+
+  private void TryStartAtlasTileExportAtMouse(Gameboy gb, DisplayPalette palette, AppSettings settings, Action saveSettings)
+  {
+    try
+    {
+      var mousePos = ImGui.GetMousePos();
+      var itemPos = ImGui.GetItemRectMin();
+      var itemSize = ImGui.GetItemRectSize();
+
+      float relX = (mousePos.X - itemPos.X) / itemSize.X;
+      float relY = (mousePos.Y - itemPos.Y) / itemSize.Y;
+
+      const int tilesPerRow = 16;
+      int rows = (_tileDataAtlasHeight / 8);
+      int tx = (int)(relX * tilesPerRow);
+      int ty = (int)(relY * rows);
+      int tileIdx = ty * tilesPerRow + tx;
+
+      if (tileIdx < 0 || tileIdx >= 768) return;
+
+      int vramBank = tileIdx >= 384 ? 1 : 0;
+      int localTileIdx = tileIdx % 384;
+
+      int cgbPal = 0;
+      bool isObj = false;
+      if (gb._memory.IsCgb)
+      {
+        if (_cgbTileAtlasAutoPalette && _cgbTileAtlasTileFound != null && tileIdx < _cgbTileAtlasTileFound.Length && _cgbTileAtlasTileFound[tileIdx])
+        {
+          cgbPal = _cgbTileAtlasGuessedPalettes![tileIdx];
+          isObj = _cgbTileAtlasGuessedIsObj![tileIdx];
+        }
+        else
+        {
+          cgbPal = _cgbTileAtlasPaletteIndex;
+          isObj = _cgbTileAtlasPaletteIsObj;
+        }
+      }
+      else
+      {
+        // DMG: use BGP for atlas by default
+        isObj = false;
+      }
+
+      var info = new SpriteTileExportInfo
+      {
+        SpriteIndex = -1, // Indicates from atlas
+        TileIndex = localTileIdx,
+        VramBank = vramBank,
+        IsObj = isObj,
+        CgbPalette = cgbPal,
+        DmgPalette = isObj ? gb._memory.OBP0 : gb._memory.BGP,
+        XFlip = false,
+        YFlip = false,
+        ScreenX = 0,
+        ScreenY = 0
+      };
+
+      ApplyExportDirectoryToDialogs(settings.LastExportDirectory);
+      _exportGb = gb;
+      _exportPalette = palette;
+      _exportRequest = ExportRequest.SpriteTileToFile;
+      _exportSettings = settings;
+      _exportSaveSettings = saveSettings;
+      _spriteTileExport = info;
+      _exportSpriteTileDialog.Show(ExportDialogCallback);
+    }
+    catch
+    {
+      // ignore
+    }
   }
 
   private void TryStartSpriteTileExportAtMouse(Gameboy gb, DisplayPalette palette, AppSettings settings, Action saveSettings)
@@ -965,6 +1093,7 @@ public sealed unsafe class ImGuiTileMapViewerWindow
           DmgPalette = dmgPal,
           CgbPalette = cgbPal,
           VramBank = vramBank,
+          IsObj = true,
           // Store the screen position of the 8x8 tile (not the click position)
           ScreenX = x,
           ScreenY = use8x16 ? (y + (localY >= 8 ? 8 : 0)) : y,
@@ -1286,8 +1415,84 @@ public sealed unsafe class ImGuiTileMapViewerWindow
         return;
       }
 
-      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out var objPal, out _, out _);
+      gb._memory.GetVideoDebugSnapshot(out var vram, out var bgPal, out var objPal, out var oam, out byte lcdc);
       _tileAtlasSnapshotVersion = snapVer;
+
+      if (isCgb && _cgbTileAtlasAutoPalette)
+      {
+        _cgbTileAtlasGuessedPalettes = new byte[768];
+        _cgbTileAtlasGuessedIsObj = new bool[768];
+        _cgbTileAtlasTileFound = new bool[768];
+
+        // Scan OAM first so BG can overwrite it (prefer BG)
+        bool use8x16 = (lcdc & 0x04) != 0;
+        for (int i = 0; i < 40; i++)
+        {
+          int baseAddr = i * 4;
+          byte tileId = oam[baseAddr + 2];
+          byte attr = oam[baseAddr + 3];
+          int bank = (attr & 0x08) != 0 ? 1 : 0;
+          int pal = attr & 0x07;
+
+          if (use8x16)
+          {
+            int idx0 = bank * 384 + (tileId & 0xFE);
+            int idx1 = bank * 384 + (tileId | 0x01);
+            _cgbTileAtlasGuessedPalettes[idx0] = (byte)pal;
+            _cgbTileAtlasGuessedIsObj[idx0] = true;
+            _cgbTileAtlasTileFound[idx0] = true;
+            _cgbTileAtlasGuessedPalettes[idx1] = (byte)pal;
+            _cgbTileAtlasGuessedIsObj[idx1] = true;
+            _cgbTileAtlasTileFound[idx1] = true;
+          }
+          else
+          {
+            int idx = bank * 384 + tileId;
+            _cgbTileAtlasGuessedPalettes[idx] = (byte)pal;
+            _cgbTileAtlasGuessedIsObj[idx] = true;
+            _cgbTileAtlasTileFound[idx] = true;
+          }
+        }
+
+        // Scan BG maps (prefer BG)
+        bool useSignedTileNumbers = (lcdc & 0x10) == 0;
+        for (int mapIdx = 0; mapIdx < 0x400; mapIdx++)
+        {
+          // Map 0 (0x9800)
+          byte tileId0 = vram[0x1800 + mapIdx];
+          byte attr0 = vram[0x3800 + mapIdx];
+          int bank0 = (attr0 & 0x08) != 0 ? 1 : 0;
+          int pal0 = attr0 & 0x07;
+          int tileIndex0 = GetTileOffset(tileId0, useSignedTileNumbers) / 16;
+          if ((uint)tileIndex0 < 384)
+          {
+            int idx0 = bank0 * 384 + tileIndex0;
+            _cgbTileAtlasGuessedPalettes[idx0] = (byte)pal0;
+            _cgbTileAtlasGuessedIsObj[idx0] = false;
+            _cgbTileAtlasTileFound[idx0] = true;
+          }
+
+          // Map 1 (0x9C00)
+          byte tileId1 = vram[0x1C00 + mapIdx];
+          byte attr1 = vram[0x3C00 + mapIdx];
+          int bank1 = (attr1 & 0x08) != 0 ? 1 : 0;
+          int pal1 = attr1 & 0x07;
+          int tileIndex1 = GetTileOffset(tileId1, useSignedTileNumbers) / 16;
+          if ((uint)tileIndex1 < 384)
+          {
+            int idx1 = bank1 * 384 + tileIndex1;
+            _cgbTileAtlasGuessedPalettes[idx1] = (byte)pal1;
+            _cgbTileAtlasGuessedIsObj[idx1] = false;
+            _cgbTileAtlasTileFound[idx1] = true;
+          }
+        }
+      }
+      else
+      {
+        _cgbTileAtlasGuessedPalettes = null;
+        _cgbTileAtlasGuessedIsObj = null;
+        _cgbTileAtlasTileFound = null;
+      }
 
       // Tile pattern data is 0x8000-0x97FF (384 tiles) per VRAM bank.
       var tileData0 = new byte[0x1800];
@@ -1349,9 +1554,21 @@ public sealed unsafe class ImGuiTileMapViewerWindow
             if (isCgb)
             {
               // In CGB mode, colorize using the selected palette from the per-frame snapshot.
-              // Clamp the palette index to valid range (0-7).
-              int palIndex = Math.Max(0, Math.Min(7, _cgbTileAtlasPaletteIndex));
-              byte[] activePal = _cgbTileAtlasPaletteIsObj ? objPal : bgPal;
+              int palIndex;
+              byte[] activePal;
+
+              if (_cgbTileAtlasAutoPalette && _cgbTileAtlasTileFound != null && (uint)i < (uint)_cgbTileAtlasTileFound.Length && _cgbTileAtlasTileFound[i])
+              {
+                palIndex = _cgbTileAtlasGuessedPalettes![i];
+                activePal = _cgbTileAtlasGuessedIsObj![i] ? objPal : bgPal;
+              }
+              else
+              {
+                // Clamp the palette index to valid range (0-7).
+                palIndex = Math.Max(0, Math.Min(7, _cgbTileAtlasPaletteIndex));
+                activePal = _cgbTileAtlasPaletteIsObj ? objPal : bgPal;
+              }
+
               var c = GBOG.Memory.GBMemory.DecodeCgbPaletteColorFromRam(activePal, palIndex, ci);
               var px = ToRgba32(c, transparent);
               rgba[dst + 0] = px.R;

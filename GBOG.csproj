@@ -39,10 +39,5 @@
 		<Folder Include="Timer\" />
 	</ItemGroup>
 
-	<ItemGroup>
-		<None Update="Resources\gb-tileset.png">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-		</None>
-	</ItemGroup>
 
 </Project>
