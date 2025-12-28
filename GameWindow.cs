@@ -86,11 +86,15 @@ namespace GBOG
         private bool _showMemoryViewerWindow;
         private bool _showTileDataViewerWindow;
         private bool _showJoypadMacroWindow;
+        private bool _showLibraryWindow;
+        private bool _showSettingsWindow;
 
         private string _macroText = string.Empty;
         private string _macroError = string.Empty;
 
         private readonly ImGuiTileMapViewerWindow _tileViewer = new();
+        private Library.LibraryManager _libraryManager = null!;
+        private Library.LibraryWindow _libraryWindow = null!;
 
         private sealed class MemoryRegion
         {
@@ -196,6 +200,9 @@ namespace GBOG
             _fileOpenDialog = new FileOpenDialog();
             ApplySettingsToFileDialog();
             EnsureMemoryViewerStates();
+
+            _libraryManager = new Library.LibraryManager(_settings);
+            _libraryWindow = new Library.LibraryWindow(_libraryManager, _gl);
 
             while (GLFW.WindowShouldClose(_window) == 0)
             {
@@ -564,6 +571,10 @@ namespace GBOG
                         ApplySettingsToFileDialog();
                         _fileOpenDialog.Show(LoadRomCallback);
                     }
+                    if (ImGui.MenuItem("Settings"))
+                    {
+                        _showSettingsWindow = true;
+                    }
                     if (ImGui.MenuItem("Exit"))
                     {
                         GLFW.SetWindowShouldClose(_window, 1);
@@ -594,6 +605,11 @@ namespace GBOG
                     if (ImGui.MenuItem("Joypad Macro", string.Empty, _showJoypadMacroWindow, true))
                     {
                         _showJoypadMacroWindow = !_showJoypadMacroWindow;
+                    }
+
+                    if (ImGui.MenuItem("Game Library", string.Empty, _showLibraryWindow, true))
+                    {
+                        _showLibraryWindow = !_showLibraryWindow;
                     }
 
                     ImGui.Separator();
@@ -804,6 +820,21 @@ namespace GBOG
             RenderMemoryViewerWindow();
             RenderTileDataViewerWindow();
             RenderJoypadMacroWindow();
+            RenderSettingsWindow();
+            _libraryWindow.Render(ref _showLibraryWindow, path =>
+            {
+                _loadedRomPath = path;
+                _loadedRomName = Path.GetFileName(path);
+                EnsureGameboyLoaded();
+                if (_gb != null)
+                {
+                    _gb.ConfigureAudioOutput(_audioEnabled);
+                    _gb.SetAudioVolume(_audioVolume);
+                    _ = _gb.RunGame();
+                    _gameRunning = true;
+                    _gamePaused = false;
+                }
+            });
         }
 
         private void RenderPaletteMenu()
@@ -914,6 +945,49 @@ namespace GBOG
                 B = (byte)((rgba >> 16) & 0xFF),
                 A = (byte)((rgba >> 24) & 0xFF),
             };
+        }
+
+        private void RenderSettingsWindow()
+        {
+            if (!_showSettingsWindow) return;
+
+            if (ImGui.Begin("Settings", ref _showSettingsWindow))
+            {
+                bool changed = false;
+
+                string gameFolder = _settings.GameFolderPath ?? string.Empty;
+                if (ImGui.InputText("Game Folder Path", ref gameFolder, 512))
+                {
+                    _settings.GameFolderPath = gameFolder;
+                    changed = true;
+                }
+
+                string clientId = _settings.IgdbClientId ?? string.Empty;
+                if (ImGui.InputText("IGDB Client ID", ref clientId, 128))
+                {
+                    _settings.IgdbClientId = clientId;
+                    changed = true;
+                }
+
+                string clientSecret = _settings.IgdbClientSecret ?? string.Empty;
+                if (ImGui.InputText("IGDB Client Secret", ref clientSecret, 128, ImGuiInputTextFlags.Password))
+                {
+                    _settings.IgdbClientSecret = clientSecret;
+                    changed = true;
+                }
+
+                if (changed)
+                {
+                    SaveSettings();
+                    _libraryManager.ResetClient();
+                }
+
+                if (ImGui.Button("Close"))
+                {
+                    _showSettingsWindow = false;
+                }
+            }
+            ImGui.End();
         }
 
         private void RenderTileDataViewerWindow()

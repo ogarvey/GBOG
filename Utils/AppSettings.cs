@@ -35,6 +35,10 @@ public sealed class AppSettings
     public int WindowWidth { get; set; } = 1280;
     public int WindowHeight { get; set; } = 720;
 
+    public string? GameFolderPath { get; set; }
+    public string? IgdbClientId { get; set; }
+    public string? IgdbClientSecret { get; set; }
+
     // ImGuiTexInspect options (debug viewer)
     public bool InspectorShowGrid { get; set; } = true;
     public bool InspectorShowTooltip { get; set; } = true;
