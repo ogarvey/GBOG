@@ -72,17 +72,33 @@ namespace GBOG.Memory
 
 		public void MarkVideoDebugDirty(VideoDebugDirtyFlags flags)
 		{
-			System.Threading.Interlocked.Or(ref _videoDebugDirty, (int)flags);
+			Interlocked.Or(ref _videoDebugDirty, (int)flags);
 		}
 
 		public VideoDebugDirtyFlags ConsumeVideoDebugDirty()
 		{
-			int v = System.Threading.Interlocked.Exchange(ref _videoDebugDirty, 0);
+			int v = Interlocked.Exchange(ref _videoDebugDirty, 0);
 			return (VideoDebugDirtyFlags)v;
 		}
 
 		public bool HasBatteryBackedSave => _hasBatteryBackedSave;
 		public bool HasMbc3Rtc => _mbc3HasTimer;
+
+		public string MbcType
+		{
+			get
+			{
+				if (_mbc1m) return "MBC1M";
+				if (_mbc1) return "MBC1";
+				if (_mbc2) return "MBC2";
+				if (_mbc3) return "MBC3" + (_mbc3HasTimer ? "+RTC" : "");
+				if (_mbc5) return "MBC5" + (_mbc5HasRumble ? "+Rumble" : "");
+				if (_cartType == 0 || _cartType == 8 || _cartType == 9) return "ROM Only";
+				return $"Unknown (0x{_cartType:X2})";
+			}
+		}
+
+		public int RomSize => _cartRom?.Length ?? 0;
 
 		/// <summary>
 		/// True when the loaded cartridge both has a battery and declares SRAM.
@@ -362,11 +378,11 @@ namespace GBOG.Memory
 				return;
 			}
 
-			uint timeS = (uint)((byte)_mbc3RtcSeconds);
-			uint timeM = (uint)((byte)_mbc3RtcMinutes);
-			uint timeH = (uint)((byte)_mbc3RtcHours);
-			uint timeDL = (uint)((byte)(_mbc3RtcDays & 0xFF));
-			uint timeDH = (uint)Mbc3RtcComposeDH();
+			uint timeS = (byte)_mbc3RtcSeconds;
+			uint timeM = (byte)_mbc3RtcMinutes;
+			uint timeH = (byte)_mbc3RtcHours;
+			uint timeDL = (byte)(_mbc3RtcDays & 0xFF);
+			uint timeDH = Mbc3RtcComposeDH();
 
 			WriteDwordLE(trailer, 0, timeS);
 			WriteDwordLE(trailer, 4, timeM);
@@ -434,7 +450,7 @@ namespace GBOG.Memory
 			const long daysPeriod = 512L;
 			const long periodSeconds = daysPeriod * secondsPerDay;
 
-			long currentTotal = ((long)_mbc3RtcDays * secondsPerDay) + ((long)_mbc3RtcHours * 3600L) + ((long)_mbc3RtcMinutes * 60L) + (long)_mbc3RtcSeconds;
+			long currentTotal = (_mbc3RtcDays * secondsPerDay) + (_mbc3RtcHours * 3600L) + (_mbc3RtcMinutes * 60L) + _mbc3RtcSeconds;
 			long newTotal = currentTotal + deltaSeconds;
 			if (newTotal < 0)
 			{
@@ -620,173 +636,6 @@ namespace GBOG.Memory
 		public int SerialControlWrites => _serialControlWrites;
 		public int SerialTransferStarts => _serialTransferStarts;
 
-		// Rom bank 0
-		// The first 16kB of the ROM are always mapped to the memory address 0x0000 - 0x3FFF.
-		// The first 256 bytes of the ROM are reserved for the interrupt vector.
-		// The next 256 bytes are reserved for the Nintendo logo.
-		// The next 48 bytes are reserved for the title of the game.
-		// The next 2 bytes are reserved for the new license code.
-		// The next byte is reserved for the SGB flag.
-		// The next byte is reserved for the cartridge type.
-		// The next byte is reserved for the ROM size.
-		// The next byte is reserved for the RAM size.
-		// The next byte is reserved for the destination code.
-		// The next byte is reserved for the old license code.
-		// The next byte is reserved for the mask ROM version number.
-		// The next byte is reserved for the header checksum.
-		// The next 2 bytes are reserved for the global checksum.
-		// The next 16kB of the ROM are available for the program.
-		public byte[] RomBank0
-		{
-			get
-			{
-				byte[] romBank0 = new byte[0x4000];
-				Array.Copy(_memory, 0, romBank0, 0, 0x4000);
-				return romBank0;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0, 0x4000);
-			}
-		}
-		// Rom bank 1
-		// The next 16kB of the ROM can be mapped to the memory address 0x4000 - 0x7FFF.
-		public byte[] SwitchableRomBank
-		{
-			get
-			{
-				byte[] romBank1 = new byte[0x4000];
-				Array.Copy(_memory, 0x4000, romBank1, 0, 0x4000);
-				return romBank1;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0x4000, 0x4000);
-			}
-		}
-
-		// Character RAM
-		// The character RAM is used to store the sprites.
-		// The sprites are 8x8 pixels or 8x16 pixels.
-		// The character RAM is mapped to the memory address 0x8000 - 0x97FF.
-		public byte[] CharacterRam
-		{
-			get
-			{
-				byte[] characterRam = new byte[0x1800];
-				Array.Copy(_memory, 0x8000, characterRam, 0, 0x1800);
-				return characterRam;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0x8000, 0x1800);
-			}
-		}
-
-		// BG map data 1
-		// The BG map data 1 is used to store the background map.
-		// The background map is used to display the background.
-		// The background map is mapped to the memory address 0x9800 - 0x9BFF.
-		public byte[] BGMapData1
-		{
-			get
-			{
-				byte[] bgMapData1 = new byte[0x400];
-				Array.Copy(_memory, 0x9800, bgMapData1, 0, 0x400);
-				return bgMapData1;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0x9800, 0x400);
-			}
-		}
-
-		// BG map data 2
-		// The BG map data 2 is used to store the background map.
-		// The background map is used to display the background.
-		// The background map is mapped to the memory address 0x9C00 - 0x9FFF.
-		public byte[] BGMapData2
-		{
-			get
-			{
-				byte[] bgMapData2 = new byte[0x400];
-				Array.Copy(_memory, 0x9C00, bgMapData2, 0, 0x400);
-				return bgMapData2;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0x9C00, 0x400);
-			}
-		}
-
-		// Cartridge RAM
-		// The cartridge RAM is used to store the save data.
-		// The cartridge RAM is mapped to the memory address 0xA000 - 0xBFFF.
-		public byte[] CartridgeRam
-		{
-			get
-			{
-				byte[] cartridgeRam = new byte[0x2000];
-				Array.Copy(_memory, 0xA000, cartridgeRam, 0, 0x2000);
-				return cartridgeRam;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0xA000, 0x2000);
-			}
-		}
-
-		// Internal RAM bank 0
-		// The internal RAM bank 0 is used to store the program and the data.
-		// The internal RAM bank 0 is mapped to the memory address 0xC000 - 0xCFFF.
-		public byte[] InternalRamBank0
-		{
-			get
-			{
-				byte[] internalRamBank0 = new byte[0x1000];
-				Array.Copy(_memory, 0xC000, internalRamBank0, 0, 0x1000);
-				return internalRamBank0;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0xC000, 0x1000);
-			}
-		}
-
-		// Internal RAM bank 1-7
-		// The internal RAM bank 1-7 is used to store the program and the data.
-		// The internal RAM bank 1-7 is mapped to the memory address 0xD000 - 0xDFFF.
-		public byte[] InternalRamBank1To7
-		{
-			get
-			{
-				byte[] internalRamBank1To7 = new byte[0x7000];
-				Array.Copy(_memory, 0xD000, internalRamBank1To7, 0, 0x7000);
-				return internalRamBank1To7;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0xD000, 0x7000);
-			}
-		}
-
-		// Echo RAM
-		// The echo RAM is a copy of the internal RAM.
-		// The echo RAM is mapped to the memory address 0xE000 - 0xFDFF.
-		public byte[] EchoRam
-		{
-			get
-			{
-				byte[] echoRam = new byte[0x1E00];
-				Array.Copy(_memory, 0xE000, echoRam, 0, 0x1E00);
-				return echoRam;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0xE000, 0x1E00);
-			}
-		}
-
 		// OAM (sprite) RAM
 		// The OAM RAM is used to store the sprites.
 		// The sprites are 8x8 pixels or 8x16 pixels.
@@ -802,40 +651,6 @@ namespace GBOG.Memory
 			set
 			{
 				Array.Copy(value, 0, _memory, 0xFE00, 0xA0);
-			}
-		}
-
-		// Unusable RAM
-		// The unusable RAM is not used.
-		// The unusable RAM is mapped to the memory address 0xFEA0 - 0xFEFF.
-		public byte[] UnusableRam
-		{
-			get
-			{
-				byte[] unusableRam = new byte[0x60];
-				Array.Copy(_memory, 0xFEA0, unusableRam, 0, 0x60);
-				return unusableRam;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0xFEA0, 0x60);
-			}
-		}
-
-		// I/O Registers
-		// The I/O registers are used to control the GameBoy.
-		// The I/O registers are mapped to the memory address 0xFF00 - 0xFF7F.
-		public byte[] IORegisters
-		{
-			get
-			{
-				byte[] ioRegisters = new byte[0x80];
-				Array.Copy(_memory, 0xFF00, ioRegisters, 0, 0x80);
-				return ioRegisters;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0xFF00, 0x80);
 			}
 		}
 
@@ -918,7 +733,7 @@ namespace GBOG.Memory
 			// (i.e., from "no pressed buttons in the selected group(s)" to "some pressed".)
 			if (allowInterrupt && _joypLastLowNibble == 0x0F && low != 0x0F)
 			{
-				IF |= (1 << 4);
+				IF |= 1 << 4;
 			}
 
 			_joypLastLowNibble = low;
@@ -936,35 +751,6 @@ namespace GBOG.Memory
 
 		public bool[] _joyPadKeys { get; set; }
 
-		// SB 
-		// The SB register is used to store the serial transfer data.
-		// The SB register is mapped to the memory address 0xFF01.
-		public byte SB
-		{
-			get
-			{
-				return _memory[0xFF01];
-			}
-			set
-			{
-				_memory[0xFF01] = value;
-			}
-		}
-
-		// SC
-		// The SC register is used to store the serial transfer data.
-		// The SC register is mapped to the memory address 0xFF02.
-		public byte SC
-		{
-			get
-			{
-				return _memory[0xFF02];
-			}
-			set
-			{
-				_memory[0xFF02] = value;
-			}
-		}
 
 		// DIV
 		// The DIV register is used to store the divider register.
@@ -1325,21 +1111,6 @@ namespace GBOG.Memory
 			}
 		}
 
-		// DMA
-		// The DMA register is used to store the DMA transfer and start address.
-		// The DMA register is mapped to the memory address 0xFF46.
-		public byte DMA
-		{
-			get
-			{
-				return 0xff;
-			}
-			set
-			{
-				_memory[0xFF46] = value;
-			}
-		}
-
 		// BGP
 		// The BGP register is used to store the background and window palette data.
 		// The BGP register is mapped to the memory address 0xFF47.
@@ -1439,126 +1210,6 @@ namespace GBOG.Memory
 			}
 		}
 
-		// KEY1
-		// The KEY1 register is used to store the CGB mode.
-		// The KEY1 register is mapped to the memory address 0xFF4D.
-		public byte KEY1
-		{
-			get
-			{
-				return _memory[0xFF4D];
-			}
-			set
-			{
-				_memory[0xFF4D] = value;
-			}
-		}
-
-		// VBK
-		// The VBK register is used to store the VRAM bank.
-		// The VBK register is mapped to the memory address 0xFF4F.
-		public byte VBK
-		{
-			get
-			{
-				return _memory[0xFF4F];
-			}
-			set
-			{
-				_memory[0xFF4F] = value;
-			}
-		}
-
-		// HDMA1
-		// The HDMA1 register is used to store the HDMA source, high.
-		// The HDMA1 register is mapped to the memory address 0xFF51.
-		public byte HDMA1
-		{
-			get
-			{
-				return _memory[0xFF51];
-			}
-			set
-			{
-				_memory[0xFF51] = value;
-			}
-		}
-
-		// HDMA2
-		// The HDMA2 register is used to store the HDMA source, low.
-		// The HDMA2 register is mapped to the memory address 0xFF52.
-		public byte HDMA2
-		{
-			get
-			{
-				return _memory[0xFF52];
-			}
-			set
-			{
-				_memory[0xFF52] = value;
-			}
-		}
-
-		// HDMA3
-		// The HDMA3 register is used to store the HDMA destination, high.
-		// The HDMA3 register is mapped to the memory address 0xFF53.
-		public byte HDMA3
-		{
-			get
-			{
-				return _memory[0xFF53];
-			}
-			set
-			{
-				_memory[0xFF53] = value;
-			}
-		}
-
-		// HDMA4
-		// The HDMA4 register is used to store the HDMA destination, low.
-		// The HDMA4 register is mapped to the memory address 0xFF54.
-		public byte HDMA4
-		{
-			get
-			{
-				return _memory[0xFF54];
-			}
-			set
-			{
-				_memory[0xFF54] = value;
-			}
-		}
-
-		// HDMA5
-		// The HDMA5 register is used to store the HDMA length/mode/start.
-		// The HDMA5 register is mapped to the memory address 0xFF55.
-		public byte HDMA5
-		{
-			get
-			{
-				return _memory[0xFF55];
-			}
-			set
-			{
-				_memory[0xFF55] = value;
-			}
-		}
-
-		// RP
-		// The RP register is used to store the infrared communications port.
-		// The RP register is mapped to the memory address 0xFF56.
-		public byte RP
-		{
-			get
-			{
-				return _memory[0xFF56];
-			}
-			set
-			{
-				_memory[0xFF56] = value;
-			}
-		}
-
 		// OPRI
 		// Object Priority Mode (CGB only).
 		// Bit 0: 0 = OAM priority (smaller OAM index wins), 1 = coordinate priority (lower X wins).
@@ -1572,98 +1223,6 @@ namespace GBOG.Memory
 			set
 			{
 				_memory[0xFF6C] = value;
-			}
-		}
-
-		// BCPS
-		// The BCPS register is used to store the background palette specification.
-		// The BCPS register is mapped to the memory address 0xFF68.
-		public byte BCPS
-		{
-			get
-			{
-				return _memory[0xFF68];
-			}
-			set
-			{
-				_memory[0xFF68] = value;
-			}
-		}
-
-		// BCPD
-		// The BCPD register is used to store the background palette data.
-		// The BCPD register is mapped to the memory address 0xFF69.
-		public byte BCPD
-		{
-			get
-			{
-				return _memory[0xFF69];
-			}
-			set
-			{
-				_memory[0xFF69] = value;
-			}
-		}
-
-		// OCPS
-		// The OCPS register is used to store the object palette specification.
-		// The OCPS register is mapped to the memory address 0xFF6A.
-		public byte OCPS
-		{
-			get
-			{
-				return _memory[0xFF6A];
-			}
-			set
-			{
-				_memory[0xFF6A] = value;
-			}
-		}
-
-		// OCPD
-		// The OCPD register is used to store the object palette data.
-		// The OCPD register is mapped to the memory address 0xFF6B.
-		public byte OCPD
-		{
-			get
-			{
-				return _memory[0xFF6B];
-			}
-			set
-			{
-				_memory[0xFF6B] = value;
-			}
-		}
-
-		// SVBK
-		// The SVBK register is used to store the WRAM bank.
-		// The SVBK register is mapped to the memory address 0xFF70.
-		public byte SVBK
-		{
-			get
-			{
-				return _memory[0xFF70];
-			}
-			set
-			{
-				_memory[0xFF70] = value;
-			}
-		}
-
-		// Zero Page
-		// The zero page is used to store the stack.
-		// The zero page is mapped to the memory address 0xFF80 - 0xFFFE.
-		public byte[] ZeroPage
-		{
-			get
-			{
-				byte[] zeroPage = new byte[0x7F];
-				Array.Copy(_memory, 0xFF80, zeroPage, 0, 0x7F);
-				return zeroPage;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0xFF80, 0x7F);
 			}
 		}
 
@@ -1963,25 +1522,25 @@ namespace GBOG.Memory
 				if (_mbc1)
 				{
 					int bank = GetMbc1Bank1();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc2)
 				{
 					int bank = GetMbc2RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc3)
 				{
 					int bank = GetMbc3RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc5)
 				{
 					int bank = GetMbc5RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				return _memory[address];
@@ -2645,25 +2204,25 @@ namespace GBOG.Memory
 				if (_mbc1)
 				{
 					int bank = GetMbc1Bank1();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc2)
 				{
 					int bank = GetMbc2RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc3)
 				{
 					int bank = GetMbc3RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc5)
 				{
 					int bank = GetMbc5RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				return _memory[address];
@@ -2798,25 +2357,25 @@ namespace GBOG.Memory
 				if (_mbc1)
 				{
 					int bank = GetMbc1Bank1();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc2)
 				{
 					int bank = GetMbc2RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc3)
 				{
 					int bank = GetMbc3RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				if (_mbc5)
 				{
 					int bank = GetMbc5RomBank();
-					newAddress = (address - 0x4000) + (bank * 0x4000);
+					newAddress = address - 0x4000 + (bank * 0x4000);
 					return _cartRom[newAddress];
 				}
 				return _memory[address];
@@ -3273,7 +2832,7 @@ namespace GBOG.Memory
 				{
 					ramBank %= _ramBankSize;
 				}
-				RamBanks[(address - 0xA000) + (ramBank * 0x2000)] = value;
+				RamBanks[address - 0xA000 + (ramBank * 0x2000)] = value;
 				MarkSaveDirtyIfBatteryBackedSave();
 
 			}
@@ -3366,7 +2925,7 @@ namespace GBOG.Memory
 					{
 						// MBC3: 0x4000-0x5FFF selects RAM bank (00-07) or RTC register (08-0C)
 						_mbc3RamBankOrRtcSelect = value;
-						_RTCEnabled = (value >= 0x08 && value <= 0x0C);
+						_RTCEnabled = value >= 0x08 && value <= 0x0C;
 						break;
 					}
 					RamBankSelect(address, value);

@@ -20,6 +20,13 @@ namespace GBOG.Library
         private string _statusMessage = string.Empty;
         private int _progressCurrent = 0;
         private int _progressTotal = 0;
+        private float _cardWidth = 120;
+        private LibraryEntry? _searchingEntry;
+        private List<CoverSearchResult>? _searchResults;
+        private bool _isSearchingCovers = false;
+        private bool _shouldOpenPopup = false;
+        private bool _hasScanned = false;
+        private string _customSearchTerm = string.Empty;
 
         public LibraryWindow(LibraryManager manager, GL gl)
         {
@@ -30,6 +37,12 @@ namespace GBOG.Library
         public void Render(ref bool show, Action<string> onLaunchRom)
         {
             if (!show) return;
+
+            if (!_hasScanned)
+            {
+                _manager.ScanLibrary();
+                _hasScanned = true;
+            }
 
             if (ImGui.Begin("Game Library", ref show))
             {
@@ -52,6 +65,8 @@ namespace GBOG.Library
                     RenderGrid(onLaunchRom);
                 }
                 ImGui.EndChild();
+
+                RenderSearchPopup();
             }
             ImGui.End();
         }
@@ -84,65 +99,180 @@ namespace GBOG.Library
                     _statusMessage = string.Empty;
                 });
             }
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(150);
+            ImGui.SliderFloat("Cover Size", ref _cardWidth, 60, 300);
         }
 
         private unsafe void RenderGrid(Action<string> onLaunchRom)
         {
-            float cardWidth = 120;
-            float cardHeight = 180;
-            var windowVisibleX2 = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
-            var style = ImGui.GetStyle();
+            float cardWidth = _cardWidth;
+            float cardHeight = cardWidth * 1.5f;
+            float spacing = ImGui.GetStyle().ItemSpacing.X;
+            float availWidth = ImGui.GetContentRegionAvail().X;
+            int columns = (int)Math.Max(1, availWidth / (cardWidth + spacing + 8));
 
-            for (int i = 0; i < _manager.Entries.Count; i++)
+            if (ImGui.BeginTable("LibraryGridTable", columns))
             {
-                var entry = _manager.Entries[i];
-                ImGui.PushID(i);
-
-                if (entry.CoverTextureId == null && !string.IsNullOrEmpty(entry.CoverPath))
+                for (int i = 0; i < _manager.Entries.Count; i++)
                 {
-                    entry.CoverTextureId = LoadTexture(entry.CoverPath);
-                }
+                    var entry = _manager.Entries[i];
+                    ImGui.TableNextColumn();
+                    ImGui.PushID(i);
 
-                ImGui.BeginGroup();
-                
-                if (entry.CoverTextureId.HasValue)
-                {
-                    if (ImGui.ImageButton("cover", new ImTextureRef(null, entry.CoverTextureId.Value), new Vector2(cardWidth, cardHeight)))
+                    if (entry.CoverTextureId == null && !string.IsNullOrEmpty(entry.CoverPath))
                     {
-                        onLaunchRom(entry.RomPath);
+                        entry.CoverTextureId = LoadTexture(entry.CoverPath);
                     }
-                }
-                else
-                {
-                    if (ImGui.Button("No Cover\n" + entry.Title, new Vector2(cardWidth, cardHeight)))
+
+                    ImGui.BeginGroup();
+                    
+                    var startPos = ImGui.GetCursorPos();
+                    if (entry.CoverTextureId.HasValue && entry.CoverTextureId.Value != 0)
                     {
-                        onLaunchRom(entry.RomPath);
+                        ImGui.ImageButton("cover", new ImTextureRef(null, entry.CoverTextureId.Value), new Vector2(cardWidth, cardHeight));
+                        if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+                        {
+                            onLaunchRom(entry.RomPath);
+                        }
                     }
+                    else
+                    {
+                        ImGui.Button("No Cover\n" + entry.Title, new Vector2(cardWidth, cardHeight));
+                        if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+                        {
+                            onLaunchRom(entry.RomPath);
+                        }
+                    }
+
+                    float titleHeight = ImGui.GetTextLineHeightWithSpacing() * 3.0f;
+                    var titleStartPos = ImGui.GetCursorPos();
+                    
+                    // Use a child window to contain and clip the title text
+                    if (ImGui.BeginChild($"title_{i}", new Vector2(cardWidth, titleHeight), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoBackground))
+                    {
+                        string displayTitle = entry.IsColor ? $"[GBC] {entry.Title}" : entry.Title;
+                        if (entry.IsColor)
+                        {
+                            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.4f, 1.0f, 1.0f));
+                        }
+                        ImGui.TextWrapped(displayTitle);
+                        if (entry.IsColor)
+                        {
+                            ImGui.PopStyleColor();
+                        }
+                    }
+                    ImGui.EndChild();
+                    
+                    // Ensure the button is always placed below the title area
+                    ImGui.SetCursorPos(titleStartPos + new Vector2(0, titleHeight + ImGui.GetStyle().ItemSpacing.Y));
+                    
+                    if (ImGui.Button("Get Cover", new Vector2(cardWidth, 0)))
+                    {
+                        SearchCovers(entry);
+                    }
+
+                    ImGui.EndGroup();
+                    ImGui.PopID();
                 }
-
-                ImGui.TextWrapped(entry.Title);
-                
-                if (ImGui.Button("Get Cover"))
-                {
-                    DownloadCover(entry);
-                }
-
-                ImGui.EndGroup();
-
-                float lastButtonX2 = ImGui.GetItemRectMax().X;
-                float nextButtonX2 = lastButtonX2 + style.ItemSpacing.X + cardWidth;
-                if (i + 1 < _manager.Entries.Count && nextButtonX2 < windowVisibleX2)
-                {
-                    ImGui.SameLine();
-                }
-
-                ImGui.PopID();
+                ImGui.EndTable();
             }
         }
 
-        private void DownloadCover(LibraryEntry entry)
+        private void SearchCovers(LibraryEntry entry, string? customTerm = null)
         {
-            Task.Run(async () => await _manager.DownloadCoverAsync(entry));
+            _searchingEntry = entry;
+            _isSearchingCovers = true;
+            _searchResults = null;
+            _shouldOpenPopup = true;
+            
+            if (customTerm == null)
+            {
+                _customSearchTerm = _manager.CleanTitle(entry.Title);
+            }
+
+            string term = customTerm ?? _customSearchTerm;
+
+            Task.Run(async () =>
+            {
+                _searchResults = await _manager.SearchCoversAsync(term);
+                _isSearchingCovers = false;
+            });
+        }
+
+        private void RenderSearchPopup()
+        {
+            if (_searchingEntry == null) return;
+
+            if (_shouldOpenPopup)
+            {
+                ImGui.OpenPopup("Select Cover");
+                _shouldOpenPopup = false;
+            }
+
+            bool isOpen = true;
+            if (ImGui.BeginPopupModal("Select Cover", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+            {
+                ImGui.Text("Search Term:");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(200);
+                if (ImGui.InputText("##customSearch", ref _customSearchTerm, 100, ImGuiInputTextFlags.EnterReturnsTrue))
+                {
+                    SearchCovers(_searchingEntry, _customSearchTerm);
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Search"))
+                {
+                    SearchCovers(_searchingEntry, _customSearchTerm);
+                }
+
+                ImGui.Separator();
+
+                if (_isSearchingCovers)
+                {
+                    ImGui.Text("Searching for " + _customSearchTerm + "...");
+                }
+                else if (_searchResults != null)
+                {
+                    ImGui.Text("Results for: " + _customSearchTerm);
+                    ImGui.Separator();
+
+                    if (_searchResults.Count == 0)
+                    {
+                        ImGui.Text("No covers found.");
+                    }
+                    else
+                    {
+                        foreach (var result in _searchResults)
+                        {
+                            if (ImGui.Selectable($"{result.GameName}##{result.Url}"))
+                            {
+                                var entry = _searchingEntry;
+                                var url = result.Url;
+                                if (entry != null)
+                                {
+                                    Task.Run(async () => await _manager.DownloadCoverFromUrlAsync(entry, url));
+                                }
+                                _searchingEntry = null;
+                                _searchResults = null;
+                                ImGui.CloseCurrentPopup();
+                            }
+                            if (ImGui.IsItemHovered())
+                            {
+                                ImGui.SetTooltip(result.Url);
+                            }
+                        }
+                    }
+                }
+
+                if (!isOpen || ImGui.Button("Cancel", new Vector2(120, 0)))
+                {
+                    _searchingEntry = null;
+                    _searchResults = null;
+                    ImGui.CloseCurrentPopup();
+                }
+                ImGui.EndPopup();
+            }
         }
 
         private uint LoadTexture(string path)

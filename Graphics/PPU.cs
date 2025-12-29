@@ -761,39 +761,6 @@ namespace GBOG.Graphics
 			}
 		}
 
-		public byte[] GetTileData()
-		{
-			// 8000-97FF
-			var tileData = new byte[0x1800];
-			Array.Copy(VideoRam, 0, tileData, 0, 0x1800);
-			return tileData;
-		}
-		// Updates the palette with the new colors.
-		private void UpdatePalette(byte value)
-		{
-			// Implementation
-		}
-
-		// Gets the sprite attributes from OAM.
-		public List<SpriteAttributes> GetSpriteAttributes()
-		{
-			List<SpriteAttributes> sprites = new List<SpriteAttributes>();
-
-			// Each sprite has 4 bytes of attributes in the OAM.
-			for (int i = 0; i < OAM.Length; i += 4)
-			{
-				int y = OAM[i] - 16; // signed screen-space Y
-				int x = OAM[i + 1] - 8; // signed screen-space X
-				byte tileNumber = OAM[i + 2];
-				byte attributes = OAM[i + 3];
-				int oamIndex = i / 4;
-
-				sprites.Add(new SpriteAttributes(x, y, tileNumber, attributes, oamIndex));
-			}
-
-			return sprites;
-		}
-
 		// Handles GPU registers and updates GPU mode.
 		private void SetLCDStatus()
 		{

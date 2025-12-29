@@ -16,6 +16,13 @@ namespace GBOG.Library
         public string Title { get; set; } = string.Empty;
         public string? CoverPath { get; set; }
         public uint? CoverTextureId { get; set; }
+        public bool IsColor { get; set; }
+    }
+
+    public class CoverSearchResult
+    {
+        public string Url { get; set; } = string.Empty;
+        public string GameName { get; set; } = string.Empty;
     }
 
     public class LibraryManager
@@ -67,6 +74,7 @@ namespace GBOG.Library
                 {
                     RomPath = file,
                     Title = Path.GetFileNameWithoutExtension(file),
+                    IsColor = file.EndsWith(".gbc", StringComparison.OrdinalIgnoreCase)
                 };
 
                 var coverPath = Path.Combine(_coversDirectory, entry.Title + ".jpg");
@@ -77,6 +85,8 @@ namespace GBOG.Library
 
                 _entries.Add(entry);
             }
+
+            _entries.Sort((a, b) => string.Compare(a.Title, b.Title, StringComparison.OrdinalIgnoreCase));
         }
 
         public async Task DownloadCoverAsync(LibraryEntry entry)
@@ -86,29 +96,77 @@ namespace GBOG.Library
 
             try
             {
+                var results = await SearchCoversAsync(entry.Title);
+                if (results.Count > 0)
+                {
+                    await DownloadCoverFromUrlAsync(entry, results[0].Url);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to download cover for {entry.Title}: {ex.Message}");
+            }
+        }
+
+        public string CleanTitle(string title)
+        {
+            string searchTitle = title;
+            int bracketIndex = searchTitle.IndexOf('(');
+            if (bracketIndex != -1) searchTitle = searchTitle.Substring(0, bracketIndex);
+            bracketIndex = searchTitle.IndexOf('[');
+            if (bracketIndex != -1) searchTitle = searchTitle.Substring(0, bracketIndex);
+            return searchTitle.Trim();
+        }
+
+        public async Task<List<CoverSearchResult>> SearchCoversAsync(string title)
+        {
+            EnsureClient();
+            if (_igdbClient == null) return new List<CoverSearchResult>();
+
+            try
+            {
+                string searchTitle = CleanTitle(title);
+
                 // Search for the game
                 var games = await _igdbClient.QueryAsync<Game>(IGDBClient.Endpoints.Games, 
-                    $"search \"{entry.Title}\"; fields name,cover.url; where platforms = (33,22); limit 1;");
+                    $"search \"{searchTitle}\"; fields name,cover.url; where platforms = (33,22); limit 10;");
 
-                if (games != null && games.Length > 0)
+                var results = new List<CoverSearchResult>();
+                if (games != null)
                 {
-                    var game = games[0];
-                    if (game.Cover != null && game.Cover.Value.Url != null)
+                    foreach (var game in games)
                     {
-                        var url = game.Cover.Value.Url;
-                        if (url.StartsWith("//")) url = "https:" + url;
-                        
-                        // IGDB returns thumb by default, we want big cover
-                        url = url.Replace("t_thumb", "t_cover_big");
-
-                        using var httpClient = new HttpClient();
-                        var bytes = await httpClient.GetByteArrayAsync(url);
-                        
-                        var coverPath = Path.Combine(_coversDirectory, entry.Title + ".jpg");
-                        await File.WriteAllBytesAsync(coverPath, bytes);
-                        entry.CoverPath = coverPath;
+                        if (game.Cover != null && game.Cover.Value.Url != null)
+                        {
+                            var url = game.Cover.Value.Url;
+                            if (url.StartsWith("//")) url = "https:" + url;
+                            
+                            // IGDB returns thumb by default, we want big cover
+                            url = url.Replace("t_thumb", "t_cover_big");
+                            results.Add(new CoverSearchResult { Url = url, GameName = game.Name });
+                        }
                     }
                 }
+                return results;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to search covers for {title}: {ex.Message}");
+                return new List<CoverSearchResult>();
+            }
+        }
+
+        public async Task DownloadCoverFromUrlAsync(LibraryEntry entry, string url)
+        {
+            try
+            {
+                using var httpClient = new HttpClient();
+                var bytes = await httpClient.GetByteArrayAsync(url);
+                
+                var coverPath = Path.Combine(_coversDirectory, entry.Title + ".jpg");
+                await File.WriteAllBytesAsync(coverPath, bytes);
+                entry.CoverPath = coverPath;
+                entry.CoverTextureId = null; // Force reload
             }
             catch (Exception ex)
             {

@@ -771,19 +771,24 @@ namespace GBOG
                 ImGui.Text($"Emulation: {mode}  |  Cart: {cartType}  |  Prefer CGB: {(_preferCgbWhenSupported ? "On" : "Off")} {modeReason}");
 
                 // Display palette affects DMG rendering only. In CGB mode we use CGB palettes.
-                ImGui.Text($"Display palette: {_displayPalettePreset} (DMG-only)");
+                // ImGui.Text($"Display palette: {_displayPalettePreset} (DMG-only)");
 
-                if (mem.IsCgb)
-                {
-                    var bg0c0 = mem.GetCgbBgPaletteColor(0, 0);
-                    var bg0c1 = mem.GetCgbBgPaletteColor(0, 1);
-                    var bg0c2 = mem.GetCgbBgPaletteColor(0, 2);
-                    var bg0c3 = mem.GetCgbBgPaletteColor(0, 3);
-                    var obj0c1 = mem.GetCgbObjPaletteColor(0, 1);
-                    ImGui.Text($"CGB palette writes: BG={mem.CgbBgPaletteWriteCount} OBJ={mem.CgbObjPaletteWriteCount}");
-                    ImGui.Text($"BG0: ({bg0c0.R},{bg0c0.G},{bg0c0.B}) ({bg0c1.R},{bg0c1.G},{bg0c1.B}) ({bg0c2.R},{bg0c2.G},{bg0c2.B}) ({bg0c3.R},{bg0c3.G},{bg0c3.B})");
-                    ImGui.Text($"OBJ0 col1: ({obj0c1.R},{obj0c1.G},{obj0c1.B})");
-                }
+                // if (mem.IsCgb)
+                // {
+                //     var bg0c0 = mem.GetCgbBgPaletteColor(0, 0);
+                //     var bg0c1 = mem.GetCgbBgPaletteColor(0, 1);
+                //     var bg0c2 = mem.GetCgbBgPaletteColor(0, 2);
+                //     var bg0c3 = mem.GetCgbBgPaletteColor(0, 3);
+                //     var obj0c1 = mem.GetCgbObjPaletteColor(0, 1);
+                //     ImGui.Text($"CGB palette writes: BG={mem.CgbBgPaletteWriteCount} OBJ={mem.CgbObjPaletteWriteCount}");
+                //     ImGui.Text($"BG0: ({bg0c0.R},{bg0c0.G},{bg0c0.B}) ({bg0c1.R},{bg0c1.G},{bg0c1.B}) ({bg0c2.R},{bg0c2.G},{bg0c2.B}) ({bg0c3.R},{bg0c3.G},{bg0c3.B})");
+                //     ImGui.Text($"OBJ0 col1: ({obj0c1.R},{obj0c1.G},{obj0c1.B})");
+                // }
+
+                // Display MBC info for debugging.
+                string ramInfo = mem.SaveRamByteCount > 0 ? $"{mem.SaveRamByteCount / 1024} KB" : "None";
+                string romInfo = $"{mem.RomSize / 1024} KB";
+                ImGui.Text($"MBC: {mem.MbcType}  |  ROM: {romInfo}  |  RAM: {ramInfo}");
             }
 
             if (_gb != null && _gameRunning)
@@ -823,6 +828,9 @@ namespace GBOG
             RenderSettingsWindow();
             _libraryWindow.Render(ref _showLibraryWindow, path =>
             {
+                // If a ROM is currently running/paused, stop and clear state before switching.
+                StopEmulation(clearLoadedRom: false);
+
                 _loadedRomPath = path;
                 _loadedRomName = Path.GetFileName(path);
                 EnsureGameboyLoaded();
