@@ -319,20 +319,20 @@ public sealed class Apu
         switch (address)
         {
             case 0xFF26:
-            {
-                bool enable = (value & 0x80) != 0;
-                if (enable && !_powered)
                 {
-                    PowerOnFromNr52();
+                    bool enable = (value & 0x80) != 0;
+                    if (enable && !_powered)
+                    {
+                        PowerOnFromNr52();
+                    }
+                    else if (!enable && _powered)
+                    {
+                        PowerOff();
+                    }
+                    // Keep stored reg value for debugging; only bit7 is meaningful.
+                    _regs[idx] = (byte)(value & 0x80);
+                    return;
                 }
-                else if (!enable && _powered)
-                {
-                    PowerOff();
-                }
-                // Keep stored reg value for debugging; only bit7 is meaningful.
-                _regs[idx] = (byte)(value & 0x80);
-                return;
-            }
         }
 
         _regs[idx] = value;
@@ -344,7 +344,6 @@ public sealed class Apu
         bool nextStepClocksLength = (_frameSeqStep & 1) == 0;
         bool oldLenEnabled = (oldValue & 0x40) != 0;
         bool newLenEnabled = (value & 0x40) != 0;
-        bool trigger = (value & 0x80) != 0;
         bool lengthEnableTransition = !oldLenEnabled && newLenEnabled;
         bool doExtraLengthClockOnEnable = lengthEnableTransition && !nextStepClocksLength;
 
@@ -373,7 +372,7 @@ public sealed class Apu
                 if ((value & 0x80) != 0)
                 {
                     // Period uses NR13/NR14 bits 0-2.
-                    _ch1.Trigger(extraLengthClockIfReloadingFromZero: (!nextStepClocksLength && newLenEnabled));
+                    _ch1.Trigger(!nextStepClocksLength && newLenEnabled);
                 }
                 break;
 
@@ -837,7 +836,6 @@ public sealed class Apu
             _sweepNegate = (value & 0x08) != 0;
             _sweepShift = value & 0x07;
 
-            // Quirk: clearing negate after it has been used in a sweep calculation disables CH1.
             if (oldNegate && !_sweepNegate && _sweepNegateUsedSinceTrigger)
             {
                 _active = false;
@@ -1017,6 +1015,33 @@ public sealed class Apu
                 }
             }
         }
+        private int CalculateSweepNewPeriod()
+        {
+            int delta = _sweepShadow >> _sweepShift;
+            int newPeriod = _sweepNegate ? (_sweepShadow - delta) : (_sweepShadow + delta);
+            return newPeriod;
+        }
+
+        public float GetAnalogSample()
+        {
+            if (!_active || !_dacEnabled)
+            {
+                return 0;
+            }
+
+            int dutyMask = _duty switch
+            {
+                0 => 0b0000_0001,
+                1 => 0b0000_0011,
+                2 => 0b0000_1111,
+                3 => 0b1111_1100,
+                _ => 0b0000_0001,
+            };
+
+            bool high = ((dutyMask >> (7 - _dutyStep)) & 1) != 0;
+            int digital = high ? _volume : 0;
+            return DigitalToAnalog(digital);
+        }
 
         public void SaveState(BinaryWriter writer)
         {
@@ -1066,33 +1091,6 @@ public sealed class Apu
             _sweepNegateUsedSinceTrigger = reader.ReadBoolean();
         }
 
-        private int CalculateSweepNewPeriod()
-        {
-            int delta = _sweepShadow >> _sweepShift;
-            int newPeriod = _sweepNegate ? (_sweepShadow - delta) : (_sweepShadow + delta);
-            return newPeriod;
-        }
-
-        public float GetAnalogSample()
-        {
-            if (!_active || !_dacEnabled)
-            {
-                return 0;
-            }
-
-            int dutyMask = _duty switch
-            {
-                0 => 0b0000_0001,
-                1 => 0b0000_0011,
-                2 => 0b0000_1111,
-                3 => 0b1111_1100,
-                _ => 0b0000_0001,
-            };
-
-            bool high = ((dutyMask >> (7 - _dutyStep)) & 1) != 0;
-            int digital = high ? _volume : 0;
-            return DigitalToAnalog(digital);
-        }
     }
 
     private sealed class WaveChannel

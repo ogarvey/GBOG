@@ -166,6 +166,10 @@ namespace GBOG
             io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;         // Enable Docking
             io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;       // Enable Multi-Viewport / Platform Windows
 
+            io.FontAllowUserScaling = true;
+            io.ConfigDpiScaleFonts = true;
+            io.ConfigDpiScaleViewports = true;
+            
             ImGui.StyleColorsDark();
             ImGui.GetStyle().ScaleAllSizes(UiScale);
             ApplyFontSize(_fontSizePixels, rebuildBackend: false);
