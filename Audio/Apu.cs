@@ -726,6 +726,7 @@ public sealed class Apu
 
         private int _volume;
         private int _envelopeTimer;
+        private bool _envelopeUpdating;
 
         private int _dutyStep;
         private int _freqTimerCycles;
@@ -764,6 +765,7 @@ public sealed class Apu
 
             _volume = 0;
             _envelopeTimer = 0;
+            _envelopeUpdating = false;
 
             _dutyStep = 0;
             _freqTimerCycles = 0;
@@ -796,6 +798,7 @@ public sealed class Apu
 
             _volume = 0;
             _envelopeTimer = 0;
+            _envelopeUpdating = false;
 
             _dutyStep = 0;
             _freqTimerCycles = 0;
@@ -851,9 +854,32 @@ public sealed class Apu
 
         public void WriteNr12(byte value)
         {
+            int oldPeriod = _envelopePeriod;
+            bool oldIncrease = _envelopeIncrease;
+
             _initialVolume = (value >> 4) & 0x0F;
             _envelopeIncrease = (value & 0x08) != 0;
             _envelopePeriod = value & 0x07;
+
+            if (_active)
+            {
+                // Zombie Mode: volume can be manually altered while a channel is playing by writing to NRx2.
+                if (oldPeriod == 0 && _envelopeUpdating)
+                {
+                    _volume++;
+                }
+                else if (!oldIncrease)
+                {
+                    _volume += 2;
+                }
+
+                if (oldIncrease != _envelopeIncrease)
+                {
+                    _volume = 16 - _volume;
+                }
+
+                _volume &= 0x0F;
+            }
         }
 
         public void WriteNr13(byte value)
@@ -879,6 +905,7 @@ public sealed class Apu
 
             _volume = _initialVolume;
             _envelopeTimer = (_envelopePeriod == 0) ? 0 : _envelopePeriod;
+            _envelopeUpdating = true;
 
             // Reload frequency timer.
             _freqTimerCycles = Math.Max(4, (2048 - _period11) * 4);
@@ -941,7 +968,7 @@ public sealed class Apu
 
         public void ClockEnvelope()
         {
-            if (_envelopePeriod == 0)
+            if (_envelopePeriod == 0 || !_envelopeUpdating)
             {
                 return;
             }
@@ -957,10 +984,12 @@ public sealed class Apu
                 if (_envelopeIncrease)
                 {
                     if (_volume < 15) _volume++;
+                    else _envelopeUpdating = false;
                 }
                 else
                 {
                     if (_volume > 0) _volume--;
+                    else _envelopeUpdating = false;
                 }
             }
         }
@@ -1056,6 +1085,7 @@ public sealed class Apu
             writer.Write(_dacEnabled);
             writer.Write(_volume);
             writer.Write(_envelopeTimer);
+            writer.Write(_envelopeUpdating);
             writer.Write(_dutyStep);
             writer.Write(_freqTimerCycles);
             writer.Write(_sweepPace);
@@ -1080,6 +1110,7 @@ public sealed class Apu
             _dacEnabled = reader.ReadBoolean();
             _volume = reader.ReadInt32();
             _envelopeTimer = reader.ReadInt32();
+            _envelopeUpdating = reader.ReadBoolean();
             _dutyStep = reader.ReadInt32();
             _freqTimerCycles = reader.ReadInt32();
             _sweepPace = reader.ReadInt32();
@@ -1454,6 +1485,7 @@ public sealed class Apu
 
         private int _volume;
         private int _envelopeTimer;
+        private bool _envelopeUpdating;
 
         private int _clockShift;
         private bool _width7;
@@ -1483,6 +1515,7 @@ public sealed class Apu
 
             _volume = 0;
             _envelopeTimer = 0;
+            _envelopeUpdating = false;
 
             _clockShift = 0;
             _width7 = false;
@@ -1502,6 +1535,7 @@ public sealed class Apu
             _envelopePeriod = 0;
             _volume = 0;
             _envelopeTimer = 0;
+            _envelopeUpdating = false;
             _clockShift = 0;
             _width7 = false;
             _clockDivider = 0;
@@ -1523,6 +1557,7 @@ public sealed class Apu
             _envelopePeriod = 0;
             _volume = 0;
             _envelopeTimer = 0;
+            _envelopeUpdating = false;
             _clockShift = 0;
             _width7 = false;
             _clockDivider = 0;
@@ -1551,9 +1586,32 @@ public sealed class Apu
 
         public void WriteNr42(byte value)
         {
+            int oldPeriod = _envelopePeriod;
+            bool oldIncrease = _envelopeIncrease;
+
             _initialVolume = (value >> 4) & 0x0F;
             _envelopeIncrease = (value & 0x08) != 0;
             _envelopePeriod = value & 0x07;
+
+            if (_active)
+            {
+                // Zombie Mode: volume can be manually altered while a channel is playing by writing to NRx2.
+                if (oldPeriod == 0 && _envelopeUpdating)
+                {
+                    _volume++;
+                }
+                else if (!oldIncrease)
+                {
+                    _volume += 2;
+                }
+
+                if (oldIncrease != _envelopeIncrease)
+                {
+                    _volume = 16 - _volume;
+                }
+
+                _volume &= 0x0F;
+            }
         }
 
         public void WriteNr43(byte value)
@@ -1580,6 +1638,7 @@ public sealed class Apu
 
             _volume = _initialVolume;
             _envelopeTimer = (_envelopePeriod == 0) ? 0 : _envelopePeriod;
+            _envelopeUpdating = true;
 
             _lfsr = 0x7FFF;
             _freqTimerCycles = Math.Max(8, ComputePeriodCycles());
@@ -1616,6 +1675,7 @@ public sealed class Apu
             writer.Write(_envelopePeriod);
             writer.Write(_volume);
             writer.Write(_envelopeTimer);
+            writer.Write(_envelopeUpdating);
             writer.Write(_clockShift);
             writer.Write(_width7);
             writer.Write(_clockDivider);
@@ -1634,6 +1694,7 @@ public sealed class Apu
             _envelopePeriod = reader.ReadInt32();
             _volume = reader.ReadInt32();
             _envelopeTimer = reader.ReadInt32();
+            _envelopeUpdating = reader.ReadBoolean();
             _clockShift = reader.ReadInt32();
             _width7 = reader.ReadBoolean();
             _clockDivider = reader.ReadInt32();
@@ -1686,7 +1747,7 @@ public sealed class Apu
 
         public void ClockEnvelope()
         {
-            if (_envelopePeriod == 0)
+            if (_envelopePeriod == 0 || !_envelopeUpdating)
             {
                 return;
             }
@@ -1702,10 +1763,12 @@ public sealed class Apu
                 if (_envelopeIncrease)
                 {
                     if (_volume < 15) _volume++;
+                    else _envelopeUpdating = false;
                 }
                 else
                 {
                     if (_volume > 0) _volume--;
+                    else _envelopeUpdating = false;
                 }
             }
         }
