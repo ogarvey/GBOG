@@ -2624,11 +2624,23 @@ namespace GBOG.Memory
             {
                 _serialControlWrites++;
                 _memory[address] = value;
-                if (value == 0x81)
+                if ((value & 0x80) != 0)
                 {
                     _serialTransferStarts++;
-                    Console.Write((char)_memory[0xFF01]);
-                    SerialDataReceived?.Invoke(this, (char)_memory[0xFF01]);
+                    // If it is internal clock (bit 0 is set), complete it instantly.
+                    if ((value & 0x01) != 0)
+                    {
+                        // Clear transfer start bit (bit 7)
+                        _memory[0xFF02] = (byte)(value & 0x7F);
+                        // Trigger serial interrupt
+                        IFSerial = true;
+
+                        Console.Write((char)_memory[0xFF01]);
+                        SerialDataReceived?.Invoke(this, (char)_memory[0xFF01]);
+
+                        // Since no device is connected, the line pulls high, receiving 0xFF.
+                        _memory[0xFF01] = 0xFF;
+                    }
                 }
             }
             else if (address == 0xFF40)
