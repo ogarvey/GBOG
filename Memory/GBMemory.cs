@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Drawing;
@@ -91,7 +91,11 @@ namespace GBOG.Memory
                 if (_mbc1m) return "MBC1M";
                 if (_mbc1) return "MBC1";
                 if (_mbc2) return "MBC2";
-                if (_mbc3) return "MBC3" + (_mbc3HasTimer ? "+RTC" : "");
+                if (_mbc3)
+                {
+                    string baseType = IsMbc30 ? "MBC30" : "MBC3";
+                    return baseType + (_mbc3HasTimer ? "+RTC" : "");
+                }
                 if (_mbc5) return "MBC5" + (_mbc5HasRumble ? "+Rumble" : "");
                 if (_cartType == 0 || _cartType == 8 || _cartType == 9) return "ROM Only";
                 return $"Unknown (0x{_cartType:X2})";
@@ -1310,6 +1314,7 @@ namespace GBOG.Memory
         private bool _mbc1;
         private bool _mbc2;
         private bool _mbc3;
+        private bool IsMbc30 => _mbc3 && (_romBankCount > 128 || _ramBankSize > 4);
         private bool _mbc5;
         private int _romBankSize;
         private int _romBankCount;
@@ -1467,7 +1472,7 @@ namespace GBOG.Memory
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private int GetMbc3RomBank()
         {
-            int bank = _currentRomBank & 0x7F;
+            int bank = IsMbc30 ? _currentRomBank : (_currentRomBank & 0x7F);
             if (bank == 0)
             {
                 bank = 1;
@@ -2465,7 +2470,7 @@ namespace GBOG.Memory
                 byte sel = _mbc3RamBankOrRtcSelect;
                 if (sel <= 0x07)
                 {
-                    int bank = sel;
+                    int bank = IsMbc30 ? (sel & 0x07) : (sel & 0x03);
                     if (_ramBankSize > 0)
                     {
                         bank %= _ramBankSize;
@@ -2851,7 +2856,7 @@ namespace GBOG.Memory
                 byte sel = _mbc3RamBankOrRtcSelect;
                 if (sel <= 0x07)
                 {
-                    int bank = sel;
+                    int bank = IsMbc30 ? (sel & 0x07) : (sel & 0x03);
                     if (_ramBankSize > 0)
                     {
                         bank %= _ramBankSize;
@@ -3059,7 +3064,7 @@ namespace GBOG.Memory
             }
             else if (_mbc3)
             {
-                _currentRomBank = (byte)(value & 0x7F);
+                _currentRomBank = IsMbc30 ? value : (byte)(value & 0x7F);
                 if (_currentRomBank == 0)
                 {
                     _currentRomBank = 1;
