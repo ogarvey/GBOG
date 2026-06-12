@@ -1,3481 +1,3481 @@
-﻿using GBOG.CPU;
-using GBOG.Utils;
-using Serilog;
-using Serilog.Core;
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
-using System.IO;
+using GBOG.CPU;
+using GBOG.Utils;
+using Serilog;
+using Serilog.Core;
 
 namespace GBOG.Memory
 {
-	[Flags]
-	public enum VideoDebugDirtyFlags
-	{
-		None = 0,
-		TileData = 1 << 0,
-		TileMaps = 1 << 1,
-		Lcdc = 1 << 2,
-		Palette = 1 << 3,
-		Oam = 1 << 4,
-	}
-
-	public class GBMemory
-	{
-		private const int VideoDebugVramBytes = 0x4000;
-		private const int VideoDebugPaletteBytes = 64;
-		private const int VideoDebugOamBytes = 0xA0;
-		private readonly byte[][] _videoDebugVramSnapshots = [new byte[VideoDebugVramBytes], new byte[VideoDebugVramBytes]];
-		private readonly byte[][] _videoDebugBgPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
-		private readonly byte[][] _videoDebugObjPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
-		private readonly byte[][] _videoDebugOamSnapshots = [new byte[VideoDebugOamBytes], new byte[VideoDebugOamBytes]];
-		private readonly byte[] _videoDebugLcdcSnapshots = new byte[2];
-		private int _videoDebugSnapshotIndex;
-		private int _videoDebugSnapshotVersion;
-
-		internal int VideoDebugSnapshotVersion => Volatile.Read(ref _videoDebugSnapshotVersion);
-
-		internal void CaptureVideoDebugSnapshot()
-		{
-			// Called from the emulation thread at a stable point (VBlank).
-			int writeIndex = 1 - Volatile.Read(ref _videoDebugSnapshotIndex);
-			Buffer.BlockCopy(_gameBoy._ppu.VideoRam, 0, _videoDebugVramSnapshots[writeIndex], 0, VideoDebugVramBytes);
-			Buffer.BlockCopy(_cgbBgPaletteRam, 0, _videoDebugBgPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
-			Buffer.BlockCopy(_cgbObjPaletteRam, 0, _videoDebugObjPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
-			Buffer.BlockCopy(_gameBoy._ppu.OAM, 0, _videoDebugOamSnapshots[writeIndex], 0, VideoDebugOamBytes);
-			_videoDebugLcdcSnapshots[writeIndex] = _memory[0xFF40];
-			Volatile.Write(ref _videoDebugSnapshotIndex, writeIndex);
-			Interlocked.Increment(ref _videoDebugSnapshotVersion);
-		}
-
-		internal void GetVideoDebugSnapshot(out byte[] vram, out byte[] bgPalRam, out byte[] objPalRam, out byte[] oam, out byte lcdc)
-		{
-			int idx = Volatile.Read(ref _videoDebugSnapshotIndex);
-			vram = _videoDebugVramSnapshots[idx];
-			bgPalRam = _videoDebugBgPaletteSnapshots[idx];
-			objPalRam = _videoDebugObjPaletteSnapshots[idx];
-			oam = _videoDebugOamSnapshots[idx];
-			lcdc = _videoDebugLcdcSnapshots[idx];
-		}
-		public int CgbBgPaletteWriteCount { get; private set; }
-		public int CgbObjPaletteWriteCount { get; private set; }
-		private int _videoDebugDirty;
-		private int _saveDirtyVersion;
-		private byte _cartType;
-		private byte _ramSizeCode;
-		private bool _hasBatteryBackedSave;
-		private bool _mbc3HasTimer;
-
-		public void MarkVideoDebugDirty(VideoDebugDirtyFlags flags)
-		{
-			Interlocked.Or(ref _videoDebugDirty, (int)flags);
-		}
-
-		public VideoDebugDirtyFlags ConsumeVideoDebugDirty()
-		{
-			int v = Interlocked.Exchange(ref _videoDebugDirty, 0);
-			return (VideoDebugDirtyFlags)v;
-		}
-
-		public bool HasBatteryBackedSave => _hasBatteryBackedSave;
-		public bool HasMbc3Rtc => _mbc3HasTimer;
-
-		public string MbcType
-		{
-			get
-			{
-				if (_mbc1m) return "MBC1M";
-				if (_mbc1) return "MBC1";
-				if (_mbc2) return "MBC2";
-				if (_mbc3) return "MBC3" + (_mbc3HasTimer ? "+RTC" : "");
-				if (_mbc5) return "MBC5" + (_mbc5HasRumble ? "+Rumble" : "");
-				if (_cartType == 0 || _cartType == 8 || _cartType == 9) return "ROM Only";
-				return $"Unknown (0x{_cartType:X2})";
-			}
-		}
-
-		public int RomSize => _cartRom?.Length ?? 0;
-
-		/// <summary>
-		/// True when the loaded cartridge both has a battery and declares SRAM.
-		/// (RTC-only battery carts like MBC3 type 0x0F will return false here.)
-		/// </summary>
-		public bool HasBatteryBackedSram => _hasBatteryBackedSave && SaveRamByteCount > 0;
-
-		public byte[] GetBatterySaveFileImage()
-		{
-			if (!HasBatteryBackedSave)
-			{
-				return Array.Empty<byte>();
-			}
-
-			int ramBytes = SaveRamByteCount;
-			int rtcBytes = HasMbc3Rtc ? 48 : 0;
-			if (ramBytes == 0 && rtcBytes == 0)
-			{
-				return Array.Empty<byte>();
-			}
-
-			var file = new byte[ramBytes + rtcBytes];
-			if (ramBytes > 0)
-			{
-				byte[] sram = GetSaveRamImage();
-				Array.Copy(sram, 0, file, 0, Math.Min(ramBytes, sram.Length));
-			}
-			if (rtcBytes > 0)
-			{
-				WriteMbc3RtcTrailer(file.AsSpan(ramBytes, rtcBytes));
-			}
-			return file;
-		}
-
-		public void LoadBatterySaveFileImage(byte[] file)
-		{
-			if (!HasBatteryBackedSave)
-			{
-				return;
-			}
-			if (file == null || file.Length == 0)
-			{
-				return;
-			}
-
-			int expectedRam = SaveRamByteCount;
-			bool hasRtc = HasMbc3Rtc;
-			if (!TrySplitSaveFile(file.Length, expectedRam, hasRtc, out int ramPart, out int rtcPart))
-			{
-				// Fallback: if the file is at least the expected SRAM size, just load the first bytes.
-				ramPart = Math.Min(file.Length, expectedRam);
-				rtcPart = 0;
-			}
-
-			if (ramPart > 0 && expectedRam > 0)
-			{
-				int loadLen = Math.Min(expectedRam, ramPart);
-				var sramSlice = new byte[loadLen];
-				Array.Copy(file, 0, sramSlice, 0, loadLen);
-				LoadSaveRamImage(sramSlice);
-			}
-
-			if (hasRtc && (rtcPart == 44 || rtcPart == 48))
-			{
-				var trailer = file.AsSpan(file.Length - rtcPart, rtcPart);
-				LoadMbc3RtcTrailer(trailer);
-			}
-		}
-
-		public void SaveState(BinaryWriter writer)
-		{
-			writer.Write(_memory);
-			writer.Write(_currentRomBank);
-			writer.Write(RamBanks.Length);
-			writer.Write(RamBanks);
-			writer.Write(_romBankingMode);
-			writer.Write(_currentRamBank);
-			writer.Write(_ramEnabled);
-			writer.Write(_mbc1);
-			writer.Write(_mbc2);
-			writer.Write(_mbc3);
-			writer.Write(_mbc5);
-			writer.Write(_romBankSize);
-			writer.Write(_romBankCount);
-			writer.Write(_ramBankSize);
-			writer.Write(_RTCEnabled);
-			writer.Write(_multicart);
-			writer.Write(_mbc1m);
-
-			bool hasMbc2Ram = _mbc2Ram != null;
-			writer.Write(hasMbc2Ram);
-			if (hasMbc2Ram)
-			{
-				writer.Write(_mbc2Ram!.Length);
-				writer.Write(_mbc2Ram!);
-			}
-
-			writer.Write(_mbc5RomBank);
-			writer.Write(_mbc5HasRumble);
-			writer.Write(_mbc5Rumble);
-
-			writer.Write(_mbc3RamBankOrRtcSelect);
-			writer.Write(_mbc3LatchArmed);
-			writer.Write(_mbc3Latched);
-			writer.Write(_mbc3RtcSubCycleCounter);
-			writer.Write(_mbc3RtcSeconds);
-			writer.Write(_mbc3RtcMinutes);
-			writer.Write(_mbc3RtcHours);
-			writer.Write(_mbc3RtcDays);
-			writer.Write(_mbc3RtcHalt);
-			writer.Write(_mbc3RtcCarry);
-			writer.Write(_mbc3RtcLatchedS);
-			writer.Write(_mbc3RtcLatchedM);
-			writer.Write(_mbc3RtcLatchedH);
-			writer.Write(_mbc3RtcLatchedDL);
-			writer.Write(_mbc3RtcLatchedDH);
-
-			writer.Write(_cgbBgPaletteRam);
-			writer.Write(_cgbObjPaletteRam);
-			writer.Write(_isCgb);
-			writer.Write(_cartSupportsCgb);
-			writer.Write(_cartRequiresCgb);
-			writer.Write(_key1PrepareSpeedSwitch);
-			writer.Write(_serialControlWrites);
-			writer.Write(_serialTransferStarts);
-
-			writer.Write(_wram.Length);
-			writer.Write(_wram);
-
-			writer.Write(_oamDmaActive);
-			writer.Write(_oamDmaSourceBase);
-			writer.Write(_oamDmaByteIndex);
-			writer.Write(_oamDmaDotCounter);
-
-			writer.Write(_hdmaActive);
-			writer.Write(_hdmaHblankMode);
-			writer.Write(_hdmaRemainingBlocks);
-			writer.Write(_hdmaSrc);
-			writer.Write(_hdmaDst);
-		}
-
-		public void LoadState(BinaryReader reader)
-		{
-			_memory = reader.ReadBytes(0x10000);
-			_currentRomBank = reader.ReadByte();
-			int ramBanksLen = reader.ReadInt32();
-			RamBanks = reader.ReadBytes(ramBanksLen);
-			_romBankingMode = reader.ReadByte();
-			_currentRamBank = reader.ReadByte();
-			_ramEnabled = reader.ReadBoolean();
-			_mbc1 = reader.ReadBoolean();
-			_mbc2 = reader.ReadBoolean();
-			_mbc3 = reader.ReadBoolean();
-			_mbc5 = reader.ReadBoolean();
-			_romBankSize = reader.ReadInt32();
-			_romBankCount = reader.ReadInt32();
-			_ramBankSize = reader.ReadInt32();
-			_RTCEnabled = reader.ReadBoolean();
-			_multicart = reader.ReadBoolean();
-			_mbc1m = reader.ReadBoolean();
-
-			bool hasMbc2Ram = reader.ReadBoolean();
-			if (hasMbc2Ram)
-			{
-				int mbc2RamLen = reader.ReadInt32();
-				_mbc2Ram = reader.ReadBytes(mbc2RamLen);
-			}
-			else
-			{
-				_mbc2Ram = null;
-			}
-
-			_mbc5RomBank = reader.ReadUInt16();
-			_mbc5HasRumble = reader.ReadBoolean();
-			_mbc5Rumble = reader.ReadBoolean();
-
-			_mbc3RamBankOrRtcSelect = reader.ReadByte();
-			_mbc3LatchArmed = reader.ReadBoolean();
-			_mbc3Latched = reader.ReadBoolean();
-			_mbc3RtcSubCycleCounter = reader.ReadInt32();
-			_mbc3RtcSeconds = reader.ReadInt32();
-			_mbc3RtcMinutes = reader.ReadInt32();
-			_mbc3RtcHours = reader.ReadInt32();
-			_mbc3RtcDays = reader.ReadInt32();
-			_mbc3RtcHalt = reader.ReadBoolean();
-			_mbc3RtcCarry = reader.ReadBoolean();
-			_mbc3RtcLatchedS = reader.ReadByte();
-			_mbc3RtcLatchedM = reader.ReadByte();
-			_mbc3RtcLatchedH = reader.ReadByte();
-			_mbc3RtcLatchedDL = reader.ReadByte();
-			_mbc3RtcLatchedDH = reader.ReadByte();
-
-			_cgbBgPaletteRam.AsSpan().Clear();
-			reader.ReadBytes(64).CopyTo(_cgbBgPaletteRam);
-			_cgbObjPaletteRam.AsSpan().Clear();
-			reader.ReadBytes(64).CopyTo(_cgbObjPaletteRam);
-			_isCgb = reader.ReadBoolean();
-			_cartSupportsCgb = reader.ReadBoolean();
-			_cartRequiresCgb = reader.ReadBoolean();
-			_key1PrepareSpeedSwitch = reader.ReadBoolean();
-			_serialControlWrites = reader.ReadInt32();
-			_serialTransferStarts = reader.ReadInt32();
-
-			int wramLen = reader.ReadInt32();
-			reader.ReadBytes(wramLen).CopyTo(_wram, 0);
-
-			_oamDmaActive = reader.ReadBoolean();
-			_oamDmaSourceBase = reader.ReadUInt16();
-			_oamDmaByteIndex = reader.ReadInt32();
-			_oamDmaDotCounter = reader.ReadInt32();
-
-			_hdmaActive = reader.ReadBoolean();
-			_hdmaHblankMode = reader.ReadBoolean();
-			_hdmaRemainingBlocks = reader.ReadInt32();
-			_hdmaSrc = reader.ReadUInt16();
-			_hdmaDst = reader.ReadUInt16();
-		}
-
-		private static bool TrySplitSaveFile(int fileLen, int expectedRam, bool hasRtc, out int ramPart, out int rtcPart)
-		{
-			ramPart = 0;
-			rtcPart = 0;
-
-			if (!hasRtc)
-			{
-				// No RTC expected.
-				ramPart = Math.Min(fileLen, expectedRam);
-				rtcPart = 0;
-				return ramPart > 0;
-			}
-
-			// RTC trailers are 44 or 48 bytes.
-			foreach (int candidateRtc in new[] { 48, 44 })
-			{
-				if (fileLen < candidateRtc)
-				{
-					continue;
-				}
-				int candidateRam = fileLen - candidateRtc;
-				if (expectedRam == 0)
-				{
-					// RTC-only cart.
-					ramPart = 0;
-					rtcPart = candidateRtc;
-					return candidateRam == 0;
-				}
-				// Accept exact-sized SRAM, or padded to a multiple of 8KB.
-				if (candidateRam == expectedRam || (candidateRam >= expectedRam && (candidateRam % 0x2000) == 0))
-				{
-					ramPart = candidateRam;
-					rtcPart = candidateRtc;
-					return true;
-				}
-			}
-
-			// No RTC trailer detected.
-			ramPart = Math.Min(fileLen, expectedRam);
-			rtcPart = 0;
-			return ramPart > 0;
-		}
-
-		private static uint ReadDwordLE(ReadOnlySpan<byte> s, int offset)
-		{
-			return BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(offset, 4));
-		}
-
-		private static void WriteDwordLE(Span<byte> s, int offset, uint value)
-		{
-			BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(offset, 4), value);
-		}
-
-		private void WriteMbc3RtcTrailer(Span<byte> trailer)
-		{
-			// VBA-M compatible: always write 48 bytes.
-			if (trailer.Length != 48)
-			{
-				return;
-			}
-
-			uint timeS = (byte)_mbc3RtcSeconds;
-			uint timeM = (byte)_mbc3RtcMinutes;
-			uint timeH = (byte)_mbc3RtcHours;
-			uint timeDL = (byte)(_mbc3RtcDays & 0xFF);
-			uint timeDH = Mbc3RtcComposeDH();
-
-			WriteDwordLE(trailer, 0, timeS);
-			WriteDwordLE(trailer, 4, timeM);
-			WriteDwordLE(trailer, 8, timeH);
-			WriteDwordLE(trailer, 12, timeDL);
-			WriteDwordLE(trailer, 16, timeDH);
-
-			WriteDwordLE(trailer, 20, _mbc3RtcLatchedS);
-			WriteDwordLE(trailer, 24, _mbc3RtcLatchedM);
-			WriteDwordLE(trailer, 28, _mbc3RtcLatchedH);
-			WriteDwordLE(trailer, 32, _mbc3RtcLatchedDL);
-			WriteDwordLE(trailer, 36, _mbc3RtcLatchedDH);
-
-			uint unixTs = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-			WriteDwordLE(trailer, 40, unixTs);
-			WriteDwordLE(trailer, 44, 0);
-		}
-
-		private void LoadMbc3RtcTrailer(ReadOnlySpan<byte> trailer)
-		{
-			if (trailer.Length != 44 && trailer.Length != 48)
-			{
-				return;
-			}
-
-			byte timeS = (byte)(ReadDwordLE(trailer, 0) & 0xFF);
-			byte timeM = (byte)(ReadDwordLE(trailer, 4) & 0xFF);
-			byte timeH = (byte)(ReadDwordLE(trailer, 8) & 0xFF);
-			byte timeDL = (byte)(ReadDwordLE(trailer, 12) & 0xFF);
-			byte timeDH = (byte)(ReadDwordLE(trailer, 16) & 0xFF);
-
-			_mbc3RtcSeconds = timeS % 60;
-			_mbc3RtcMinutes = timeM % 60;
-			_mbc3RtcHours = timeH % 24;
-			_mbc3RtcDays = timeDL | (((timeDH & 0x01) != 0) ? 0x100 : 0);
-			_mbc3RtcHalt = (timeDH & 0x40) != 0;
-			_mbc3RtcCarry = (timeDH & 0x80) != 0;
-
-			_mbc3RtcLatchedS = (byte)(ReadDwordLE(trailer, 20) & 0xFF);
-			_mbc3RtcLatchedM = (byte)(ReadDwordLE(trailer, 24) & 0xFF);
-			_mbc3RtcLatchedH = (byte)(ReadDwordLE(trailer, 28) & 0xFF);
-			_mbc3RtcLatchedDL = (byte)(ReadDwordLE(trailer, 32) & 0xFF);
-			_mbc3RtcLatchedDH = (byte)(ReadDwordLE(trailer, 36) & 0xFF);
-
-			uint savedUnixTs = ReadDwordLE(trailer, 40);
-			if (!_mbc3RtcHalt && savedUnixTs != 0)
-			{
-				long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-				long delta = now - savedUnixTs;
-				if (delta > 0)
-				{
-					AdvanceMbc3RtcBySeconds(delta);
-				}
-			}
-		}
-
-		private void AdvanceMbc3RtcBySeconds(long deltaSeconds)
-		{
-			if (deltaSeconds <= 0)
-			{
-				return;
-			}
-
-			const long secondsPerDay = 24L * 60L * 60L;
-			const long daysPeriod = 512L;
-			const long periodSeconds = daysPeriod * secondsPerDay;
-
-			long currentTotal = (_mbc3RtcDays * secondsPerDay) + (_mbc3RtcHours * 3600L) + (_mbc3RtcMinutes * 60L) + _mbc3RtcSeconds;
-			long newTotal = currentTotal + deltaSeconds;
-			if (newTotal < 0)
-			{
-				newTotal = 0;
-			}
-
-			if (newTotal >= periodSeconds)
-			{
-				_mbc3RtcCarry = true;
-				newTotal %= periodSeconds;
-			}
-
-			int newDays = (int)(newTotal / secondsPerDay);
-			long rem = newTotal % secondsPerDay;
-			int newHours = (int)(rem / 3600L);
-			rem %= 3600L;
-			int newMinutes = (int)(rem / 60L);
-			int newSeconds = (int)(rem % 60L);
-
-			_mbc3RtcDays = newDays;
-			_mbc3RtcHours = newHours;
-			_mbc3RtcMinutes = newMinutes;
-			_mbc3RtcSeconds = newSeconds;
-		}
-
-		/// <summary>
-		/// Monotonically increasing version, incremented whenever battery-backed SRAM is modified.
-		/// Intended for autosave debounce logic.
-		/// </summary>
-		public int SaveDirtyVersion => Volatile.Read(ref _saveDirtyVersion);
-
-		/// <summary>
-		/// Total bytes of SRAM that should be persisted to disk for this cartridge.
-		/// For MBC2 this is 0x200 (512x4-bit, stored as 512 bytes).
-		/// </summary>
-		public int SaveRamByteCount
-		{
-			get
-			{
-				if (_mbc2)
-				{
-					return 0x200;
-				}
-
-				// Pan Docs RAM size codes (0x0149).
-				return _ramSizeCode switch
-				{
-					0x00 => 0,
-					0x01 => 0x0800,  // 2KB
-					0x02 => 0x2000,  // 8KB
-					0x03 => 0x8000,  // 32KB (4 banks)
-					0x04 => 0x20000, // 128KB (16 banks)
-					0x05 => 0x10000, // 64KB (8 banks)
-					_ => RamBanks?.Length ?? 0,
-				};
-			}
-		}
-
-		public byte[] GetSaveRamImage()
-		{
-			if (!HasBatteryBackedSram)
-			{
-				return Array.Empty<byte>();
-			}
-
-			int count = SaveRamByteCount;
-			if (count <= 0)
-			{
-				return Array.Empty<byte>();
-			}
-
-			if (_mbc2)
-			{
-				var ram = _mbc2Ram;
-				if (ram == null)
-				{
-					return new byte[count];
-				}
-				var image = new byte[count];
-				for (int i = 0; i < count && i < ram.Length; i++)
-				{
-					// MBC2 stores only low nibble; upper nibble reads as 1s.
-					image[i] = (byte)(0xF0 | (ram[i] & 0x0F));
-				}
-				return image;
-			}
-
-			var outBuf = new byte[count];
-			if (RamBanks != null)
-			{
-				Array.Copy(RamBanks, 0, outBuf, 0, Math.Min(count, RamBanks.Length));
-			}
-			return outBuf;
-		}
-
-		public void LoadSaveRamImage(byte[] image)
-		{
-			if (!HasBatteryBackedSram)
-			{
-				return;
-			}
-			if (image == null || image.Length == 0)
-			{
-				return;
-			}
-
-			if (_mbc2)
-			{
-				var ram = _mbc2Ram ??= new byte[0x200];
-				int max = Math.Min(ram.Length, image.Length);
-				for (int i = 0; i < max; i++)
-				{
-					ram[i] = (byte)(image[i] & 0x0F);
-				}
-				return;
-			}
-
-			if (RamBanks == null || RamBanks.Length == 0)
-			{
-				return;
-			}
-
-			Array.Copy(image, 0, RamBanks, 0, Math.Min(RamBanks.Length, image.Length));
-		}
-
-		private void MarkSaveDirtyIfBatteryBackedSave()
-		{
-			if (!HasBatteryBackedSave)
-			{
-				return;
-			}
-			Interlocked.Increment(ref _saveDirtyVersion);
-		}
-
-		public event EventHandler<char>? SerialDataReceived;
-
-		// The GameBoy has 8kB of RAM.
-		// The RAM is used to store the program and the data.
-		// The RAM is divided into different sections:
-		// 0x0000 - 0x3FFF: ROM bank 0
-		// 0x4000 - 0x7FFF: Switchable ROM bank
-		// 0x8000 - 0x97FF: Character RAM 
-		// 0x9800 - 0x9BFF: BG map data 1
-		// 0x9C00 - 0x9FFF: BG map data 2
-		// 0xA000 - 0xBFFF: Cartridge RAM 
-		// 0xC000 - 0xCFFF: Internal RAM bank 0 (fixed)
-		// 0xD000 - 0xDFFF: Internal RAM bank 1-7 (switchable - CGB only)
-		// 0xE000 - 0xFDFF: Echo RAM (reserved, do not use)
-		// 0xFE00 - 0xFE9F: OAM (sprite) RAM
-		// 0xFEA0 - 0xFEFF: Unusable RAM
-		// 0xFF00 - 0xFF7F: I/O Registers
-		// 0xFF80 - 0xFFFE: Zero Page
-		// 0xFFFF - 0xFFFF: Interrupt enable register
-		private byte[] _memory = new byte[0x10000];
-		// CGB has 8 banks of 4KB WRAM (bank 0 fixed at C000-CFFF, bank 1-7 switchable at D000-DFFF).
-		// We model the full 32KB regardless of mode; DMG simply always uses bank 1 for D000-DFFF.
-		private readonly byte[] _wram = new byte[0x8000];
-
-		// CGB palette RAM: 8 palettes * 4 colors * 2 bytes = 64 bytes each (BG and OBJ).
-		private readonly byte[] _cgbBgPaletteRam = new byte[64];
-		private readonly byte[] _cgbObjPaletteRam = new byte[64];
-		private readonly Gameboy _gameBoy;
-		private bool _isCgb;
-		private bool _cartSupportsCgb;
-		private bool _cartRequiresCgb;
-		private bool _key1PrepareSpeedSwitch;
-		private int _serialControlWrites;
-		private int _serialTransferStarts;
-
-		// OAM DMA (FF46)
-		private bool _oamDmaActive;
-		private ushort _oamDmaSourceBase;
-		private int _oamDmaByteIndex;
-		private int _oamDmaDotCounter;
-
-		// CGB VRAM DMA (GDMA/HDMA) (FF51-FF55)
-		private bool _hdmaActive;
-		private bool _hdmaHblankMode;
-		private int _hdmaRemainingBlocks;
-		private ushort _hdmaSrc;
-		private ushort _hdmaDst;
-
-		public int SerialControlWrites => _serialControlWrites;
-		public int SerialTransferStarts => _serialTransferStarts;
-
-		// OAM (sprite) RAM
-		// The OAM RAM is used to store the sprites.
-		// The sprites are 8x8 pixels or 8x16 pixels.
-		// The OAM RAM is mapped to the memory address 0xFE00 - 0xFE9F.
-		public byte[] OAMRam
-		{
-			get
-			{
-				byte[] oamRam = new byte[0xA0];
-				Array.Copy(_memory, 0xFE00, oamRam, 0, 0xA0);
-				return oamRam;
-			}
-			set
-			{
-				Array.Copy(value, 0, _memory, 0xFE00, 0xA0);
-			}
-		}
-
-		private byte _JOYP
-		{
-			get { return _memory[0xFF00]; }
-			set { _memory[0xFF00] = value; }
-		}
-
-		// JOYP (FF00) select bits (bits 4-5). Note: on real hardware these are active-low selects.
-		// bit4 (P14): 0 selects directions
-		// bit5 (P15): 0 selects buttons
-		private byte _joypSelect = 0x30;
-
-		// Last computed low nibble used for edge-based interrupt triggering.
-		private byte _joypLastLowNibble = 0x0F;
-
-		public byte Joypad
-		{
-			get
-			{
-				// Reads should be side-effect free: the game sets select bits via writes, then reads the
-				// resulting low nibble. Interrupt triggering is handled on input transitions.
-				return BuildJoypValue();
-			}
-			set
-			{
-				// Only bits 4-5 are writable (select lines). Bits 0-3 are read-only and reflect inputs.
-				_joypSelect = (byte)(value & 0b_0011_0000);
-				RefreshJoypRegister(allowInterrupt: false);
-			}
-		}
-
-		private byte BuildDirectionNibble()
-		{
-			// Active-low: 1 = not pressed, 0 = pressed.
-			byte v = 0b_0000_1111;
-			if (_joyPadKeys[0]) v = Extensions.BitReset(v, 0); // Right
-			if (_joyPadKeys[1]) v = Extensions.BitReset(v, 1); // Left
-			if (_joyPadKeys[2]) v = Extensions.BitReset(v, 2); // Up
-			if (_joyPadKeys[3]) v = Extensions.BitReset(v, 3); // Down
-			return v;
-		}
-
-		private byte BuildButtonNibble()
-		{
-			// Active-low: 1 = not pressed, 0 = pressed.
-			byte v = 0b_0000_1111;
-			if (_joyPadKeys[4]) v = Extensions.BitReset(v, 0); // A
-			if (_joyPadKeys[5]) v = Extensions.BitReset(v, 1); // B
-			if (_joyPadKeys[6]) v = Extensions.BitReset(v, 2); // Select
-			if (_joyPadKeys[7]) v = Extensions.BitReset(v, 3); // Start
-			return v;
-		}
-
-		private byte BuildJoypValue()
-		{
-			byte low = 0b_0000_1111;
-
-			// When neither group is selected, the low nibble reads as all 1s.
-			// When one or both are selected, the lines are effectively ANDed together.
-			if ((_joypSelect & 0b_0001_0000) == 0)
-			{
-				low &= BuildDirectionNibble();
-			}
-			if ((_joypSelect & 0b_0010_0000) == 0)
-			{
-				low &= BuildButtonNibble();
-			}
-
-			return (byte)(0b_1100_0000 | (_joypSelect & 0b_0011_0000) | low);
-		}
-
-		private void RefreshJoypRegister(bool allowInterrupt)
-		{
-			byte joyp = BuildJoypValue();
-			byte low = (byte)(joyp & 0x0F);
-
-			// Joypad interrupt triggers when the low nibble transitions from 0xF to non-0xF.
-			// (i.e., from "no pressed buttons in the selected group(s)" to "some pressed".)
-			if (allowInterrupt && _joypLastLowNibble == 0x0F && low != 0x0F)
-			{
-				IF |= 1 << 4;
-			}
-
-			_joypLastLowNibble = low;
-			_JOYP = joyp;
-		}
-
-		/// <summary>
-		/// Called by the host/UI after updating <see cref="_joyPadKeys"/>.
-		/// This updates the cached FF00 value and raises the joypad interrupt on the correct edge.
-		/// </summary>
-		public void NotifyJoypadStateChanged()
-		{
-			RefreshJoypRegister(allowInterrupt: true);
-		}
-
-		public bool[] _joyPadKeys { get; set; }
-
-
-		// DIV
-		// The DIV register is used to store the divider register.
-		// The DIV register is mapped to the memory address 0xFF04.
-		public byte DIV
-		{
-			get
-			{
-				return _memory[0xFF04];
-			}
-			set
-			{
-				_memory[0xFF04] = value;
-			}
-		}
-
-		// TIMA
-		// The TIMA register is used to store the timer counter.
-		// The TIMA register is mapped to the memory address 0xFF05.
-		public byte TIMA
-		{
-			get
-			{
-				return _memory[0xFF05];
-			}
-			set
-			{
-				_memory[0xFF05] = value;
-			}
-		}
-
-		// TMA
-		// The TMA register is used to store the timer modulo.
-		// The TMA register is mapped to the memory address 0xFF06.
-		public byte TMA
-		{
-			get
-			{
-				return _memory[0xFF06];
-			}
-			set
-			{
-				_memory[0xFF06] = value;
-			}
-		}
-
-		// TAC
-		// The TAC register is used to store the timer control.
-		// The TAC register is mapped to the memory address 0xFF07.
-		// Timer Control 
-		// Bits 1-0 - Input Clock Select
-		//            00: 4096   Hz 
-		//            01: 262144 Hz
-		//            10: 65536  Hz
-		//            11: 16384  Hz
-		// Bit  2   - Timer Enable
-
-		public byte TAC
-		{
-			get
-			{
-				return _memory[0xFF07];
-			}
-			set
-			{
-				_memory[0xFF07] = value;
-			}
-		}
-
-		public bool TimerEnabled
-		{
-			get
-			{
-				return (_memory[0xFF07] & 0b0000_0100) != 0;
-			}
-			set
-			{
-				_memory[0xFF07] = (byte)((_memory[0xFF07] & 0b1111_1011) | (value ? 0b0000_0100 : 0));
-			}
-		}
-		// IF
-		// The IF register is used to store the interrupt flags.
-		// The IF register is mapped to the memory address 0xFF0F.
-		// Interrupt Flag (R/W)
-		// Bit 4: Transition from High to Low of Pin number P10-P13
-		// Bit 3: Serial I/O transfer complete
-		// Bit 2: Timer Overflow
-		// Bit 1: LCDC (see STAT)
-		// Bit 0: V-Blank
-		public byte IF
-		{
-			get
-			{
-				return _memory[0xFF0F];
-			}
-			set
-			{
-				_memory[0xFF0F] = value |= 0xE0;
-			}
-		}
-
-		public bool IFVBlank
-		{
-			get
-			{
-				return (_memory[0xFF0F] & 0b0000_0001) != 0;
-			}
-			set
-			{
-				_memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1111_1110) | (value ? 0b0000_0001 : 0));
-			}
-		}
-
-		public bool IFLCDStat
-		{
-			get
-			{
-				return (_memory[0xFF0F] & 0b0000_0010) != 0;
-			}
-			set
-			{
-				_memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1111_1101) | (value ? 0b0000_0010 : 0));
-			}
-		}
-
-		public bool IFTimer
-		{
-			get
-			{
-				return (_memory[0xFF0F] & 0b0000_0100) != 0;
-			}
-			set
-			{
-				_memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1111_1011) | (value ? 0b0000_0100 : 0));
-			}
-		}
-
-		public bool IFSerial
-		{
-			get
-			{
-				return (_memory[0xFF0F] & 0b0000_1000) != 0;
-			}
-			set
-			{
-				_memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1111_0111) | (value ? 0b0000_1000 : 0));
-			}
-		}
-
-		public bool IFJoypad
-		{
-			get
-			{
-				return (_memory[0xFF0F] & 0b0001_0000) != 0;
-			}
-			set
-			{
-				_memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1110_1111) | (value ? 0b0001_0000 : 0));
-			}
-		}
-
-		// LCDC
-		// The LCDC register is used to store the LCD control.
-		// The LCDC register is mapped to the memory address 0xFF40.
-		// LCD Control
-		// Bit 7 - LCD Display Enable             (0=Off, 1=On)
-		public bool LCDEnabled
-		{
-			get
-			{
-				return (_memory[0xFF40] & 0b1000_0000) != 0;
-			}
-			set
-			{
-				_memory[0xFF40] = (byte)((_memory[0xFF40] & 0b0111_1111) | (value ? 0b1000_0000 : 0));
-			}
-		}
-		// Bit 6 - Window Tile Map Display Select (0=9800-9BFF, 1=9C00-9FFF)
-		public bool WindowTileMapDisplaySelect
-		{
-			get
-			{
-				return (_memory[0xFF40] & 0b0100_0000) != 0;
-			}
-			set
-			{
-				_memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1011_1111) | (value ? 0b0100_0000 : 0));
-			}
-		}
-		// Bit 5 - Window Display Enable          (0=Off, 1=On)
-		public bool WindowDisplayEnable
-		{
-			get
-			{
-				return (_memory[0xFF40] & 0b0010_0000) != 0;
-			}
-			set
-			{
-				_memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1101_1111) | (value ? 0b0010_0000 : 0));
-			}
-		}
-		// Bit 4 - BG & Window Tile Data Select   (0=8800-97FF, 1=8000-8FFF)
-		public bool BGWindowTileDataSelect
-		{
-			get
-			{
-				return (_memory[0xFF40] & 0b0001_0000) != 0;
-			}
-			set
-			{
-				_memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1110_1111) | (value ? 0b0001_0000 : 0));
-			}
-		}
-		// Bit 3 - BG Tile Map Display Select     (0=9800-9BFF, 1=9C00-9FFF)
-		public bool BGTileMapDisplaySelect
-		{
-			get
-			{
-				return (_memory[0xFF40] & 0b0000_1000) != 0;
-			}
-			set
-			{
-				_memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1111_0111) | (value ? 0b0000_1000 : 0));
-			}
-		}
-		// Bit 2 - OBJ (Sprite) Size              (0=8x8, 1=8x16)
-		public bool OBJSize
-		{
-			get
-			{
-				return (_memory[0xFF40] & 0b0000_0100) != 0;
-			}
-			set
-			{
-				_memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1111_1011) | (value ? 0b0000_0100 : 0));
-			}
-		}
-		// Bit 1 - OBJ (Sprite) Display Enable    (0=Off, 1=On)
-		public bool SpriteDisplay
-		{
-			get
-			{
-				return (_memory[0xFF40] & 0b0000_0010) != 0;
-			}
-			set
-			{
-				_memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1111_1101) | (value ? 0b0000_0010 : 0));
-			}
-		}
-		// Bit 0 - BG Display (for CGB see below) (0=Off, 1=On)
-		public bool BGDisplay
-		{
-			get
-			{
-				return (_memory[0xFF40] & 0b0000_0001) != 0;
-			}
-			set
-			{
-				_memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1111_1110) | (value ? 0b0000_0001 : 0));
-			}
-		}
-
-		public byte LCDC
-		{
-			get
-			{
-				return _memory[0xFF40];
-			}
-			set
-			{
-				_memory[0xFF40] = value;
-			}
-		}
-
-		// STAT
-		// The STAT register is used to store the LCDC status.
-		// The STAT register is mapped to the memory address 0xFF41.
-		// LCDC Status
-		// Bit 6 - LYC=LY Coincidence Interrupt (1=Enable) (Read/Write)
-		// Bit 5 - Mode 2 OAM Interrupt         (1=Enable) (Read/Write)
-		// Bit 4 - Mode 1 V-Blank Interrupt     (1=Enable) (Read/Write)
-		// Bit 3 - Mode 0 H-Blank Interrupt     (1=Enable) (Read/Write)
-		// Bit 2 - Coincidence Flag  (0:LYC<>LY, 1:LYC=LY) (Read Only)
-		// Bit 1-0 - Mode Flag       (Mode 0-3, see below) (Read Only)
-		//           0: During H-Blank
-		//           1: During V-Blank
-		//           2: During Searching OAM
-		//           3: During Transfering Data to LCD Driver
-		public byte LCDStatus
-		{
-			get
-			{
-				return _memory[0xFF41];
-			}
-			set
-			{
-				_memory[0xFF41] = value;
-			}
-		}
-
-		// SCY
-		// The SCY register is used to store the scroll Y.
-		// The SCY register is mapped to the memory address 0xFF42.
-		public byte SCY
-		{
-			get
-			{
-				return _memory[0xFF42];
-			}
-			set
-			{
-				_memory[0xFF42] = value;
-			}
-		}
-
-		// SCX
-		// The SCX register is used to store the scroll X.
-		// The SCX register is mapped to the memory address 0xFF43.
-		public byte SCX
-		{
-			get
-			{
-				return _memory[0xFF43];
-			}
-			set
-			{
-				_memory[0xFF43] = value;
-			}
-		}
-
-		// LY
-		// The LY register is used to store the current line.
-		// The LY register is mapped to the memory address 0xFF44.
-		public byte LY
-		{
-			get
-			{
-				return _memory[0xFF44];
-			}
-			set
-			{
-				_memory[0xFF44] = value;
-			}
-		}
-
-		// LYC
-		// The LYC register is used to store the LY compare.
-		// The LYC register is mapped to the memory address 0xFF45.
-		public byte LYC
-		{
-			get
-			{
-				return _memory[0xFF45];
-			}
-			set
-			{
-				_memory[0xFF45] = value;
-			}
-		}
-
-		// BGP
-		// The BGP register is used to store the background and window palette data.
-		// The BGP register is mapped to the memory address 0xFF47.
-		// Bit 7-6 - Shade for Color Number 3
-		// Bit 5-4 - Shade for Color Number 2
-		// Bit 3-2 - Shade for Color Number 1
-		// Bit 1-0 - Shade for Color Number 0
-		//           0: White
-		//           1: Light gray
-		//           2: Dark gray
-		//           3: Black
-		public byte BGP
-		{
-			get
-			{
-				return _memory[0xFF47];
-			}
-			set
-			{
-				_memory[0xFF47] = value;
-			}
-		}
-
-		// OBP0
-		// The OBP0 register is used to store the object palette 0 data.
-		// The OBP0 register is mapped to the memory address 0xFF48.
-		// Bit 7-6 - Shade for Color Number 3
-		// Bit 5-4 - Shade for Color Number 2
-		// Bit 3-2 - Shade for Color Number 1
-		// Bit 1-0 - Shade for Color Number 0
-		//           0: White
-		//           1: Light gray
-		//           2: Dark gray
-		//           3: Black
-		public byte OBP0
-		{
-			get
-			{
-				return _memory[0xFF48];
-			}
-			set
-			{
-				_memory[0xFF48] = value;
-			}
-		}
-
-		// OBP1
-		// The OBP1 register is used to store the object palette 1 data.
-		// The OBP1 register is mapped to the memory address 0xFF49.
-		// Bit 7-6 - Shade for Color Number 3
-		// Bit 5-4 - Shade for Color Number 2
-		// Bit 3-2 - Shade for Color Number 1
-		// Bit 1-0 - Shade for Color Number 0
-		//           0: White
-		//           1: Light gray
-		//           2: Dark gray
-		//           3: Black
-		public byte OBP1
-		{
-			get
-			{
-				return _memory[0xFF49];
-			}
-			set
-			{
-				_memory[0xFF49] = value;
-			}
-		}
-
-		// WY
-		// The WY register is used to store the window Y position.
-		// The WY register is mapped to the memory address 0xFF4A.
-		public byte WY
-		{
-			get
-			{
-				return _memory[0xFF4A];
-			}
-			set
-			{
-				_memory[0xFF4A] = value;
-			}
-		}
-
-		// WX
-		// The WX register is used to store the window X position.
-		// The WX register is mapped to the memory address 0xFF4B.
-		public byte WX
-		{
-			get
-			{
-				return _memory[0xFF4B];
-			}
-			set
-			{
-				_memory[0xFF4B] = value;
-			}
-		}
-
-		// OPRI
-		// Object Priority Mode (CGB only).
-		// Bit 0: 0 = OAM priority (smaller OAM index wins), 1 = coordinate priority (lower X wins).
-		// Mapped to 0xFF6C.
-		public byte OPRI
-		{
-			get
-			{
-				return _memory[0xFF6C];
-			}
-			set
-			{
-				_memory[0xFF6C] = value;
-			}
-		}
-
-		// Interrupt enable register
-		// The last byte of the RAM is always mapped to the memory address 0xFFFF.
-		// The interrupt enable register is used to enable and disable the interrupts.
-		public byte InterruptEnableRegister
-		{
-			get
-			{
-				return _memory[0xFFFF];
-			}
-			set
-			{
-				_memory[0xFFFF] = value;
-			}
-		}
-
-		public bool IEVBlank
-		{
-			get
-			{
-				return (_memory[0xFFFF] & 0b0000_0001) != 0;
-			}
-			set
-			{
-				_memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1111_1110) | (value ? 0b0000_0001 : 0));
-			}
-		}
-
-		public bool IELCDStat
-		{
-			get
-			{
-				return (_memory[0xFFFF] & 0b0000_0010) != 0;
-			}
-			set
-			{
-				_memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1111_1101) | (value ? 0b0000_0010 : 0));
-			}
-		}
-
-		public bool IETimer
-		{
-			get
-			{
-				return (_memory[0xFFFF] & 0b0000_0100) != 0;
-			}
-			set
-			{
-				_memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1111_1011) | (value ? 0b0000_0100 : 0));
-			}
-		}
-
-		public bool IESerial
-		{
-			get
-			{
-				return (_memory[0xFFFF] & 0b0000_1000) != 0;
-			}
-			set
-			{
-				_memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1111_0111) | (value ? 0b0000_1000 : 0));
-			}
-		}
-
-		public bool IEJoypad
-		{
-			get
-			{
-				return (_memory[0xFFFF] & 0b0001_0000) != 0;
-			}
-			set
-			{
-				_memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1110_1111) | (value ? 0b0001_0000 : 0));
-			}
-		}
-
-		private byte[] _cartRom = null!;
-		private byte _currentRomBank = 1;
-		private byte[] RamBanks = null!;
-		private byte _romBankingMode;
-		private byte _currentRamBank = 0;
-		private bool _ramEnabled;
-		private bool _mbc1;
-		private bool _mbc2;
-		private bool _mbc3;
-		private bool _mbc5;
-		private int _romBankSize;
-		private int _romBankCount;
-		private int _ramBankSize;
-		private bool _RTCEnabled;
-		private bool _multicart = false;
-		private bool _mbc1m;
-		private byte[]? _mbc2Ram;
-
-		// MBC5 state
-		private ushort _mbc5RomBank = 1;
-		private bool _mbc5HasRumble;
-		private bool _mbc5Rumble;
-
-		// MBC3 state
-		private byte _mbc3RamBankOrRtcSelect;
-		private bool _mbc3LatchArmed;
-		private bool _mbc3Latched;
-		private int _mbc3RtcSubCycleCounter;
-		private int _mbc3RtcSeconds;
-		private int _mbc3RtcMinutes;
-		private int _mbc3RtcHours;
-		private int _mbc3RtcDays; // 0-511
-		private bool _mbc3RtcHalt;
-		private bool _mbc3RtcCarry;
-		private byte _mbc3RtcLatchedS;
-		private byte _mbc3RtcLatchedM;
-		private byte _mbc3RtcLatchedH;
-		private byte _mbc3RtcLatchedDL;
-		private byte _mbc3RtcLatchedDH;
-
-		private static ReadOnlySpan<byte> NintendoLogo => new byte[]
-		{
-			0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B,
-			0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
-			0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
-			0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
-			0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC,
-			0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E
-		};
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private bool DetectMbc1mMulticart(byte[] rom)
-		{
-			// Pan Docs: MBC1M multi-carts can be identified by a Nintendo logo/header in bank $10.
-			const int logoOffsetInBank = 0x0104;
-			const int bank10Base = 0x10 * 0x4000;
-			int start = bank10Base + logoOffsetInBank;
-			if (rom == null || rom.Length < start + NintendoLogo.Length)
-			{
-				return false;
-			}
-			for (int i = 0; i < NintendoLogo.Length; i++)
-			{
-				if (rom[start + i] != NintendoLogo[i])
-				{
-					return false;
-				}
-			}
-			return true;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static bool IsPowerOfTwo(int value) => value > 0 && (value & (value - 1)) == 0;
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetCartRomBankCount()
-		{
-			if (_cartRom == null || _cartRom.Length < 0x4000)
-			{
-				return 0;
-			}
-			return _cartRom.Length / 0x4000;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int MirrorRomBank(int bank)
-		{
-			int availableBanks = GetCartRomBankCount();
-			if (availableBanks <= 0)
-			{
-				return 0;
-			}
-			if (IsPowerOfTwo(availableBanks))
-			{
-				return bank & (availableBanks - 1);
-			}
-			bank %= availableBanks;
-			if (bank < 0) bank += availableBanks;
-			return bank;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetMbc1Bank0()
-		{
-			// In mode 0, bank 0 area is fixed to bank 0.
-			// In mode 1, bank 0 area selects bank (upper2 << 5).
-			int shift = _mbc1m ? 4 : 5;
-			int bank = _romBankingMode == 1 ? ((_currentRamBank & 0x03) << shift) : 0;
-			return MirrorRomBank(bank);
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetMbc1Bank1()
-		{
-			// 0x4000-0x7FFF always uses both registers.
-			// MBC1M differs: secondary applies to bits 4-5 and bit 4 of the main register is ignored.
-			int bank;
-			if (_mbc1m)
-			{
-				bank = (_currentRomBank & 0x0F) | ((_currentRamBank & 0x03) << 4);
-				// 00->01 translation compares the FULL 5-bit ROM banking register.
-				if ( (_currentRomBank & 0x1F) == 0)
-				{
-					bank |= 0x01;
-				}
-			}
-			else
-			{
-				bank = (_currentRomBank & 0x1F) | ((_currentRamBank & 0x03) << 5);
-				// 00->01 translation compares the FULL 5-bit ROM banking register.
-				if ( (_currentRomBank & 0x1F) == 0)
-				{
-					bank |= 0x01;
-				}
-			}
-			return MirrorRomBank(bank);
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetMbc1RamBank()
-		{
-			// In mode 0, always bank 0. In mode 1, select upper2.
-			return _romBankingMode == 1 ? (_currentRamBank & 0x03) : 0;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetMbc2RomBank()
-		{
-			int bank = _currentRomBank & 0x0F;
-			if (bank == 0)
-			{
-				bank = 1;
-			}
-			return MirrorRomBank(bank);
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetMbc2RamIndex(ushort address)
-		{
-			// Pan Docs: only bottom 9 bits are used, so A200-BFFF echoes A000-A1FF.
-			return (address - 0xA000) & 0x01FF;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetMbc3RomBank()
-		{
-			int bank = _currentRomBank & 0x7F;
-			if (bank == 0)
-			{
-				bank = 1;
-			}
-			return MirrorRomBank(bank);
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetMbc5RomBank()
-		{
-			// MBC5 supports a 9-bit ROM bank number (0-511). Bank 0 is allowed.
-			int bank = _mbc5RomBank & 0x01FF;
-			return MirrorRomBank(bank);
-		}
-
-		private void StartOamDma(byte highByte)
-		{
-			// FF46 write starts a DMA transfer from XX00-XX9F to FE00-FE9F.
-			_memory[0xFF46] = highByte;
-			_oamDmaActive = true;
-			_oamDmaSourceBase = (ushort)(highByte << 8);
-			_oamDmaByteIndex = 0;
-			_oamDmaDotCounter = 0;
-			MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
-		}
-
-		private byte ReadByteForDma(ushort address)
-		{
-			// Like ReadByte, but without CPU access restrictions (Mode 3 / DMA / OAM access) and without OAM-bug side effects.
-			int newAddress;
-			if (address < 0x4000)
-			{
-				if (_mbc1)
-				{
-					int bank = GetMbc1Bank0();
-					newAddress = (bank * 0x4000) + address;
-					return _cartRom[newAddress];
-				}
-				if (_mbc2)
-				{
-					return _cartRom[address];
-				}
-				if (_mbc5)
-				{
-					// MBC5: bank 0 is always mapped here.
-					return _cartRom[address];
-				}
-				return _cartRom[address];
-			}
-			if (address >= 0x4000 && address <= 0x7FFF)
-			{
-				if (_mbc1)
-				{
-					int bank = GetMbc1Bank1();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc2)
-				{
-					int bank = GetMbc2RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc3)
-				{
-					int bank = GetMbc3RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc5)
-				{
-					int bank = GetMbc5RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				return _memory[address];
-			}
-			if (address >= 0x8000 && address <= 0x9FFF)
-			{
-				int bank = GetCpuVramBank();
-				int offset = address - 0x8000;
-				return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
-			}
-			if (address >= 0xA000 && address <= 0xBFFF)
-			{
-				return ReadRam(address);
-			}
-			if (address >= 0xC000 && address <= 0xFDFF)
-			{
-				int idx = MapWramAddress(address);
-				return idx >= 0 ? _wram[idx] : (byte)0xFF;
-			}
-			if (address >= 0xFE00 && address <= 0xFE9F)
-			{
-				return _gameBoy._ppu.OAM[address - 0xFE00];
-			}
-			return _memory[address];
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private ushort GetHdmaSource()
-		{
-			ushort src = (ushort)((_memory[0xFF51] << 8) | (_memory[0xFF52] & 0xF0));
-			// Pan Docs: source range is 0000-7FF0 or A000-DFF0; we trust the game.
-			return src;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private ushort GetHdmaDestination()
-		{
-			ushort dst = (ushort)(0x8000 | ((_memory[0xFF53] & 0x1F) << 8) | (_memory[0xFF54] & 0xF0));
-			return dst;
-		}
-
-		private void UpdateHdmaRegsFromState()
-		{
-			_memory[0xFF51] = (byte)(_hdmaSrc >> 8);
-			_memory[0xFF52] = (byte)(_hdmaSrc & 0xF0);
-			_memory[0xFF53] = (byte)((_hdmaDst >> 8) & 0x1F);
-			_memory[0xFF54] = (byte)(_hdmaDst & 0xF0);
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private byte ReadHdma5Value()
-		{
-			if (!_isCgb)
-			{
-				return 0xFF;
-			}
-			if (_hdmaActive)
-			{
-				int remainingMinus1 = Math.Max(0, _hdmaRemainingBlocks - 1) & 0x7F;
-				// Bit7 reads 0 while active.
-				return (byte)remainingMinus1;
-			}
-			// Bit7 reads 1 when inactive.
-			return 0xFF;
-		}
-
-		private void WriteByteToVramForDma(ushort address, byte value)
-		{
-			if (address < 0x8000 || address > 0x9FFF)
-			{
-				return;
-			}
-			int bank = GetCpuVramBank();
-			int offset = address - 0x8000;
-			int idx = (bank * 0x2000) + offset;
-			if ((uint)idx >= (uint)_gameBoy._ppu.VideoRam.Length)
-			{
-				return;
-			}
-			_gameBoy._ppu.VideoRam[idx] = value;
-		}
-
-		private void TransferHdmaBlock()
-		{
-			ushort src = _hdmaSrc;
-			ushort dst = _hdmaDst;
-			for (int i = 0; i < 0x10; i++)
-			{
-				byte b = ReadByteForDma((ushort)(src + i));
-				WriteByteToVramForDma((ushort)(dst + i), b);
-			}
-			_hdmaSrc = (ushort)(src + 0x10);
-			_hdmaDst = (ushort)(dst + 0x10);
-			UpdateHdmaRegsFromState();
-			MarkVideoDebugDirty(dst < 0x9800 ? VideoDebugDirtyFlags.TileData : VideoDebugDirtyFlags.TileMaps);
-		}
-
-		private void StartGdmaOrHdma(byte hdma5Value)
-		{
-			int blocks = (hdma5Value & 0x7F) + 1;
-			bool hblankMode = (hdma5Value & 0x80) != 0;
-
-			_hdmaSrc = GetHdmaSource();
-			_hdmaDst = GetHdmaDestination();
-			_hdmaRemainingBlocks = blocks;
-			_hdmaHblankMode = hblankMode;
-			_hdmaActive = true;
-
-			if (!hblankMode)
-			{
-				// General-purpose DMA: transfer all blocks immediately.
-				for (int i = 0; i < blocks; i++)
-				{
-					TransferHdmaBlock();
-				}
-				_hdmaActive = false;
-				_hdmaHblankMode = false;
-				_hdmaRemainingBlocks = 0;
-				_memory[0xFF55] = 0xFF;
-				return;
-			}
-
-			// HBlank DMA: becomes active; transfer happens during Mode 0 HBlank.
-			_memory[0xFF55] = ReadHdma5Value();
-		}
-
-		internal void TickHblankDmaIfActive()
-		{
-			if (!_isCgb || !_hdmaActive || !_hdmaHblankMode)
-			{
-				return;
-			}
-			// Only during visible scanlines.
-			if (_memory[0xFF44] >= 144)
-			{
-				return;
-			}
-			if (_hdmaRemainingBlocks <= 0)
-			{
-				_hdmaActive = false;
-				_hdmaHblankMode = false;
-				_memory[0xFF55] = 0xFF;
-				return;
-			}
-			TransferHdmaBlock();
-			_hdmaRemainingBlocks--;
-			if (_hdmaRemainingBlocks <= 0)
-			{
-				_hdmaActive = false;
-				_hdmaHblankMode = false;
-				_memory[0xFF55] = 0xFF;
-			}
-			else
-			{
-				_memory[0xFF55] = ReadHdma5Value();
-			}
-		}
-
-		private void TickOamDma(int baseCycles)
-		{
-			if (!_oamDmaActive || baseCycles <= 0)
-			{
-				return;
-			}
-
-			// 160 bytes total. Timing: 160 M-cycles.
-			// In terms of PPU dots: 640 dots in normal speed, 320 dots in double speed.
-			int dotsPerByte = _gameBoy.DoubleSpeed ? 2 : 4;
-			_oamDmaDotCounter += baseCycles;
-			bool wroteAny = false;
-			while (_oamDmaDotCounter >= dotsPerByte && _oamDmaByteIndex < 0xA0)
-			{
-				_oamDmaDotCounter -= dotsPerByte;
-				ushort src = (ushort)(_oamDmaSourceBase + _oamDmaByteIndex);
-				byte b = ReadByteForDma(src);
-				int i = _oamDmaByteIndex;
-				_memory[0xFE00 + i] = b;
-				_gameBoy._ppu.OAM[i] = b;
-				_oamDmaByteIndex++;
-				wroteAny = true;
-			}
-			if (wroteAny)
-			{
-				MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
-			}
-			if (_oamDmaByteIndex >= 0xA0)
-			{
-				_oamDmaActive = false;
-			}
-		}
-
-		internal void TickBaseCycles(int baseCycles)
-		{
-			TickOamDma(baseCycles);
-			if (!_mbc3 || !_mbc3HasTimer || _mbc3RtcHalt)
-			{
-				return;
-			}
-
-			// MBC3 RTC increments at 1Hz, independently of CPU speed.
-			// We advance it using the emulator's "base" cycle clock (DMG base clock = 4_194_304 Hz).
-			const int CyclesPerSecond = 4_194_304;
-			if (baseCycles <= 0)
-			{
-				return;
-			}
-			_mbc3RtcSubCycleCounter += baseCycles;
-			while (_mbc3RtcSubCycleCounter >= CyclesPerSecond)
-			{
-				_mbc3RtcSubCycleCounter -= CyclesPerSecond;
-
-				_mbc3RtcSeconds++;
-				if (_mbc3RtcSeconds >= 60)
-				{
-					_mbc3RtcSeconds = 0;
-					_mbc3RtcMinutes++;
-					if (_mbc3RtcMinutes >= 60)
-					{
-						_mbc3RtcMinutes = 0;
-						_mbc3RtcHours++;
-						if (_mbc3RtcHours >= 24)
-						{
-							_mbc3RtcHours = 0;
-							_mbc3RtcDays++;
-							if (_mbc3RtcDays >= 512)
-							{
-								_mbc3RtcDays = 0;
-								_mbc3RtcCarry = true;
-							}
-						}
-					}
-				}
-			}
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private byte Mbc3RtcComposeDH()
-		{
-			byte dh = 0;
-			if (((_mbc3RtcDays >> 8) & 0x01) != 0) dh |= 0x01;
-			if (_mbc3RtcHalt) dh |= 0x40;
-			if (_mbc3RtcCarry) dh |= 0x80;
-			return dh;
-		}
-
-		private void Mbc3RtcLatch()
-		{
-			_mbc3RtcLatchedS = (byte)_mbc3RtcSeconds;
-			_mbc3RtcLatchedM = (byte)_mbc3RtcMinutes;
-			_mbc3RtcLatchedH = (byte)_mbc3RtcHours;
-			_mbc3RtcLatchedDL = (byte)(_mbc3RtcDays & 0xFF);
-			_mbc3RtcLatchedDH = Mbc3RtcComposeDH();
-			_mbc3Latched = true;
-		}
-
-		private byte Mbc3RtcReadSelected()
-		{
-			// Reads return the latched snapshot once a latch has occurred; otherwise, read live values.
-			byte sel = _mbc3RamBankOrRtcSelect;
-			bool useLatched = _mbc3Latched;
-			switch (sel)
-			{
-				case 0x08:
-					return useLatched ? _mbc3RtcLatchedS : (byte)_mbc3RtcSeconds;
-				case 0x09:
-					return useLatched ? _mbc3RtcLatchedM : (byte)_mbc3RtcMinutes;
-				case 0x0A:
-					return useLatched ? _mbc3RtcLatchedH : (byte)_mbc3RtcHours;
-				case 0x0B:
-					return useLatched ? _mbc3RtcLatchedDL : (byte)(_mbc3RtcDays & 0xFF);
-				case 0x0C:
-					return useLatched ? _mbc3RtcLatchedDH : Mbc3RtcComposeDH();
-				default:
-					return 0xFF;
-			}
-		}
-
-		private void Mbc3RtcWriteSelected(byte value)
-		{
-			// Writing affects the live counter, not the latched snapshot.
-			byte sel = _mbc3RamBankOrRtcSelect;
-			switch (sel)
-			{
-				case 0x08:
-					_mbc3RtcSeconds = value % 60;
-					break;
-				case 0x09:
-					_mbc3RtcMinutes = value % 60;
-					break;
-				case 0x0A:
-					_mbc3RtcHours = value % 24;
-					break;
-				case 0x0B:
-					_mbc3RtcDays = (_mbc3RtcDays & 0x100) | value;
-					break;
-				case 0x0C:
-				{
-					int dayBit8 = (value & 0x01) != 0 ? 0x100 : 0;
-					bool newHalt = (value & 0x40) != 0;
-					bool newCarry = (value & 0x80) != 0;
-					_mbc3RtcDays = (_mbc3RtcDays & 0xFF) | dayBit8;
-					_mbc3RtcCarry = newCarry;
-					_mbc3RtcHalt = newHalt;
-					break;
-				}
-			}
-
-			MarkSaveDirtyIfBatteryBackedSave();
-		}
-
-		public GBMemory(Gameboy gameBoy)
-		{
-			// Avoid continuously growing log files during normal runs.
-			// Set env var GBOG_CPU_LOG=1 to enable cpu.log for debugging.
-			if (Environment.GetEnvironmentVariable("GBOG_CPU_LOG") == "1")
-			{
-				Log.Logger = new LoggerConfiguration()
-					.WriteTo.File("cpu.log", outputTemplate: "{Message:lj}{NewLine}{Exception}")
-					.CreateLogger();
-			}
-			else
-			{
-				Log.Logger = new LoggerConfiguration()
-					.MinimumLevel.Warning()
-					.CreateLogger();
-			}
-			_gameBoy = gameBoy;
-			_joyPadKeys = new bool[8];
-
-			//InitialiseBootROM();
-			InitialiseIORegisters();
-			//_memory[0xFF44] = 0x90;
-		}
-
-		public bool IsCgb => _isCgb;
-		public bool CartSupportsCgb => _cartSupportsCgb;
-		public bool CartRequiresCgb => _cartRequiresCgb;
-		public bool Key1PrepareSpeedSwitch => _key1PrepareSpeedSwitch;
-
-		private byte BuildKey1Value()
-		{
-			// KEY1 (CGB only):
-			// Bit 7 = current speed (0 normal, 1 double)
-			// Bit 0 = prepare speed switch (writable)
-			// Bits 6-1 read as 1
-			byte value = 0x7E;
-			if (_gameBoy.DoubleSpeed)
-			{
-				value |= 0x80;
-			}
-			if (_key1PrepareSpeedSwitch)
-			{
-				value |= 0x01;
-			}
-			return value;
-		}
-
-		private void WriteKey1(byte value)
-		{
-			if (!_isCgb)
-			{
-				return;
-			}
-			_key1PrepareSpeedSwitch = (value & 0x01) != 0;
-			_memory[0xFF4D] = BuildKey1Value();
-		}
-
-		public void ClearKey1SpeedSwitchPrepare()
-		{
-			if (!_isCgb)
-			{
-				return;
-			}
-			_key1PrepareSpeedSwitch = false;
-			_memory[0xFF4D] = BuildKey1Value();
-		}
-
-		public void RefreshKey1()
-		{
-			if (!_isCgb)
-			{
-				return;
-			}
-			_memory[0xFF4D] = BuildKey1Value();
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetCpuVramBank()
-		{
-			return _isCgb ? (_memory[0xFF4F] & 0x01) : 0;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetCpuWramBank()
-		{
-			if (!_isCgb)
-			{
-				return 1;
-			}
-			int bank = _memory[0xFF70] & 0x07;
-			if (bank == 0)
-			{
-				bank = 1;
-			}
-			return bank;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int MapWramAddress(ushort address)
-		{
-			// Handle echo RAM (E000-FDFF) by mirroring to C000-DDFF.
-			if (address >= 0xE000 && address <= 0xFDFF)
-			{
-				address = (ushort)(address - 0x2000);
-			}
-
-			if (address >= 0xC000 && address <= 0xCFFF)
-			{
-				return address - 0xC000; // bank 0
-			}
-			if (address >= 0xD000 && address <= 0xDFFF)
-			{
-				int bank = GetCpuWramBank(); // 1..7
-				return 0x1000 + ((bank - 1) * 0x1000) + (address - 0xD000);
-			}
-
-			return -1;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private byte ReadCgbPaletteData(bool obj, int index)
-		{
-			index &= 0x3F;
-			return obj ? _cgbObjPaletteRam[index] : _cgbBgPaletteRam[index];
-		}
-
-		private void WriteCgbPaletteData(bool obj, byte value)
-		{
-			ushort specAddr = obj ? (ushort)0xFF6A : (ushort)0xFF68;
-			int index = _memory[specAddr] & 0x3F;
-			if (obj)
-			{
-				CgbObjPaletteWriteCount++;
-				_cgbObjPaletteRam[index] = value;
-			}
-			else
-			{
-				CgbBgPaletteWriteCount++;
-				_cgbBgPaletteRam[index] = value;
-			}
-
-			// Auto-increment if bit 7 is set.
-			if ((_memory[specAddr] & 0x80) != 0)
-			{
-				int next = (index + 1) & 0x3F;
-				_memory[specAddr] = (byte)((_memory[specAddr] & 0x80) | next);
-			}
-		}
-
-		private void AutoIncrementCgbPaletteIndex(bool obj)
-		{
-			ushort specAddr = obj ? (ushort)0xFF6A : (ushort)0xFF68;
-			byte spec = _memory[specAddr];
-			if ((spec & 0x80) == 0)
-			{
-				return;
-			}
-			int index = spec & 0x3F;
-			int next = (index + 1) & 0x3F;
-			_memory[specAddr] = (byte)((spec & 0x80) | next);
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static byte Expand5To8(int v)
-		{
-			v &= 0x1F;
-			return (byte)((v << 3) | (v >> 2));
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static GBOG.CPU.Color DecodeBgr555(ushort word)
-		{
-			// CGB palette entries are 15-bit RGB555 in little-endian:
-			// bits 0-4 = Red, 5-9 = Green, 10-14 = Blue.
-			int r5 = word & 0x1F;
-			int g5 = (word >> 5) & 0x1F;
-			int b5 = (word >> 10) & 0x1F;
-			return new GBOG.CPU.Color
-			{
-				R = Expand5To8(r5),
-				G = Expand5To8(g5),
-				B = Expand5To8(b5),
-				A = 255,
-			};
-		}
-
-		internal static GBOG.CPU.Color DecodeCgbPaletteColorFromRam(ReadOnlySpan<byte> palRam, int paletteNumber, int colorNumber)
-		{
-			paletteNumber &= 0x07;
-			colorNumber &= 0x03;
-			int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
-			ushort word = (ushort)(palRam[baseIndex] | (palRam[baseIndex + 1] << 8));
-			return DecodeBgr555(word);
-		}
-
-		internal GBOG.CPU.Color GetCgbBgPaletteColor(int paletteNumber, int colorNumber)
-		{
-			paletteNumber &= 0x07;
-			colorNumber &= 0x03;
-			int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
-			ushort word = (ushort)(_cgbBgPaletteRam[baseIndex] | (_cgbBgPaletteRam[baseIndex + 1] << 8));
-			return DecodeBgr555(word);
-		}
-
-		internal GBOG.CPU.Color GetCgbObjPaletteColor(int paletteNumber, int colorNumber)
-		{
-			paletteNumber &= 0x07;
-			colorNumber &= 0x03;
-			int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
-			ushort word = (ushort)(_cgbObjPaletteRam[baseIndex] | (_cgbObjPaletteRam[baseIndex + 1] << 8));
-			return DecodeBgr555(word);
-		}
-
-		internal void SetNr52Channel1Active(bool active)
-		{
-			if (active)
-			{
-				_memory[0xFF26] |= 0x01;
-			}
-			else
-			{
-				_memory[0xFF26] &= 0xFE;
-			}
-		}
-
-		private void InitialiseBootROM()
-		{
-			// The boot ROM is used to initialise the GameBoy.
-			// The boot ROM is mapped to the memory address 0x0000 - 0x00FF.
-			// The boot ROM is disabled after the GameBoy has been initialised.
-			var rom = File.ReadAllBytes("DMG_ROM.bin");
-			Array.Copy(rom, 0, _memory, 0, 0x100);
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		public byte ReadByte(ushort address)
-		{
-			if (_gameBoy.CpuMicroStepActive)
-			{
-				_gameBoy.AdvanceCpuCyclesWithinMCycle(targetCpuCycle: 2);
-			}
-
-			// During OAM DMA on DMG, the CPU can access only HRAM (FF80-FFFE) and typically IE (FFFF).
-			// Reads elsewhere return open bus ($FF).
-			if (_oamDmaActive && !_isCgb && address < 0xFF80)
-			{
-				return 0xFF;
-			}
-
-			// VRAM is inaccessible to the CPU during Mode 3.
-			if (address >= 0x8000 && address <= 0x9FFF && IsVramBlockedForCpu())
-			{
-				return 0xFF;
-			}
-
-			int newAddress;
-			if (address >= 0xFE00 && address <= 0xFEFF)
-			{
-				_gameBoy.MarkOamRead();
-				// OAM is inaccessible during Modes 2 and 3, and also during OAM DMA.
-				if (address <= 0xFE9F && (_oamDmaActive || IsOamBlockedForCpu()))
-				{
-					return 0xFF;
-				}
-			}
-			if (address == 0xFF4D)
-			{
-				return _isCgb ? BuildKey1Value() : (byte)0xFF;
-			}
-			if (address == 0xFF4F)
-			{
-				// VBK (CGB only): bit0 selects VRAM bank; bits7-1 read as 1.
-				return _isCgb ? (byte)(0xFE | (_memory[0xFF4F] & 0x01)) : (byte)0xFF;
-			}
-			if (address == 0xFF70)
-			{
-				// SVBK (CGB only): bits0-2 select WRAM bank; bits7-3 read as 1.
-				return _isCgb ? (byte)(0xF8 | (_memory[0xFF70] & 0x07)) : (byte)0xFF;
-			}
-			if (address == 0xFF68)
-			{
-				return _isCgb ? (byte)(_memory[0xFF68] & 0xBF) : (byte)0xFF;
-			}
-			if (address == 0xFF69)
-			{
-				if (!_isCgb)
-				{
-					return 0xFF;
-				}
-				// CGB: palette RAM is blocked during Mode 3; reads return open bus.
-				if (IsVramBlockedForCpu())
-				{
-					return 0xFF;
-				}
-				return ReadCgbPaletteData(obj: false, index: _memory[0xFF68]);
-			}
-			if (address == 0xFF6A)
-			{
-				return _isCgb ? (byte)(_memory[0xFF6A] & 0xBF) : (byte)0xFF;
-			}
-			if (address == 0xFF6B)
-			{
-				if (!_isCgb)
-				{
-					return 0xFF;
-				}
-				// CGB: palette RAM is blocked during Mode 3; reads return open bus.
-				if (IsVramBlockedForCpu())
-				{
-					return 0xFF;
-				}
-				return ReadCgbPaletteData(obj: true, index: _memory[0xFF6A]);
-			}
-			if (address == 0xFF6C)
-			{
-				// OPRI (CGB only): bit0 selects OBJ priority mode; other bits read as 1.
-				return _isCgb ? (byte)(0xFE | (_memory[0xFF6C] & 0x01)) : (byte)0xFF;
-			}
-			if (address == 0xFF55)
-			{
-				// HDMA5 (CGB only): reads as $FF when inactive; while active bit7=0 and low7=remaining-1.
-				return ReadHdma5Value();
-			}
-			if (address >= 0xFF51 && address <= 0xFF55)
-			{
-				// HDMA registers (CGB only).
-				return _isCgb ? _memory[address] : (byte)0xFF;
-			}
-			if (address < 0x4000)
-			{
-				if (_mbc1)
-				{
-					int bank = GetMbc1Bank0();
-					newAddress = (bank * 0x4000) + address;
-					return _cartRom[newAddress];
-				}
-				if (_mbc2)
-				{
-					// MBC2: bank 0 is always mapped here.
-					return _cartRom[address];
-				}
-				if (_mbc5)
-				{
-					// MBC5: bank 0 is always mapped here.
-					return _cartRom[address];
-				}
-				return _cartRom[address];
-			}
-			else if ((address >= 0x4000) && (address <= 0x7FFF))
-			{
-				if (_mbc1)
-				{
-					int bank = GetMbc1Bank1();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc2)
-				{
-					int bank = GetMbc2RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc3)
-				{
-					int bank = GetMbc3RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc5)
-				{
-					int bank = GetMbc5RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				return _memory[address];
-			}
-			else if (address >= 0x8000 && address <= 0x9FFF)
-			{
-				int bank = GetCpuVramBank();
-				int offset = address - 0x8000;
-				return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
-			}
-			else if ((address >= 0xA000) && (address <= 0xBFFF))
-			{
-				return ReadRam(address);
-			}
-			else if (address >= 0xC000 && address <= 0xFDFF)
-			{
-				int idx = MapWramAddress(address);
-				return idx >= 0 ? _wram[idx] : (byte)0xFF;
-			}
-			else if (address >= 0xFE00 && address <= 0xFE9F)
-			{
-				return _gameBoy._ppu.OAM[address - 0xFE00];
-			}
-			else if (address >= 0xFEA0 && address <= 0xFEFF)
-			{
-				return 0xFF;
-			}
-			else if (address >= 0xFF27 && address <= 0xFF2F)
-			{
-				// Unused sound register region always reads as 0xFF.
-				return 0xFF;
-			}
-			else if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
-			{
-				return _gameBoy.Apu.ReadRegister(address);
-			}
-			else if (0xFF00 == address)
-				return Joypad;
-			else
-			{
-				return _memory[address];
-			}
-		}
-
-		/// <summary>
-		/// Reads a byte without emulating CPU bus side-effects.
-		/// Intended for debug tooling (memory viewers, inspectors).
-		/// </summary>
-		public byte PeekByte(ushort address)
-		{
-			if (address >= 0xFF27 && address <= 0xFF2F)
-			{
-				return 0xFF;
-			}
-
-			// Prefer reflecting true register behavior for APU.
-			if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
-			{
-				return _gameBoy.Apu.ReadRegister(address);
-			}
-
-			// JOYP: compute the value without triggering interrupts.
-			if (address == 0xFF00)
-			{
-				return BuildJoypValue();
-			}
-
-			if (address == 0xFF4D)
-			{
-				return _isCgb ? BuildKey1Value() : (byte)0xFF;
-			}
-			if (address == 0xFF4F)
-			{
-				return _isCgb ? (byte)(0xFE | (_memory[0xFF4F] & 0x01)) : (byte)0xFF;
-			}
-			if (address == 0xFF70)
-			{
-				return _isCgb ? (byte)(0xF8 | (_memory[0xFF70] & 0x07)) : (byte)0xFF;
-			}
-			if (address == 0xFF68)
-			{
-				return _isCgb ? (byte)(_memory[0xFF68] & 0xBF) : (byte)0xFF;
-			}
-			if (address == 0xFF69)
-			{
-				return _isCgb ? ReadCgbPaletteData(obj: false, index: _memory[0xFF68]) : (byte)0xFF;
-			}
-			if (address == 0xFF6A)
-			{
-				return _isCgb ? (byte)(_memory[0xFF6A] & 0xBF) : (byte)0xFF;
-			}
-			if (address == 0xFF6B)
-			{
-				return _isCgb ? ReadCgbPaletteData(obj: true, index: _memory[0xFF6A]) : (byte)0xFF;
-			}
-			if (address >= 0xFF51 && address <= 0xFF55)
-			{
-				if (!_isCgb)
-				{
-					return 0xFF;
-				}
-				if (address == 0xFF55)
-				{
-					return ReadHdma5Value();
-				}
-				return _memory[address];
-			}
-
-			// Like ReadByteForDma: ignore CPU access restrictions and OAM-bug side effects.
-			int newAddress;
-			if (address < 0x4000)
-			{
-				if (_mbc1)
-				{
-					int bank = GetMbc1Bank0();
-					newAddress = (bank * 0x4000) + address;
-					return _cartRom[newAddress];
-				}
-				if (_mbc2)
-				{
-					return _cartRom[address];
-				}
-				if (_mbc5)
-				{
-					// MBC5: bank 0 is always mapped here.
-					return _cartRom[address];
-				}
-				return _cartRom[address];
-			}
-			if (address >= 0x4000 && address <= 0x7FFF)
-			{
-				if (_mbc1)
-				{
-					int bank = GetMbc1Bank1();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc2)
-				{
-					int bank = GetMbc2RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc3)
-				{
-					int bank = GetMbc3RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				if (_mbc5)
-				{
-					int bank = GetMbc5RomBank();
-					newAddress = address - 0x4000 + (bank * 0x4000);
-					return _cartRom[newAddress];
-				}
-				return _memory[address];
-			}
-			if (address >= 0x8000 && address <= 0x9FFF)
-			{
-				int bank = GetCpuVramBank();
-				int offset = address - 0x8000;
-				return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
-			}
-			if (address >= 0xA000 && address <= 0xBFFF)
-			{
-				return ReadRam(address);
-			}
-			if (address >= 0xC000 && address <= 0xFDFF)
-			{
-				int idx = MapWramAddress(address);
-				return idx >= 0 ? _wram[idx] : (byte)0xFF;
-			}
-			if (address >= 0xFE00 && address <= 0xFE9F)
-			{
-				return _gameBoy._ppu.OAM[address - 0xFE00];
-			}
-
-			return _memory[address];
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private int GetPpuMode() => _memory[0xFF41] & 0b11;
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private bool IsVramBlockedForCpu()
-		{
-			if (!LCDEnabled)
-			{
-				return false;
-			}
-			return GetPpuMode() == 3;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private bool IsOamBlockedForCpu()
-		{
-			if (!LCDEnabled)
-			{
-				return false;
-			}
-			int mode = GetPpuMode();
-			return mode == 2 || mode == 3;
-		}
-
-		private byte ReadRam(ushort address)
-		{
-			int offset = address - 0xA000;
-			ushort newAddress;
-			if (_mbc1)
-			{
-				if (_ramEnabled)
-				{
-					int ramBank = GetMbc1RamBank();
-					if (_ramBankSize > 0)
-					{
-						ramBank %= _ramBankSize;
-					}
-					newAddress = (ushort)(ramBank * 0x2000 + offset);
-					return RamBanks[newAddress];
-				}
-				return 0xFF;
-			}
-			else if (_mbc2)
-			{
-				if (!_ramEnabled)
-				{
-					return 0xFF;
-				}
-				var ram = _mbc2Ram ??= new byte[0x200];
-				int index = GetMbc2RamIndex(address);
-				// Only low nibble is meaningful; upper nibble is undefined.
-				return (byte)(0xF0 | (ram[index] & 0x0F));
-			}
-			else if (_mbc3)
-			{
-				if (!_ramEnabled)
-				{
-					return 0xFF;
-				}
-				byte sel = _mbc3RamBankOrRtcSelect;
-				if (sel <= 0x07)
-				{
-					int bank = sel;
-					if (_ramBankSize > 0)
-					{
-						bank %= _ramBankSize;
-					}
-					return RamBanks[offset + (bank * 0x2000)];
-				}
-				if (sel >= 0x08 && sel <= 0x0C)
-				{
-					return Mbc3RtcReadSelected();
-				}
-				return 0xFF;
-			}
-			else if (_mbc5)
-			{
-				if (!_ramEnabled)
-				{
-					return 0xFF;
-				}
-				int bank = _currentRamBank;
-				if (_ramBankSize > 0)
-				{
-					bank %= _ramBankSize;
-				}
-				return RamBanks[offset + (bank * 0x2000)];
-			}
-			else
-			{
-				return 0xFF;
-			}
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		public sbyte ReadSByte(ushort address)
-		{
-			return (sbyte)ReadByte(address);
-		}
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		public ushort ReadUShort(ushort address)
-		{
-			byte lo = ReadByte(address);
-			byte hi = ReadByte((ushort)(address + 1));
-			return (ushort)((hi << 8) | lo);
-		}
-
-		public void WriteUShort(ushort address, ushort value)
-		{
-			if (address >= _memory.Length || address + 1 >= _memory.Length)
-			{
-				Debugger.Break();
-			}
-			else
-			{
-				WriteByte(address,(byte)(value & 0xFF));
-				WriteByte((ushort)(address + 1), (byte)((value & 0xFF00) >> 8));
-			}
-		}
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		public void WriteByte(ushort address, byte value)
-		{
-			if (_gameBoy.CpuMicroStepActive)
-			{
-				_gameBoy.AdvanceCpuCyclesWithinMCycle(targetCpuCycle: 2);
-			}
-
-			// During OAM DMA on DMG, the CPU can access only HRAM (FF80-FFFE) and typically IE (FFFF).
-			// Writes elsewhere are ignored.
-			if (_oamDmaActive && !_isCgb && address < 0xFF80)
-			{
-				return;
-			}
-
-			// Audio registers and wave RAM are handled by the APU.
-			if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
-			{
-				_gameBoy.Apu.WriteRegister(address, value);
-				_memory[address] = value;
-				return;
-			}
-
-			// Unused sound registers: ignore writes.
-			if (address >= 0xFF27 && address <= 0xFF2F)
-			{
-				return;
-			}
-
-			if (address < 0x8000)
-			{
-				HandleBanking(address, value);
-			}
-			// 0x8000 - 0x9FFF (VRAM)
-			else if ((address >= 0x8000) && (address <= 0x9FFF))
-			{
-				// VRAM is inaccessible during Mode 3; writes are ignored.
-				if (IsVramBlockedForCpu())
-				{
-					return;
-				}
-				_memory[address] = value;
-				int bank = GetCpuVramBank();
-				int offset = address - 0x8000;
-				_gameBoy._ppu.VideoRam[(bank * 0x2000) + offset] = value;
-				MarkVideoDebugDirty(address < 0x9800 ? VideoDebugDirtyFlags.TileData : VideoDebugDirtyFlags.TileMaps);
-				//_gameBoy.UpdateTile(address, value);
-			}
-			else if (address >= 0xA000 && address <= 0xBFFF)
-			{
-				if (_ramEnabled)
-				{
-					WriteRam(address, value);
-				}
-			}
-			else if (address >= 0xC000 && address <= 0xFDFF)
-			{
-				// WRAM and its echo.
-				int idx = MapWramAddress(address);
-				if (idx >= 0)
-				{
-					_wram[idx] = value;
-				}
-
-				_memory[address] = value;
-				if (address >= 0xE000)
-				{
-					_memory[address - 0x2000] = value;
-				}
-				// Echo RAM mirrors WRAM; it is not cartridge RAM.
-			}
-			else if (address >= 0xFE00 && address < 0xFEA0)
-			{
-				_gameBoy.MarkOamWrite();
-				// OAM is inaccessible during Modes 2 and 3, and also during OAM DMA.
-				if (_oamDmaActive || IsOamBlockedForCpu())
-				{
-					return;
-				}
-				_gameBoy._ppu.OAM[address - 0xFE00] = value;
-				_memory[address] = value;
-				MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
-			}
-			else if (address >= 0xFEA0 && address <= 0xFEFF)
-			{
-				// Unusable region, but *attempted* access still participates in OAM corruption.
-				_gameBoy.MarkOamWrite();
-				return;
-			}
-			else if (address == 0xFF00)
-			{
-				Joypad = value;
-			}
-			else if (address == 0xFF02)
-			{
-				_serialControlWrites++;
-				_memory[address] = value;
-				if (value == 0x81)
-				{
-					_serialTransferStarts++;
-					Console.Write((char)_memory[0xFF01]);
-					SerialDataReceived?.Invoke(this, (char)_memory[0xFF01]);
-				}
-			}
-			else if (address == 0xFF40)
-			{
-				// LCDC: turning LCD off has immediate side effects on LY/STAT timing.
-				byte old = _memory[0xFF40];
-				_memory[0xFF40] = value;
-				bool oldEnabled = (old & 0x80) != 0;
-				bool newEnabled = (value & 0x80) != 0;
-				if (oldEnabled && !newEnabled)
-				{
-					// When LCD is disabled, LY is reset and STAT mode becomes 0.
-					_memory[0xFF44] = 0;
-					_memory[0xFF41] = (byte)(_memory[0xFF41] & 0b1111_1100);
-					_gameBoy._ppu.OnLcdDisabled();
-				}
-				else if (!oldEnabled && newEnabled)
-				{
-					_gameBoy._ppu.OnLcdEnabled();
-				}
-
-				// Any LCDC change can affect which tilemap/tiledata region is used.
-				MarkVideoDebugDirty(VideoDebugDirtyFlags.Lcdc | VideoDebugDirtyFlags.TileMaps);
-			}
-			else if (address == 0xFF41)
-			{
-				// STAT: only bits 3-6 are writable. Bits 0-2 are controlled by the PPU.
-				byte old = _memory[0xFF41];
-				byte preserved = (byte)(old & 0b1000_0111);
-				byte writable = (byte)(value & 0b0111_1000);
-				_memory[0xFF41] = (byte)(preserved | writable);
-			}
-			else if (address == 0xFF47 || address == 0xFF48 || address == 0xFF49)
-			{
-				// DMG palette registers (BGP/OBP0/OBP1). These affect how indices map to shades.
-				_memory[address] = value;
-				MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
-			}
-			else if (address == 0xFF4D)
-			{
-				WriteKey1(value);
-			}
-			else if (address == 0xFF4F)
-			{
-				// VBK (CGB only): bit0 selects VRAM bank.
-				if (_isCgb)
-				{
-					_memory[0xFF4F] = (byte)(value & 0x01);
-				}
-			}
-			else if (address == 0xFF70)
-			{
-				// SVBK (CGB only): bits0-2 select WRAM bank (0 maps to bank 1).
-				if (_isCgb)
-				{
-					_memory[0xFF70] = (byte)(value & 0x07);
-				}
-			}
-			else if (address == 0xFF68)
-			{
-				// BCPS (CGB only): bit7 auto-increment, bits0-5 index; bit6 unused.
-				if (_isCgb)
-				{
-					_memory[0xFF68] = (byte)(value & 0xBF);
-				}
-			}
-			else if (address == 0xFF69)
-			{
-				// BCPD (CGB only): palette data.
-				if (_isCgb)
-				{
-					// CGB: palette RAM is blocked during Mode 3; writes are ignored but auto-increment still applies.
-					if (IsVramBlockedForCpu())
-					{
-						AutoIncrementCgbPaletteIndex(obj: false);
-						return;
-					}
-					WriteCgbPaletteData(obj: false, value);
-					MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
-				}
-			}
-			else if (address == 0xFF6A)
-			{
-				// OCPS (CGB only): bit7 auto-increment, bits0-5 index; bit6 unused.
-				if (_isCgb)
-				{
-					_memory[0xFF6A] = (byte)(value & 0xBF);
-				}
-			}
-			else if (address == 0xFF6B)
-			{
-				// OCPD (CGB only): palette data.
-				if (_isCgb)
-				{
-					// CGB: palette RAM is blocked during Mode 3; writes are ignored but auto-increment still applies.
-					if (IsVramBlockedForCpu())
-					{
-						AutoIncrementCgbPaletteIndex(obj: true);
-						return;
-					}
-					WriteCgbPaletteData(obj: true, value);
-					MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
-				}
-			}
-			else if (address == 0xFF6C)
-			{
-				// OPRI (CGB only): bit0 selects OBJ priority mode.
-				if (_isCgb)
-				{
-					_memory[0xFF6C] = (byte)(value & 0x01);
-				}
-			}
-			else if (address == 0xFF51)
-			{
-				// HDMA1 (CGB only): source high.
-				if (_isCgb)
-				{
-					_memory[0xFF51] = value;
-				}
-			}
-			else if (address == 0xFF52)
-			{
-				// HDMA2 (CGB only): source low, lower 4 bits ignored.
-				if (_isCgb)
-				{
-					_memory[0xFF52] = (byte)(value & 0xF0);
-				}
-			}
-			else if (address == 0xFF53)
-			{
-				// HDMA3 (CGB only): destination high (bits 0-4), dest is 0x8000-0x9FF0.
-				if (_isCgb)
-				{
-					_memory[0xFF53] = (byte)(value & 0x1F);
-				}
-			}
-			else if (address == 0xFF54)
-			{
-				// HDMA4 (CGB only): destination low, lower 4 bits ignored.
-				if (_isCgb)
-				{
-					_memory[0xFF54] = (byte)(value & 0xF0);
-				}
-			}
-			else if (address == 0xFF55)
-			{
-				// HDMA5 (CGB only): start GDMA/HDMA or stop an active HBlank DMA.
-				if (_isCgb)
-				{
-					// If an HBlank DMA is active, writing with bit7=0 stops it.
-					if (_hdmaActive && _hdmaHblankMode && (value & 0x80) == 0)
-					{
-						_hdmaActive = false;
-						_hdmaHblankMode = false;
-						_hdmaRemainingBlocks = 0;
-						UpdateHdmaRegsFromState();
-						_memory[0xFF55] = 0xFF;
-					}
-					else
-					{
-						StartGdmaOrHdma(value);
-					}
-				}
-			}
-			else if (address == 0xFF04)
-			{
-				_gameBoy.DIVCounter = 0;
-				_memory[address] = 0;
+    [Flags]
+    public enum VideoDebugDirtyFlags
+    {
+        None = 0,
+        TileData = 1 << 0,
+        TileMaps = 1 << 1,
+        Lcdc = 1 << 2,
+        Palette = 1 << 3,
+        Oam = 1 << 4,
+    }
+
+    public class GBMemory
+    {
+        private const int VideoDebugVramBytes = 0x4000;
+        private const int VideoDebugPaletteBytes = 64;
+        private const int VideoDebugOamBytes = 0xA0;
+        private readonly byte[][] _videoDebugVramSnapshots = [new byte[VideoDebugVramBytes], new byte[VideoDebugVramBytes]];
+        private readonly byte[][] _videoDebugBgPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
+        private readonly byte[][] _videoDebugObjPaletteSnapshots = [new byte[VideoDebugPaletteBytes], new byte[VideoDebugPaletteBytes]];
+        private readonly byte[][] _videoDebugOamSnapshots = [new byte[VideoDebugOamBytes], new byte[VideoDebugOamBytes]];
+        private readonly byte[] _videoDebugLcdcSnapshots = new byte[2];
+        private int _videoDebugSnapshotIndex;
+        private int _videoDebugSnapshotVersion;
+
+        internal int VideoDebugSnapshotVersion => Volatile.Read(ref _videoDebugSnapshotVersion);
+
+        internal void CaptureVideoDebugSnapshot()
+        {
+            // Called from the emulation thread at a stable point (VBlank).
+            int writeIndex = 1 - Volatile.Read(ref _videoDebugSnapshotIndex);
+            Buffer.BlockCopy(_gameBoy._ppu.VideoRam, 0, _videoDebugVramSnapshots[writeIndex], 0, VideoDebugVramBytes);
+            Buffer.BlockCopy(_cgbBgPaletteRam, 0, _videoDebugBgPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
+            Buffer.BlockCopy(_cgbObjPaletteRam, 0, _videoDebugObjPaletteSnapshots[writeIndex], 0, VideoDebugPaletteBytes);
+            Buffer.BlockCopy(_gameBoy._ppu.OAM, 0, _videoDebugOamSnapshots[writeIndex], 0, VideoDebugOamBytes);
+            _videoDebugLcdcSnapshots[writeIndex] = _memory[0xFF40];
+            Volatile.Write(ref _videoDebugSnapshotIndex, writeIndex);
+            Interlocked.Increment(ref _videoDebugSnapshotVersion);
+        }
+
+        internal void GetVideoDebugSnapshot(out byte[] vram, out byte[] bgPalRam, out byte[] objPalRam, out byte[] oam, out byte lcdc)
+        {
+            int idx = Volatile.Read(ref _videoDebugSnapshotIndex);
+            vram = _videoDebugVramSnapshots[idx];
+            bgPalRam = _videoDebugBgPaletteSnapshots[idx];
+            objPalRam = _videoDebugObjPaletteSnapshots[idx];
+            oam = _videoDebugOamSnapshots[idx];
+            lcdc = _videoDebugLcdcSnapshots[idx];
+        }
+        public int CgbBgPaletteWriteCount { get; private set; }
+        public int CgbObjPaletteWriteCount { get; private set; }
+        private int _videoDebugDirty;
+        private int _saveDirtyVersion;
+        private byte _cartType;
+        private byte _ramSizeCode;
+        private bool _hasBatteryBackedSave;
+        private bool _mbc3HasTimer;
+
+        public void MarkVideoDebugDirty(VideoDebugDirtyFlags flags)
+        {
+            Interlocked.Or(ref _videoDebugDirty, (int)flags);
+        }
+
+        public VideoDebugDirtyFlags ConsumeVideoDebugDirty()
+        {
+            int v = Interlocked.Exchange(ref _videoDebugDirty, 0);
+            return (VideoDebugDirtyFlags)v;
+        }
+
+        public bool HasBatteryBackedSave => _hasBatteryBackedSave;
+        public bool HasMbc3Rtc => _mbc3HasTimer;
+
+        public string MbcType
+        {
+            get
+            {
+                if (_mbc1m) return "MBC1M";
+                if (_mbc1) return "MBC1";
+                if (_mbc2) return "MBC2";
+                if (_mbc3) return "MBC3" + (_mbc3HasTimer ? "+RTC" : "");
+                if (_mbc5) return "MBC5" + (_mbc5HasRumble ? "+Rumble" : "");
+                if (_cartType == 0 || _cartType == 8 || _cartType == 9) return "ROM Only";
+                return $"Unknown (0x{_cartType:X2})";
+            }
+        }
+
+        public int RomSize => _cartRom?.Length ?? 0;
+
+        /// <summary>
+        /// True when the loaded cartridge both has a battery and declares SRAM.
+        /// (RTC-only battery carts like MBC3 type 0x0F will return false here.)
+        /// </summary>
+        public bool HasBatteryBackedSram => _hasBatteryBackedSave && SaveRamByteCount > 0;
+
+        public byte[] GetBatterySaveFileImage()
+        {
+            if (!HasBatteryBackedSave)
+            {
+                return Array.Empty<byte>();
+            }
+
+            int ramBytes = SaveRamByteCount;
+            int rtcBytes = HasMbc3Rtc ? 48 : 0;
+            if (ramBytes == 0 && rtcBytes == 0)
+            {
+                return Array.Empty<byte>();
+            }
+
+            var file = new byte[ramBytes + rtcBytes];
+            if (ramBytes > 0)
+            {
+                byte[] sram = GetSaveRamImage();
+                Array.Copy(sram, 0, file, 0, Math.Min(ramBytes, sram.Length));
+            }
+            if (rtcBytes > 0)
+            {
+                WriteMbc3RtcTrailer(file.AsSpan(ramBytes, rtcBytes));
+            }
+            return file;
+        }
+
+        public void LoadBatterySaveFileImage(byte[] file)
+        {
+            if (!HasBatteryBackedSave)
+            {
+                return;
+            }
+            if (file == null || file.Length == 0)
+            {
+                return;
+            }
+
+            int expectedRam = SaveRamByteCount;
+            bool hasRtc = HasMbc3Rtc;
+            if (!TrySplitSaveFile(file.Length, expectedRam, hasRtc, out int ramPart, out int rtcPart))
+            {
+                // Fallback: if the file is at least the expected SRAM size, just load the first bytes.
+                ramPart = Math.Min(file.Length, expectedRam);
+                rtcPart = 0;
+            }
+
+            if (ramPart > 0 && expectedRam > 0)
+            {
+                int loadLen = Math.Min(expectedRam, ramPart);
+                var sramSlice = new byte[loadLen];
+                Array.Copy(file, 0, sramSlice, 0, loadLen);
+                LoadSaveRamImage(sramSlice);
+            }
+
+            if (hasRtc && (rtcPart == 44 || rtcPart == 48))
+            {
+                var trailer = file.AsSpan(file.Length - rtcPart, rtcPart);
+                LoadMbc3RtcTrailer(trailer);
+            }
+        }
+
+        public void SaveState(BinaryWriter writer)
+        {
+            writer.Write(_memory);
+            writer.Write(_currentRomBank);
+            writer.Write(RamBanks.Length);
+            writer.Write(RamBanks);
+            writer.Write(_romBankingMode);
+            writer.Write(_currentRamBank);
+            writer.Write(_ramEnabled);
+            writer.Write(_mbc1);
+            writer.Write(_mbc2);
+            writer.Write(_mbc3);
+            writer.Write(_mbc5);
+            writer.Write(_romBankSize);
+            writer.Write(_romBankCount);
+            writer.Write(_ramBankSize);
+            writer.Write(_RTCEnabled);
+            writer.Write(_multicart);
+            writer.Write(_mbc1m);
+
+            bool hasMbc2Ram = _mbc2Ram != null;
+            writer.Write(hasMbc2Ram);
+            if (hasMbc2Ram)
+            {
+                writer.Write(_mbc2Ram!.Length);
+                writer.Write(_mbc2Ram!);
+            }
+
+            writer.Write(_mbc5RomBank);
+            writer.Write(_mbc5HasRumble);
+            writer.Write(_mbc5Rumble);
+
+            writer.Write(_mbc3RamBankOrRtcSelect);
+            writer.Write(_mbc3LatchArmed);
+            writer.Write(_mbc3Latched);
+            writer.Write(_mbc3RtcSubCycleCounter);
+            writer.Write(_mbc3RtcSeconds);
+            writer.Write(_mbc3RtcMinutes);
+            writer.Write(_mbc3RtcHours);
+            writer.Write(_mbc3RtcDays);
+            writer.Write(_mbc3RtcHalt);
+            writer.Write(_mbc3RtcCarry);
+            writer.Write(_mbc3RtcLatchedS);
+            writer.Write(_mbc3RtcLatchedM);
+            writer.Write(_mbc3RtcLatchedH);
+            writer.Write(_mbc3RtcLatchedDL);
+            writer.Write(_mbc3RtcLatchedDH);
+
+            writer.Write(_cgbBgPaletteRam);
+            writer.Write(_cgbObjPaletteRam);
+            writer.Write(_isCgb);
+            writer.Write(_cartSupportsCgb);
+            writer.Write(_cartRequiresCgb);
+            writer.Write(_key1PrepareSpeedSwitch);
+            writer.Write(_serialControlWrites);
+            writer.Write(_serialTransferStarts);
+
+            writer.Write(_wram.Length);
+            writer.Write(_wram);
+
+            writer.Write(_oamDmaActive);
+            writer.Write(_oamDmaSourceBase);
+            writer.Write(_oamDmaByteIndex);
+            writer.Write(_oamDmaDotCounter);
+
+            writer.Write(_hdmaActive);
+            writer.Write(_hdmaHblankMode);
+            writer.Write(_hdmaRemainingBlocks);
+            writer.Write(_hdmaSrc);
+            writer.Write(_hdmaDst);
+        }
+
+        public void LoadState(BinaryReader reader)
+        {
+            _memory = reader.ReadBytes(0x10000);
+            _currentRomBank = reader.ReadByte();
+            int ramBanksLen = reader.ReadInt32();
+            RamBanks = reader.ReadBytes(ramBanksLen);
+            _romBankingMode = reader.ReadByte();
+            _currentRamBank = reader.ReadByte();
+            _ramEnabled = reader.ReadBoolean();
+            _mbc1 = reader.ReadBoolean();
+            _mbc2 = reader.ReadBoolean();
+            _mbc3 = reader.ReadBoolean();
+            _mbc5 = reader.ReadBoolean();
+            _romBankSize = reader.ReadInt32();
+            _romBankCount = reader.ReadInt32();
+            _ramBankSize = reader.ReadInt32();
+            _RTCEnabled = reader.ReadBoolean();
+            _multicart = reader.ReadBoolean();
+            _mbc1m = reader.ReadBoolean();
+
+            bool hasMbc2Ram = reader.ReadBoolean();
+            if (hasMbc2Ram)
+            {
+                int mbc2RamLen = reader.ReadInt32();
+                _mbc2Ram = reader.ReadBytes(mbc2RamLen);
+            }
+            else
+            {
+                _mbc2Ram = null;
+            }
+
+            _mbc5RomBank = reader.ReadUInt16();
+            _mbc5HasRumble = reader.ReadBoolean();
+            _mbc5Rumble = reader.ReadBoolean();
+
+            _mbc3RamBankOrRtcSelect = reader.ReadByte();
+            _mbc3LatchArmed = reader.ReadBoolean();
+            _mbc3Latched = reader.ReadBoolean();
+            _mbc3RtcSubCycleCounter = reader.ReadInt32();
+            _mbc3RtcSeconds = reader.ReadInt32();
+            _mbc3RtcMinutes = reader.ReadInt32();
+            _mbc3RtcHours = reader.ReadInt32();
+            _mbc3RtcDays = reader.ReadInt32();
+            _mbc3RtcHalt = reader.ReadBoolean();
+            _mbc3RtcCarry = reader.ReadBoolean();
+            _mbc3RtcLatchedS = reader.ReadByte();
+            _mbc3RtcLatchedM = reader.ReadByte();
+            _mbc3RtcLatchedH = reader.ReadByte();
+            _mbc3RtcLatchedDL = reader.ReadByte();
+            _mbc3RtcLatchedDH = reader.ReadByte();
+
+            _cgbBgPaletteRam.AsSpan().Clear();
+            reader.ReadBytes(64).CopyTo(_cgbBgPaletteRam);
+            _cgbObjPaletteRam.AsSpan().Clear();
+            reader.ReadBytes(64).CopyTo(_cgbObjPaletteRam);
+            _isCgb = reader.ReadBoolean();
+            _cartSupportsCgb = reader.ReadBoolean();
+            _cartRequiresCgb = reader.ReadBoolean();
+            _key1PrepareSpeedSwitch = reader.ReadBoolean();
+            _serialControlWrites = reader.ReadInt32();
+            _serialTransferStarts = reader.ReadInt32();
+
+            int wramLen = reader.ReadInt32();
+            reader.ReadBytes(wramLen).CopyTo(_wram, 0);
+
+            _oamDmaActive = reader.ReadBoolean();
+            _oamDmaSourceBase = reader.ReadUInt16();
+            _oamDmaByteIndex = reader.ReadInt32();
+            _oamDmaDotCounter = reader.ReadInt32();
+
+            _hdmaActive = reader.ReadBoolean();
+            _hdmaHblankMode = reader.ReadBoolean();
+            _hdmaRemainingBlocks = reader.ReadInt32();
+            _hdmaSrc = reader.ReadUInt16();
+            _hdmaDst = reader.ReadUInt16();
+        }
+
+        private static bool TrySplitSaveFile(int fileLen, int expectedRam, bool hasRtc, out int ramPart, out int rtcPart)
+        {
+            ramPart = 0;
+            rtcPart = 0;
+
+            if (!hasRtc)
+            {
+                // No RTC expected.
+                ramPart = Math.Min(fileLen, expectedRam);
+                rtcPart = 0;
+                return ramPart > 0;
+            }
+
+            // RTC trailers are 44 or 48 bytes.
+            foreach (int candidateRtc in new[] { 48, 44 })
+            {
+                if (fileLen < candidateRtc)
+                {
+                    continue;
+                }
+                int candidateRam = fileLen - candidateRtc;
+                if (expectedRam == 0)
+                {
+                    // RTC-only cart.
+                    ramPart = 0;
+                    rtcPart = candidateRtc;
+                    return candidateRam == 0;
+                }
+                // Accept exact-sized SRAM, or padded to a multiple of 8KB.
+                if (candidateRam == expectedRam || (candidateRam >= expectedRam && (candidateRam % 0x2000) == 0))
+                {
+                    ramPart = candidateRam;
+                    rtcPart = candidateRtc;
+                    return true;
+                }
+            }
+
+            // No RTC trailer detected.
+            ramPart = Math.Min(fileLen, expectedRam);
+            rtcPart = 0;
+            return ramPart > 0;
+        }
+
+        private static uint ReadDwordLE(ReadOnlySpan<byte> s, int offset)
+        {
+            return BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(offset, 4));
+        }
+
+        private static void WriteDwordLE(Span<byte> s, int offset, uint value)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(offset, 4), value);
+        }
+
+        private void WriteMbc3RtcTrailer(Span<byte> trailer)
+        {
+            // VBA-M compatible: always write 48 bytes.
+            if (trailer.Length != 48)
+            {
+                return;
+            }
+
+            uint timeS = (byte)_mbc3RtcSeconds;
+            uint timeM = (byte)_mbc3RtcMinutes;
+            uint timeH = (byte)_mbc3RtcHours;
+            uint timeDL = (byte)(_mbc3RtcDays & 0xFF);
+            uint timeDH = Mbc3RtcComposeDH();
+
+            WriteDwordLE(trailer, 0, timeS);
+            WriteDwordLE(trailer, 4, timeM);
+            WriteDwordLE(trailer, 8, timeH);
+            WriteDwordLE(trailer, 12, timeDL);
+            WriteDwordLE(trailer, 16, timeDH);
+
+            WriteDwordLE(trailer, 20, _mbc3RtcLatchedS);
+            WriteDwordLE(trailer, 24, _mbc3RtcLatchedM);
+            WriteDwordLE(trailer, 28, _mbc3RtcLatchedH);
+            WriteDwordLE(trailer, 32, _mbc3RtcLatchedDL);
+            WriteDwordLE(trailer, 36, _mbc3RtcLatchedDH);
+
+            uint unixTs = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            WriteDwordLE(trailer, 40, unixTs);
+            WriteDwordLE(trailer, 44, 0);
+        }
+
+        private void LoadMbc3RtcTrailer(ReadOnlySpan<byte> trailer)
+        {
+            if (trailer.Length != 44 && trailer.Length != 48)
+            {
+                return;
+            }
+
+            byte timeS = (byte)(ReadDwordLE(trailer, 0) & 0xFF);
+            byte timeM = (byte)(ReadDwordLE(trailer, 4) & 0xFF);
+            byte timeH = (byte)(ReadDwordLE(trailer, 8) & 0xFF);
+            byte timeDL = (byte)(ReadDwordLE(trailer, 12) & 0xFF);
+            byte timeDH = (byte)(ReadDwordLE(trailer, 16) & 0xFF);
+
+            _mbc3RtcSeconds = timeS % 60;
+            _mbc3RtcMinutes = timeM % 60;
+            _mbc3RtcHours = timeH % 24;
+            _mbc3RtcDays = timeDL | (((timeDH & 0x01) != 0) ? 0x100 : 0);
+            _mbc3RtcHalt = (timeDH & 0x40) != 0;
+            _mbc3RtcCarry = (timeDH & 0x80) != 0;
+
+            _mbc3RtcLatchedS = (byte)(ReadDwordLE(trailer, 20) & 0xFF);
+            _mbc3RtcLatchedM = (byte)(ReadDwordLE(trailer, 24) & 0xFF);
+            _mbc3RtcLatchedH = (byte)(ReadDwordLE(trailer, 28) & 0xFF);
+            _mbc3RtcLatchedDL = (byte)(ReadDwordLE(trailer, 32) & 0xFF);
+            _mbc3RtcLatchedDH = (byte)(ReadDwordLE(trailer, 36) & 0xFF);
+
+            uint savedUnixTs = ReadDwordLE(trailer, 40);
+            if (!_mbc3RtcHalt && savedUnixTs != 0)
+            {
+                long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                long delta = now - savedUnixTs;
+                if (delta > 0)
+                {
+                    AdvanceMbc3RtcBySeconds(delta);
+                }
+            }
+        }
+
+        private void AdvanceMbc3RtcBySeconds(long deltaSeconds)
+        {
+            if (deltaSeconds <= 0)
+            {
+                return;
+            }
+
+            const long secondsPerDay = 24L * 60L * 60L;
+            const long daysPeriod = 512L;
+            const long periodSeconds = daysPeriod * secondsPerDay;
+
+            long currentTotal = (_mbc3RtcDays * secondsPerDay) + (_mbc3RtcHours * 3600L) + (_mbc3RtcMinutes * 60L) + _mbc3RtcSeconds;
+            long newTotal = currentTotal + deltaSeconds;
+            if (newTotal < 0)
+            {
+                newTotal = 0;
+            }
+
+            if (newTotal >= periodSeconds)
+            {
+                _mbc3RtcCarry = true;
+                newTotal %= periodSeconds;
+            }
+
+            int newDays = (int)(newTotal / secondsPerDay);
+            long rem = newTotal % secondsPerDay;
+            int newHours = (int)(rem / 3600L);
+            rem %= 3600L;
+            int newMinutes = (int)(rem / 60L);
+            int newSeconds = (int)(rem % 60L);
+
+            _mbc3RtcDays = newDays;
+            _mbc3RtcHours = newHours;
+            _mbc3RtcMinutes = newMinutes;
+            _mbc3RtcSeconds = newSeconds;
+        }
+
+        /// <summary>
+        /// Monotonically increasing version, incremented whenever battery-backed SRAM is modified.
+        /// Intended for autosave debounce logic.
+        /// </summary>
+        public int SaveDirtyVersion => Volatile.Read(ref _saveDirtyVersion);
+
+        /// <summary>
+        /// Total bytes of SRAM that should be persisted to disk for this cartridge.
+        /// For MBC2 this is 0x200 (512x4-bit, stored as 512 bytes).
+        /// </summary>
+        public int SaveRamByteCount
+        {
+            get
+            {
+                if (_mbc2)
+                {
+                    return 0x200;
+                }
+
+                // Pan Docs RAM size codes (0x0149).
+                return _ramSizeCode switch
+                {
+                    0x00 => 0,
+                    0x01 => 0x0800,  // 2KB
+                    0x02 => 0x2000,  // 8KB
+                    0x03 => 0x8000,  // 32KB (4 banks)
+                    0x04 => 0x20000, // 128KB (16 banks)
+                    0x05 => 0x10000, // 64KB (8 banks)
+                    _ => RamBanks?.Length ?? 0,
+                };
+            }
+        }
+
+        public byte[] GetSaveRamImage()
+        {
+            if (!HasBatteryBackedSram)
+            {
+                return Array.Empty<byte>();
+            }
+
+            int count = SaveRamByteCount;
+            if (count <= 0)
+            {
+                return Array.Empty<byte>();
+            }
+
+            if (_mbc2)
+            {
+                var ram = _mbc2Ram;
+                if (ram == null)
+                {
+                    return new byte[count];
+                }
+                var image = new byte[count];
+                for (int i = 0; i < count && i < ram.Length; i++)
+                {
+                    // MBC2 stores only low nibble; upper nibble reads as 1s.
+                    image[i] = (byte)(0xF0 | (ram[i] & 0x0F));
+                }
+                return image;
+            }
+
+            var outBuf = new byte[count];
+            if (RamBanks != null)
+            {
+                Array.Copy(RamBanks, 0, outBuf, 0, Math.Min(count, RamBanks.Length));
+            }
+            return outBuf;
+        }
+
+        public void LoadSaveRamImage(byte[] image)
+        {
+            if (!HasBatteryBackedSram)
+            {
+                return;
+            }
+            if (image == null || image.Length == 0)
+            {
+                return;
+            }
+
+            if (_mbc2)
+            {
+                var ram = _mbc2Ram ??= new byte[0x200];
+                int max = Math.Min(ram.Length, image.Length);
+                for (int i = 0; i < max; i++)
+                {
+                    ram[i] = (byte)(image[i] & 0x0F);
+                }
+                return;
+            }
+
+            if (RamBanks == null || RamBanks.Length == 0)
+            {
+                return;
+            }
+
+            Array.Copy(image, 0, RamBanks, 0, Math.Min(RamBanks.Length, image.Length));
+        }
+
+        private void MarkSaveDirtyIfBatteryBackedSave()
+        {
+            if (!HasBatteryBackedSave)
+            {
+                return;
+            }
+            Interlocked.Increment(ref _saveDirtyVersion);
+        }
+
+        public event EventHandler<char>? SerialDataReceived;
+
+        // The GameBoy has 8kB of RAM.
+        // The RAM is used to store the program and the data.
+        // The RAM is divided into different sections:
+        // 0x0000 - 0x3FFF: ROM bank 0
+        // 0x4000 - 0x7FFF: Switchable ROM bank
+        // 0x8000 - 0x97FF: Character RAM 
+        // 0x9800 - 0x9BFF: BG map data 1
+        // 0x9C00 - 0x9FFF: BG map data 2
+        // 0xA000 - 0xBFFF: Cartridge RAM 
+        // 0xC000 - 0xCFFF: Internal RAM bank 0 (fixed)
+        // 0xD000 - 0xDFFF: Internal RAM bank 1-7 (switchable - CGB only)
+        // 0xE000 - 0xFDFF: Echo RAM (reserved, do not use)
+        // 0xFE00 - 0xFE9F: OAM (sprite) RAM
+        // 0xFEA0 - 0xFEFF: Unusable RAM
+        // 0xFF00 - 0xFF7F: I/O Registers
+        // 0xFF80 - 0xFFFE: Zero Page
+        // 0xFFFF - 0xFFFF: Interrupt enable register
+        private byte[] _memory = new byte[0x10000];
+        // CGB has 8 banks of 4KB WRAM (bank 0 fixed at C000-CFFF, bank 1-7 switchable at D000-DFFF).
+        // We model the full 32KB regardless of mode; DMG simply always uses bank 1 for D000-DFFF.
+        private readonly byte[] _wram = new byte[0x8000];
+
+        // CGB palette RAM: 8 palettes * 4 colors * 2 bytes = 64 bytes each (BG and OBJ).
+        private readonly byte[] _cgbBgPaletteRam = new byte[64];
+        private readonly byte[] _cgbObjPaletteRam = new byte[64];
+        private readonly Gameboy _gameBoy;
+        private bool _isCgb;
+        private bool _cartSupportsCgb;
+        private bool _cartRequiresCgb;
+        private bool _key1PrepareSpeedSwitch;
+        private int _serialControlWrites;
+        private int _serialTransferStarts;
+
+        // OAM DMA (FF46)
+        private bool _oamDmaActive;
+        private ushort _oamDmaSourceBase;
+        private int _oamDmaByteIndex;
+        private int _oamDmaDotCounter;
+
+        // CGB VRAM DMA (GDMA/HDMA) (FF51-FF55)
+        private bool _hdmaActive;
+        private bool _hdmaHblankMode;
+        private int _hdmaRemainingBlocks;
+        private ushort _hdmaSrc;
+        private ushort _hdmaDst;
+
+        public int SerialControlWrites => _serialControlWrites;
+        public int SerialTransferStarts => _serialTransferStarts;
+
+        // OAM (sprite) RAM
+        // The OAM RAM is used to store the sprites.
+        // The sprites are 8x8 pixels or 8x16 pixels.
+        // The OAM RAM is mapped to the memory address 0xFE00 - 0xFE9F.
+        public byte[] OAMRam
+        {
+            get
+            {
+                byte[] oamRam = new byte[0xA0];
+                Array.Copy(_memory, 0xFE00, oamRam, 0, 0xA0);
+                return oamRam;
+            }
+            set
+            {
+                Array.Copy(value, 0, _memory, 0xFE00, 0xA0);
+            }
+        }
+
+        private byte _JOYP
+        {
+            get { return _memory[0xFF00]; }
+            set { _memory[0xFF00] = value; }
+        }
+
+        // JOYP (FF00) select bits (bits 4-5). Note: on real hardware these are active-low selects.
+        // bit4 (P14): 0 selects directions
+        // bit5 (P15): 0 selects buttons
+        private byte _joypSelect = 0x30;
+
+        // Last computed low nibble used for edge-based interrupt triggering.
+        private byte _joypLastLowNibble = 0x0F;
+
+        public byte Joypad
+        {
+            get
+            {
+                // Reads should be side-effect free: the game sets select bits via writes, then reads the
+                // resulting low nibble. Interrupt triggering is handled on input transitions.
+                return BuildJoypValue();
+            }
+            set
+            {
+                // Only bits 4-5 are writable (select lines). Bits 0-3 are read-only and reflect inputs.
+                _joypSelect = (byte)(value & 0b_0011_0000);
+                RefreshJoypRegister(allowInterrupt: false);
+            }
+        }
+
+        private byte BuildDirectionNibble()
+        {
+            // Active-low: 1 = not pressed, 0 = pressed.
+            byte v = 0b_0000_1111;
+            if (_joyPadKeys[0]) v = Extensions.BitReset(v, 0); // Right
+            if (_joyPadKeys[1]) v = Extensions.BitReset(v, 1); // Left
+            if (_joyPadKeys[2]) v = Extensions.BitReset(v, 2); // Up
+            if (_joyPadKeys[3]) v = Extensions.BitReset(v, 3); // Down
+            return v;
+        }
+
+        private byte BuildButtonNibble()
+        {
+            // Active-low: 1 = not pressed, 0 = pressed.
+            byte v = 0b_0000_1111;
+            if (_joyPadKeys[4]) v = Extensions.BitReset(v, 0); // A
+            if (_joyPadKeys[5]) v = Extensions.BitReset(v, 1); // B
+            if (_joyPadKeys[6]) v = Extensions.BitReset(v, 2); // Select
+            if (_joyPadKeys[7]) v = Extensions.BitReset(v, 3); // Start
+            return v;
+        }
+
+        private byte BuildJoypValue()
+        {
+            byte low = 0b_0000_1111;
+
+            // When neither group is selected, the low nibble reads as all 1s.
+            // When one or both are selected, the lines are effectively ANDed together.
+            if ((_joypSelect & 0b_0001_0000) == 0)
+            {
+                low &= BuildDirectionNibble();
+            }
+            if ((_joypSelect & 0b_0010_0000) == 0)
+            {
+                low &= BuildButtonNibble();
+            }
+
+            return (byte)(0b_1100_0000 | (_joypSelect & 0b_0011_0000) | low);
+        }
+
+        private void RefreshJoypRegister(bool allowInterrupt)
+        {
+            byte joyp = BuildJoypValue();
+            byte low = (byte)(joyp & 0x0F);
+
+            // Joypad interrupt triggers when the low nibble transitions from 0xF to non-0xF.
+            // (i.e., from "no pressed buttons in the selected group(s)" to "some pressed".)
+            if (allowInterrupt && _joypLastLowNibble == 0x0F && low != 0x0F)
+            {
+                IF |= 1 << 4;
+            }
+
+            _joypLastLowNibble = low;
+            _JOYP = joyp;
+        }
+
+        /// <summary>
+        /// Called by the host/UI after updating <see cref="_joyPadKeys"/>.
+        /// This updates the cached FF00 value and raises the joypad interrupt on the correct edge.
+        /// </summary>
+        public void NotifyJoypadStateChanged()
+        {
+            RefreshJoypRegister(allowInterrupt: true);
+        }
+
+        public bool[] _joyPadKeys { get; set; }
+
+
+        // DIV
+        // The DIV register is used to store the divider register.
+        // The DIV register is mapped to the memory address 0xFF04.
+        public byte DIV
+        {
+            get
+            {
+                return _memory[0xFF04];
+            }
+            set
+            {
+                _memory[0xFF04] = value;
+            }
+        }
+
+        // TIMA
+        // The TIMA register is used to store the timer counter.
+        // The TIMA register is mapped to the memory address 0xFF05.
+        public byte TIMA
+        {
+            get
+            {
+                return _memory[0xFF05];
+            }
+            set
+            {
+                _memory[0xFF05] = value;
+            }
+        }
+
+        // TMA
+        // The TMA register is used to store the timer modulo.
+        // The TMA register is mapped to the memory address 0xFF06.
+        public byte TMA
+        {
+            get
+            {
+                return _memory[0xFF06];
+            }
+            set
+            {
+                _memory[0xFF06] = value;
+            }
+        }
+
+        // TAC
+        // The TAC register is used to store the timer control.
+        // The TAC register is mapped to the memory address 0xFF07.
+        // Timer Control 
+        // Bits 1-0 - Input Clock Select
+        //            00: 4096   Hz 
+        //            01: 262144 Hz
+        //            10: 65536  Hz
+        //            11: 16384  Hz
+        // Bit  2   - Timer Enable
+
+        public byte TAC
+        {
+            get
+            {
+                return _memory[0xFF07];
+            }
+            set
+            {
+                _memory[0xFF07] = value;
+            }
+        }
+
+        public bool TimerEnabled
+        {
+            get
+            {
+                return (_memory[0xFF07] & 0b0000_0100) != 0;
+            }
+            set
+            {
+                _memory[0xFF07] = (byte)((_memory[0xFF07] & 0b1111_1011) | (value ? 0b0000_0100 : 0));
+            }
+        }
+        // IF
+        // The IF register is used to store the interrupt flags.
+        // The IF register is mapped to the memory address 0xFF0F.
+        // Interrupt Flag (R/W)
+        // Bit 4: Transition from High to Low of Pin number P10-P13
+        // Bit 3: Serial I/O transfer complete
+        // Bit 2: Timer Overflow
+        // Bit 1: LCDC (see STAT)
+        // Bit 0: V-Blank
+        public byte IF
+        {
+            get
+            {
+                return _memory[0xFF0F];
+            }
+            set
+            {
+                _memory[0xFF0F] = value |= 0xE0;
+            }
+        }
+
+        public bool IFVBlank
+        {
+            get
+            {
+                return (_memory[0xFF0F] & 0b0000_0001) != 0;
+            }
+            set
+            {
+                _memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1111_1110) | (value ? 0b0000_0001 : 0));
+            }
+        }
+
+        public bool IFLCDStat
+        {
+            get
+            {
+                return (_memory[0xFF0F] & 0b0000_0010) != 0;
+            }
+            set
+            {
+                _memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1111_1101) | (value ? 0b0000_0010 : 0));
+            }
+        }
+
+        public bool IFTimer
+        {
+            get
+            {
+                return (_memory[0xFF0F] & 0b0000_0100) != 0;
+            }
+            set
+            {
+                _memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1111_1011) | (value ? 0b0000_0100 : 0));
+            }
+        }
+
+        public bool IFSerial
+        {
+            get
+            {
+                return (_memory[0xFF0F] & 0b0000_1000) != 0;
+            }
+            set
+            {
+                _memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1111_0111) | (value ? 0b0000_1000 : 0));
+            }
+        }
+
+        public bool IFJoypad
+        {
+            get
+            {
+                return (_memory[0xFF0F] & 0b0001_0000) != 0;
+            }
+            set
+            {
+                _memory[0xFF0F] = (byte)((_memory[0xFF0F] & 0b1110_1111) | (value ? 0b0001_0000 : 0));
+            }
+        }
+
+        // LCDC
+        // The LCDC register is used to store the LCD control.
+        // The LCDC register is mapped to the memory address 0xFF40.
+        // LCD Control
+        // Bit 7 - LCD Display Enable             (0=Off, 1=On)
+        public bool LCDEnabled
+        {
+            get
+            {
+                return (_memory[0xFF40] & 0b1000_0000) != 0;
+            }
+            set
+            {
+                _memory[0xFF40] = (byte)((_memory[0xFF40] & 0b0111_1111) | (value ? 0b1000_0000 : 0));
+            }
+        }
+        // Bit 6 - Window Tile Map Display Select (0=9800-9BFF, 1=9C00-9FFF)
+        public bool WindowTileMapDisplaySelect
+        {
+            get
+            {
+                return (_memory[0xFF40] & 0b0100_0000) != 0;
+            }
+            set
+            {
+                _memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1011_1111) | (value ? 0b0100_0000 : 0));
+            }
+        }
+        // Bit 5 - Window Display Enable          (0=Off, 1=On)
+        public bool WindowDisplayEnable
+        {
+            get
+            {
+                return (_memory[0xFF40] & 0b0010_0000) != 0;
+            }
+            set
+            {
+                _memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1101_1111) | (value ? 0b0010_0000 : 0));
+            }
+        }
+        // Bit 4 - BG & Window Tile Data Select   (0=8800-97FF, 1=8000-8FFF)
+        public bool BGWindowTileDataSelect
+        {
+            get
+            {
+                return (_memory[0xFF40] & 0b0001_0000) != 0;
+            }
+            set
+            {
+                _memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1110_1111) | (value ? 0b0001_0000 : 0));
+            }
+        }
+        // Bit 3 - BG Tile Map Display Select     (0=9800-9BFF, 1=9C00-9FFF)
+        public bool BGTileMapDisplaySelect
+        {
+            get
+            {
+                return (_memory[0xFF40] & 0b0000_1000) != 0;
+            }
+            set
+            {
+                _memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1111_0111) | (value ? 0b0000_1000 : 0));
+            }
+        }
+        // Bit 2 - OBJ (Sprite) Size              (0=8x8, 1=8x16)
+        public bool OBJSize
+        {
+            get
+            {
+                return (_memory[0xFF40] & 0b0000_0100) != 0;
+            }
+            set
+            {
+                _memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1111_1011) | (value ? 0b0000_0100 : 0));
+            }
+        }
+        // Bit 1 - OBJ (Sprite) Display Enable    (0=Off, 1=On)
+        public bool SpriteDisplay
+        {
+            get
+            {
+                return (_memory[0xFF40] & 0b0000_0010) != 0;
+            }
+            set
+            {
+                _memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1111_1101) | (value ? 0b0000_0010 : 0));
+            }
+        }
+        // Bit 0 - BG Display (for CGB see below) (0=Off, 1=On)
+        public bool BGDisplay
+        {
+            get
+            {
+                return (_memory[0xFF40] & 0b0000_0001) != 0;
+            }
+            set
+            {
+                _memory[0xFF40] = (byte)((_memory[0xFF40] & 0b1111_1110) | (value ? 0b0000_0001 : 0));
+            }
+        }
+
+        public byte LCDC
+        {
+            get
+            {
+                return _memory[0xFF40];
+            }
+            set
+            {
+                _memory[0xFF40] = value;
+            }
+        }
+
+        // STAT
+        // The STAT register is used to store the LCDC status.
+        // The STAT register is mapped to the memory address 0xFF41.
+        // LCDC Status
+        // Bit 6 - LYC=LY Coincidence Interrupt (1=Enable) (Read/Write)
+        // Bit 5 - Mode 2 OAM Interrupt         (1=Enable) (Read/Write)
+        // Bit 4 - Mode 1 V-Blank Interrupt     (1=Enable) (Read/Write)
+        // Bit 3 - Mode 0 H-Blank Interrupt     (1=Enable) (Read/Write)
+        // Bit 2 - Coincidence Flag  (0:LYC<>LY, 1:LYC=LY) (Read Only)
+        // Bit 1-0 - Mode Flag       (Mode 0-3, see below) (Read Only)
+        //           0: During H-Blank
+        //           1: During V-Blank
+        //           2: During Searching OAM
+        //           3: During Transfering Data to LCD Driver
+        public byte LCDStatus
+        {
+            get
+            {
+                return _memory[0xFF41];
+            }
+            set
+            {
+                _memory[0xFF41] = value;
+            }
+        }
+
+        // SCY
+        // The SCY register is used to store the scroll Y.
+        // The SCY register is mapped to the memory address 0xFF42.
+        public byte SCY
+        {
+            get
+            {
+                return _memory[0xFF42];
+            }
+            set
+            {
+                _memory[0xFF42] = value;
+            }
+        }
+
+        // SCX
+        // The SCX register is used to store the scroll X.
+        // The SCX register is mapped to the memory address 0xFF43.
+        public byte SCX
+        {
+            get
+            {
+                return _memory[0xFF43];
+            }
+            set
+            {
+                _memory[0xFF43] = value;
+            }
+        }
+
+        // LY
+        // The LY register is used to store the current line.
+        // The LY register is mapped to the memory address 0xFF44.
+        public byte LY
+        {
+            get
+            {
+                return _memory[0xFF44];
+            }
+            set
+            {
+                _memory[0xFF44] = value;
+            }
+        }
+
+        // LYC
+        // The LYC register is used to store the LY compare.
+        // The LYC register is mapped to the memory address 0xFF45.
+        public byte LYC
+        {
+            get
+            {
+                return _memory[0xFF45];
+            }
+            set
+            {
+                _memory[0xFF45] = value;
+            }
+        }
+
+        // BGP
+        // The BGP register is used to store the background and window palette data.
+        // The BGP register is mapped to the memory address 0xFF47.
+        // Bit 7-6 - Shade for Color Number 3
+        // Bit 5-4 - Shade for Color Number 2
+        // Bit 3-2 - Shade for Color Number 1
+        // Bit 1-0 - Shade for Color Number 0
+        //           0: White
+        //           1: Light gray
+        //           2: Dark gray
+        //           3: Black
+        public byte BGP
+        {
+            get
+            {
+                return _memory[0xFF47];
+            }
+            set
+            {
+                _memory[0xFF47] = value;
+            }
+        }
+
+        // OBP0
+        // The OBP0 register is used to store the object palette 0 data.
+        // The OBP0 register is mapped to the memory address 0xFF48.
+        // Bit 7-6 - Shade for Color Number 3
+        // Bit 5-4 - Shade for Color Number 2
+        // Bit 3-2 - Shade for Color Number 1
+        // Bit 1-0 - Shade for Color Number 0
+        //           0: White
+        //           1: Light gray
+        //           2: Dark gray
+        //           3: Black
+        public byte OBP0
+        {
+            get
+            {
+                return _memory[0xFF48];
+            }
+            set
+            {
+                _memory[0xFF48] = value;
+            }
+        }
+
+        // OBP1
+        // The OBP1 register is used to store the object palette 1 data.
+        // The OBP1 register is mapped to the memory address 0xFF49.
+        // Bit 7-6 - Shade for Color Number 3
+        // Bit 5-4 - Shade for Color Number 2
+        // Bit 3-2 - Shade for Color Number 1
+        // Bit 1-0 - Shade for Color Number 0
+        //           0: White
+        //           1: Light gray
+        //           2: Dark gray
+        //           3: Black
+        public byte OBP1
+        {
+            get
+            {
+                return _memory[0xFF49];
+            }
+            set
+            {
+                _memory[0xFF49] = value;
+            }
+        }
+
+        // WY
+        // The WY register is used to store the window Y position.
+        // The WY register is mapped to the memory address 0xFF4A.
+        public byte WY
+        {
+            get
+            {
+                return _memory[0xFF4A];
+            }
+            set
+            {
+                _memory[0xFF4A] = value;
+            }
+        }
+
+        // WX
+        // The WX register is used to store the window X position.
+        // The WX register is mapped to the memory address 0xFF4B.
+        public byte WX
+        {
+            get
+            {
+                return _memory[0xFF4B];
+            }
+            set
+            {
+                _memory[0xFF4B] = value;
+            }
+        }
+
+        // OPRI
+        // Object Priority Mode (CGB only).
+        // Bit 0: 0 = OAM priority (smaller OAM index wins), 1 = coordinate priority (lower X wins).
+        // Mapped to 0xFF6C.
+        public byte OPRI
+        {
+            get
+            {
+                return _memory[0xFF6C];
+            }
+            set
+            {
+                _memory[0xFF6C] = value;
+            }
+        }
+
+        // Interrupt enable register
+        // The last byte of the RAM is always mapped to the memory address 0xFFFF.
+        // The interrupt enable register is used to enable and disable the interrupts.
+        public byte InterruptEnableRegister
+        {
+            get
+            {
+                return _memory[0xFFFF];
+            }
+            set
+            {
+                _memory[0xFFFF] = value;
+            }
+        }
+
+        public bool IEVBlank
+        {
+            get
+            {
+                return (_memory[0xFFFF] & 0b0000_0001) != 0;
+            }
+            set
+            {
+                _memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1111_1110) | (value ? 0b0000_0001 : 0));
+            }
+        }
+
+        public bool IELCDStat
+        {
+            get
+            {
+                return (_memory[0xFFFF] & 0b0000_0010) != 0;
+            }
+            set
+            {
+                _memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1111_1101) | (value ? 0b0000_0010 : 0));
+            }
+        }
+
+        public bool IETimer
+        {
+            get
+            {
+                return (_memory[0xFFFF] & 0b0000_0100) != 0;
+            }
+            set
+            {
+                _memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1111_1011) | (value ? 0b0000_0100 : 0));
+            }
+        }
+
+        public bool IESerial
+        {
+            get
+            {
+                return (_memory[0xFFFF] & 0b0000_1000) != 0;
+            }
+            set
+            {
+                _memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1111_0111) | (value ? 0b0000_1000 : 0));
+            }
+        }
+
+        public bool IEJoypad
+        {
+            get
+            {
+                return (_memory[0xFFFF] & 0b0001_0000) != 0;
+            }
+            set
+            {
+                _memory[0xFFFF] = (byte)((_memory[0xFFFF] & 0b1110_1111) | (value ? 0b0001_0000 : 0));
+            }
+        }
+
+        private byte[] _cartRom = null!;
+        private byte _currentRomBank = 1;
+        private byte[] RamBanks = null!;
+        private byte _romBankingMode;
+        private byte _currentRamBank = 0;
+        private bool _ramEnabled;
+        private bool _mbc1;
+        private bool _mbc2;
+        private bool _mbc3;
+        private bool _mbc5;
+        private int _romBankSize;
+        private int _romBankCount;
+        private int _ramBankSize;
+        private bool _RTCEnabled;
+        private bool _multicart = false;
+        private bool _mbc1m;
+        private byte[]? _mbc2Ram;
+
+        // MBC5 state
+        private ushort _mbc5RomBank = 1;
+        private bool _mbc5HasRumble;
+        private bool _mbc5Rumble;
+
+        // MBC3 state
+        private byte _mbc3RamBankOrRtcSelect;
+        private bool _mbc3LatchArmed;
+        private bool _mbc3Latched;
+        private int _mbc3RtcSubCycleCounter;
+        private int _mbc3RtcSeconds;
+        private int _mbc3RtcMinutes;
+        private int _mbc3RtcHours;
+        private int _mbc3RtcDays; // 0-511
+        private bool _mbc3RtcHalt;
+        private bool _mbc3RtcCarry;
+        private byte _mbc3RtcLatchedS;
+        private byte _mbc3RtcLatchedM;
+        private byte _mbc3RtcLatchedH;
+        private byte _mbc3RtcLatchedDL;
+        private byte _mbc3RtcLatchedDH;
+
+        private static ReadOnlySpan<byte> NintendoLogo => new byte[]
+        {
+            0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B,
+            0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
+            0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
+            0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
+            0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC,
+            0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E
+        };
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool DetectMbc1mMulticart(byte[] rom)
+        {
+            // Pan Docs: MBC1M multi-carts can be identified by a Nintendo logo/header in bank $10.
+            const int logoOffsetInBank = 0x0104;
+            const int bank10Base = 0x10 * 0x4000;
+            int start = bank10Base + logoOffsetInBank;
+            if (rom == null || rom.Length < start + NintendoLogo.Length)
+            {
+                return false;
+            }
+            for (int i = 0; i < NintendoLogo.Length; i++)
+            {
+                if (rom[start + i] != NintendoLogo[i])
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsPowerOfTwo(int value) => value > 0 && (value & (value - 1)) == 0;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetCartRomBankCount()
+        {
+            if (_cartRom == null || _cartRom.Length < 0x4000)
+            {
+                return 0;
+            }
+            return _cartRom.Length / 0x4000;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int MirrorRomBank(int bank)
+        {
+            int availableBanks = GetCartRomBankCount();
+            if (availableBanks <= 0)
+            {
+                return 0;
+            }
+            if (IsPowerOfTwo(availableBanks))
+            {
+                return bank & (availableBanks - 1);
+            }
+            bank %= availableBanks;
+            if (bank < 0) bank += availableBanks;
+            return bank;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetMbc1Bank0()
+        {
+            // In mode 0, bank 0 area is fixed to bank 0.
+            // In mode 1, bank 0 area selects bank (upper2 << 5).
+            int shift = _mbc1m ? 4 : 5;
+            int bank = _romBankingMode == 1 ? ((_currentRamBank & 0x03) << shift) : 0;
+            return MirrorRomBank(bank);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetMbc1Bank1()
+        {
+            // 0x4000-0x7FFF always uses both registers.
+            // MBC1M differs: secondary applies to bits 4-5 and bit 4 of the main register is ignored.
+            int bank;
+            if (_mbc1m)
+            {
+                bank = (_currentRomBank & 0x0F) | ((_currentRamBank & 0x03) << 4);
+                // 00->01 translation compares the FULL 5-bit ROM banking register.
+                if ((_currentRomBank & 0x1F) == 0)
+                {
+                    bank |= 0x01;
+                }
+            }
+            else
+            {
+                bank = (_currentRomBank & 0x1F) | ((_currentRamBank & 0x03) << 5);
+                // 00->01 translation compares the FULL 5-bit ROM banking register.
+                if ((_currentRomBank & 0x1F) == 0)
+                {
+                    bank |= 0x01;
+                }
+            }
+            return MirrorRomBank(bank);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetMbc1RamBank()
+        {
+            // In mode 0, always bank 0. In mode 1, select upper2.
+            return _romBankingMode == 1 ? (_currentRamBank & 0x03) : 0;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetMbc2RomBank()
+        {
+            int bank = _currentRomBank & 0x0F;
+            if (bank == 0)
+            {
+                bank = 1;
+            }
+            return MirrorRomBank(bank);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetMbc2RamIndex(ushort address)
+        {
+            // Pan Docs: only bottom 9 bits are used, so A200-BFFF echoes A000-A1FF.
+            return (address - 0xA000) & 0x01FF;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetMbc3RomBank()
+        {
+            int bank = _currentRomBank & 0x7F;
+            if (bank == 0)
+            {
+                bank = 1;
+            }
+            return MirrorRomBank(bank);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetMbc5RomBank()
+        {
+            // MBC5 supports a 9-bit ROM bank number (0-511). Bank 0 is allowed.
+            int bank = _mbc5RomBank & 0x01FF;
+            return MirrorRomBank(bank);
+        }
+
+        private void StartOamDma(byte highByte)
+        {
+            // FF46 write starts a DMA transfer from XX00-XX9F to FE00-FE9F.
+            _memory[0xFF46] = highByte;
+            _oamDmaActive = true;
+            _oamDmaSourceBase = (ushort)(highByte << 8);
+            _oamDmaByteIndex = 0;
+            _oamDmaDotCounter = 0;
+            MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
+        }
+
+        private byte ReadByteForDma(ushort address)
+        {
+            // Like ReadByte, but without CPU access restrictions (Mode 3 / DMA / OAM access) and without OAM-bug side effects.
+            int newAddress;
+            if (address < 0x4000)
+            {
+                if (_mbc1)
+                {
+                    int bank = GetMbc1Bank0();
+                    newAddress = (bank * 0x4000) + address;
+                    return _cartRom[newAddress];
+                }
+                if (_mbc2)
+                {
+                    return _cartRom[address];
+                }
+                if (_mbc5)
+                {
+                    // MBC5: bank 0 is always mapped here.
+                    return _cartRom[address];
+                }
+                return _cartRom[address];
+            }
+            if (address >= 0x4000 && address <= 0x7FFF)
+            {
+                if (_mbc1)
+                {
+                    int bank = GetMbc1Bank1();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc2)
+                {
+                    int bank = GetMbc2RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc3)
+                {
+                    int bank = GetMbc3RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc5)
+                {
+                    int bank = GetMbc5RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                return _memory[address];
+            }
+            if (address >= 0x8000 && address <= 0x9FFF)
+            {
+                int bank = GetCpuVramBank();
+                int offset = address - 0x8000;
+                return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
+            }
+            if (address >= 0xA000 && address <= 0xBFFF)
+            {
+                return ReadRam(address);
+            }
+            if (address >= 0xC000 && address <= 0xFDFF)
+            {
+                int idx = MapWramAddress(address);
+                return idx >= 0 ? _wram[idx] : (byte)0xFF;
+            }
+            if (address >= 0xFE00 && address <= 0xFE9F)
+            {
+                return _gameBoy._ppu.OAM[address - 0xFE00];
+            }
+            return _memory[address];
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private ushort GetHdmaSource()
+        {
+            ushort src = (ushort)((_memory[0xFF51] << 8) | (_memory[0xFF52] & 0xF0));
+            // Pan Docs: source range is 0000-7FF0 or A000-DFF0; we trust the game.
+            return src;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private ushort GetHdmaDestination()
+        {
+            ushort dst = (ushort)(0x8000 | ((_memory[0xFF53] & 0x1F) << 8) | (_memory[0xFF54] & 0xF0));
+            return dst;
+        }
+
+        private void UpdateHdmaRegsFromState()
+        {
+            _memory[0xFF51] = (byte)(_hdmaSrc >> 8);
+            _memory[0xFF52] = (byte)(_hdmaSrc & 0xF0);
+            _memory[0xFF53] = (byte)((_hdmaDst >> 8) & 0x1F);
+            _memory[0xFF54] = (byte)(_hdmaDst & 0xF0);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private byte ReadHdma5Value()
+        {
+            if (!_isCgb)
+            {
+                return 0xFF;
+            }
+            if (_hdmaActive)
+            {
+                int remainingMinus1 = Math.Max(0, _hdmaRemainingBlocks - 1) & 0x7F;
+                // Bit7 reads 0 while active.
+                return (byte)remainingMinus1;
+            }
+            // Bit7 reads 1 when inactive.
+            return 0xFF;
+        }
+
+        private void WriteByteToVramForDma(ushort address, byte value)
+        {
+            if (address < 0x8000 || address > 0x9FFF)
+            {
+                return;
+            }
+            int bank = GetCpuVramBank();
+            int offset = address - 0x8000;
+            int idx = (bank * 0x2000) + offset;
+            if ((uint)idx >= (uint)_gameBoy._ppu.VideoRam.Length)
+            {
+                return;
+            }
+            _gameBoy._ppu.VideoRam[idx] = value;
+        }
+
+        private void TransferHdmaBlock()
+        {
+            ushort src = _hdmaSrc;
+            ushort dst = _hdmaDst;
+            for (int i = 0; i < 0x10; i++)
+            {
+                byte b = ReadByteForDma((ushort)(src + i));
+                WriteByteToVramForDma((ushort)(dst + i), b);
+            }
+            _hdmaSrc = (ushort)(src + 0x10);
+            _hdmaDst = (ushort)(dst + 0x10);
+            UpdateHdmaRegsFromState();
+            MarkVideoDebugDirty(dst < 0x9800 ? VideoDebugDirtyFlags.TileData : VideoDebugDirtyFlags.TileMaps);
+        }
+
+        private void StartGdmaOrHdma(byte hdma5Value)
+        {
+            int blocks = (hdma5Value & 0x7F) + 1;
+            bool hblankMode = (hdma5Value & 0x80) != 0;
+
+            _hdmaSrc = GetHdmaSource();
+            _hdmaDst = GetHdmaDestination();
+            _hdmaRemainingBlocks = blocks;
+            _hdmaHblankMode = hblankMode;
+            _hdmaActive = true;
+
+            if (!hblankMode)
+            {
+                // General-purpose DMA: transfer all blocks immediately.
+                for (int i = 0; i < blocks; i++)
+                {
+                    TransferHdmaBlock();
+                }
+                _hdmaActive = false;
+                _hdmaHblankMode = false;
+                _hdmaRemainingBlocks = 0;
+                _memory[0xFF55] = 0xFF;
+                return;
+            }
+
+            // HBlank DMA: becomes active; transfer happens during Mode 0 HBlank.
+            _memory[0xFF55] = ReadHdma5Value();
+        }
+
+        internal void TickHblankDmaIfActive()
+        {
+            if (!_isCgb || !_hdmaActive || !_hdmaHblankMode)
+            {
+                return;
+            }
+            // Only during visible scanlines.
+            if (_memory[0xFF44] >= 144)
+            {
+                return;
+            }
+            if (_hdmaRemainingBlocks <= 0)
+            {
+                _hdmaActive = false;
+                _hdmaHblankMode = false;
+                _memory[0xFF55] = 0xFF;
+                return;
+            }
+            TransferHdmaBlock();
+            _hdmaRemainingBlocks--;
+            if (_hdmaRemainingBlocks <= 0)
+            {
+                _hdmaActive = false;
+                _hdmaHblankMode = false;
+                _memory[0xFF55] = 0xFF;
+            }
+            else
+            {
+                _memory[0xFF55] = ReadHdma5Value();
+            }
+        }
+
+        private void TickOamDma(int baseCycles)
+        {
+            if (!_oamDmaActive || baseCycles <= 0)
+            {
+                return;
+            }
+
+            // 160 bytes total. Timing: 160 M-cycles.
+            // In terms of PPU dots: 640 dots in normal speed, 320 dots in double speed.
+            int dotsPerByte = _gameBoy.DoubleSpeed ? 2 : 4;
+            _oamDmaDotCounter += baseCycles;
+            bool wroteAny = false;
+            while (_oamDmaDotCounter >= dotsPerByte && _oamDmaByteIndex < 0xA0)
+            {
+                _oamDmaDotCounter -= dotsPerByte;
+                ushort src = (ushort)(_oamDmaSourceBase + _oamDmaByteIndex);
+                byte b = ReadByteForDma(src);
+                int i = _oamDmaByteIndex;
+                _memory[0xFE00 + i] = b;
+                _gameBoy._ppu.OAM[i] = b;
+                _oamDmaByteIndex++;
+                wroteAny = true;
+            }
+            if (wroteAny)
+            {
+                MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
+            }
+            if (_oamDmaByteIndex >= 0xA0)
+            {
+                _oamDmaActive = false;
+            }
+        }
+
+        internal void TickBaseCycles(int baseCycles)
+        {
+            TickOamDma(baseCycles);
+            if (!_mbc3 || !_mbc3HasTimer || _mbc3RtcHalt)
+            {
+                return;
+            }
+
+            // MBC3 RTC increments at 1Hz, independently of CPU speed.
+            // We advance it using the emulator's "base" cycle clock (DMG base clock = 4_194_304 Hz).
+            const int CyclesPerSecond = 4_194_304;
+            if (baseCycles <= 0)
+            {
+                return;
+            }
+            _mbc3RtcSubCycleCounter += baseCycles;
+            while (_mbc3RtcSubCycleCounter >= CyclesPerSecond)
+            {
+                _mbc3RtcSubCycleCounter -= CyclesPerSecond;
+
+                _mbc3RtcSeconds++;
+                if (_mbc3RtcSeconds >= 60)
+                {
+                    _mbc3RtcSeconds = 0;
+                    _mbc3RtcMinutes++;
+                    if (_mbc3RtcMinutes >= 60)
+                    {
+                        _mbc3RtcMinutes = 0;
+                        _mbc3RtcHours++;
+                        if (_mbc3RtcHours >= 24)
+                        {
+                            _mbc3RtcHours = 0;
+                            _mbc3RtcDays++;
+                            if (_mbc3RtcDays >= 512)
+                            {
+                                _mbc3RtcDays = 0;
+                                _mbc3RtcCarry = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private byte Mbc3RtcComposeDH()
+        {
+            byte dh = 0;
+            if (((_mbc3RtcDays >> 8) & 0x01) != 0) dh |= 0x01;
+            if (_mbc3RtcHalt) dh |= 0x40;
+            if (_mbc3RtcCarry) dh |= 0x80;
+            return dh;
+        }
+
+        private void Mbc3RtcLatch()
+        {
+            _mbc3RtcLatchedS = (byte)_mbc3RtcSeconds;
+            _mbc3RtcLatchedM = (byte)_mbc3RtcMinutes;
+            _mbc3RtcLatchedH = (byte)_mbc3RtcHours;
+            _mbc3RtcLatchedDL = (byte)(_mbc3RtcDays & 0xFF);
+            _mbc3RtcLatchedDH = Mbc3RtcComposeDH();
+            _mbc3Latched = true;
+        }
+
+        private byte Mbc3RtcReadSelected()
+        {
+            // Reads return the latched snapshot once a latch has occurred; otherwise, read live values.
+            byte sel = _mbc3RamBankOrRtcSelect;
+            bool useLatched = _mbc3Latched;
+            switch (sel)
+            {
+                case 0x08:
+                    return useLatched ? _mbc3RtcLatchedS : (byte)_mbc3RtcSeconds;
+                case 0x09:
+                    return useLatched ? _mbc3RtcLatchedM : (byte)_mbc3RtcMinutes;
+                case 0x0A:
+                    return useLatched ? _mbc3RtcLatchedH : (byte)_mbc3RtcHours;
+                case 0x0B:
+                    return useLatched ? _mbc3RtcLatchedDL : (byte)(_mbc3RtcDays & 0xFF);
+                case 0x0C:
+                    return useLatched ? _mbc3RtcLatchedDH : Mbc3RtcComposeDH();
+                default:
+                    return 0xFF;
+            }
+        }
+
+        private void Mbc3RtcWriteSelected(byte value)
+        {
+            // Writing affects the live counter, not the latched snapshot.
+            byte sel = _mbc3RamBankOrRtcSelect;
+            switch (sel)
+            {
+                case 0x08:
+                    _mbc3RtcSeconds = value % 60;
+                    break;
+                case 0x09:
+                    _mbc3RtcMinutes = value % 60;
+                    break;
+                case 0x0A:
+                    _mbc3RtcHours = value % 24;
+                    break;
+                case 0x0B:
+                    _mbc3RtcDays = (_mbc3RtcDays & 0x100) | value;
+                    break;
+                case 0x0C:
+                    {
+                        int dayBit8 = (value & 0x01) != 0 ? 0x100 : 0;
+                        bool newHalt = (value & 0x40) != 0;
+                        bool newCarry = (value & 0x80) != 0;
+                        _mbc3RtcDays = (_mbc3RtcDays & 0xFF) | dayBit8;
+                        _mbc3RtcCarry = newCarry;
+                        _mbc3RtcHalt = newHalt;
+                        break;
+                    }
+            }
+
+            MarkSaveDirtyIfBatteryBackedSave();
+        }
+
+        public GBMemory(Gameboy gameBoy)
+        {
+            // Avoid continuously growing log files during normal runs.
+            // Set env var GBOG_CPU_LOG=1 to enable cpu.log for debugging.
+            if (Environment.GetEnvironmentVariable("GBOG_CPU_LOG") == "1")
+            {
+                Log.Logger = new LoggerConfiguration()
+                    .WriteTo.File("cpu.log", outputTemplate: "{Message:lj}{NewLine}{Exception}")
+                    .CreateLogger();
+            }
+            else
+            {
+                Log.Logger = new LoggerConfiguration()
+                    .MinimumLevel.Warning()
+                    .CreateLogger();
+            }
+            _gameBoy = gameBoy;
+            _joyPadKeys = new bool[8];
+
+            //InitialiseBootROM();
+            InitialiseIORegisters();
+            //_memory[0xFF44] = 0x90;
+        }
+
+        public bool IsCgb => _isCgb;
+        public bool CartSupportsCgb => _cartSupportsCgb;
+        public bool CartRequiresCgb => _cartRequiresCgb;
+        public bool Key1PrepareSpeedSwitch => _key1PrepareSpeedSwitch;
+
+        private byte BuildKey1Value()
+        {
+            // KEY1 (CGB only):
+            // Bit 7 = current speed (0 normal, 1 double)
+            // Bit 0 = prepare speed switch (writable)
+            // Bits 6-1 read as 1
+            byte value = 0x7E;
+            if (_gameBoy.DoubleSpeed)
+            {
+                value |= 0x80;
+            }
+            if (_key1PrepareSpeedSwitch)
+            {
+                value |= 0x01;
+            }
+            return value;
+        }
+
+        private void WriteKey1(byte value)
+        {
+            if (!_isCgb)
+            {
+                return;
+            }
+            _key1PrepareSpeedSwitch = (value & 0x01) != 0;
+            _memory[0xFF4D] = BuildKey1Value();
+        }
+
+        public void ClearKey1SpeedSwitchPrepare()
+        {
+            if (!_isCgb)
+            {
+                return;
+            }
+            _key1PrepareSpeedSwitch = false;
+            _memory[0xFF4D] = BuildKey1Value();
+        }
+
+        public void RefreshKey1()
+        {
+            if (!_isCgb)
+            {
+                return;
+            }
+            _memory[0xFF4D] = BuildKey1Value();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetCpuVramBank()
+        {
+            return _isCgb ? (_memory[0xFF4F] & 0x01) : 0;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetCpuWramBank()
+        {
+            if (!_isCgb)
+            {
+                return 1;
+            }
+            int bank = _memory[0xFF70] & 0x07;
+            if (bank == 0)
+            {
+                bank = 1;
+            }
+            return bank;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int MapWramAddress(ushort address)
+        {
+            // Handle echo RAM (E000-FDFF) by mirroring to C000-DDFF.
+            if (address >= 0xE000 && address <= 0xFDFF)
+            {
+                address = (ushort)(address - 0x2000);
+            }
+
+            if (address >= 0xC000 && address <= 0xCFFF)
+            {
+                return address - 0xC000; // bank 0
+            }
+            if (address >= 0xD000 && address <= 0xDFFF)
+            {
+                int bank = GetCpuWramBank(); // 1..7
+                return 0x1000 + ((bank - 1) * 0x1000) + (address - 0xD000);
+            }
+
+            return -1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private byte ReadCgbPaletteData(bool obj, int index)
+        {
+            index &= 0x3F;
+            return obj ? _cgbObjPaletteRam[index] : _cgbBgPaletteRam[index];
+        }
+
+        private void WriteCgbPaletteData(bool obj, byte value)
+        {
+            ushort specAddr = obj ? (ushort)0xFF6A : (ushort)0xFF68;
+            int index = _memory[specAddr] & 0x3F;
+            if (obj)
+            {
+                CgbObjPaletteWriteCount++;
+                _cgbObjPaletteRam[index] = value;
+            }
+            else
+            {
+                CgbBgPaletteWriteCount++;
+                _cgbBgPaletteRam[index] = value;
+            }
+
+            // Auto-increment if bit 7 is set.
+            if ((_memory[specAddr] & 0x80) != 0)
+            {
+                int next = (index + 1) & 0x3F;
+                _memory[specAddr] = (byte)((_memory[specAddr] & 0x80) | next);
+            }
+        }
+
+        private void AutoIncrementCgbPaletteIndex(bool obj)
+        {
+            ushort specAddr = obj ? (ushort)0xFF6A : (ushort)0xFF68;
+            byte spec = _memory[specAddr];
+            if ((spec & 0x80) == 0)
+            {
+                return;
+            }
+            int index = spec & 0x3F;
+            int next = (index + 1) & 0x3F;
+            _memory[specAddr] = (byte)((spec & 0x80) | next);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static byte Expand5To8(int v)
+        {
+            v &= 0x1F;
+            return (byte)((v << 3) | (v >> 2));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static GBOG.CPU.Color DecodeBgr555(ushort word)
+        {
+            // CGB palette entries are 15-bit RGB555 in little-endian:
+            // bits 0-4 = Red, 5-9 = Green, 10-14 = Blue.
+            int r5 = word & 0x1F;
+            int g5 = (word >> 5) & 0x1F;
+            int b5 = (word >> 10) & 0x1F;
+            return new GBOG.CPU.Color
+            {
+                R = Expand5To8(r5),
+                G = Expand5To8(g5),
+                B = Expand5To8(b5),
+                A = 255,
+            };
+        }
+
+        internal static GBOG.CPU.Color DecodeCgbPaletteColorFromRam(ReadOnlySpan<byte> palRam, int paletteNumber, int colorNumber)
+        {
+            paletteNumber &= 0x07;
+            colorNumber &= 0x03;
+            int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
+            ushort word = (ushort)(palRam[baseIndex] | (palRam[baseIndex + 1] << 8));
+            return DecodeBgr555(word);
+        }
+
+        internal GBOG.CPU.Color GetCgbBgPaletteColor(int paletteNumber, int colorNumber)
+        {
+            paletteNumber &= 0x07;
+            colorNumber &= 0x03;
+            int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
+            ushort word = (ushort)(_cgbBgPaletteRam[baseIndex] | (_cgbBgPaletteRam[baseIndex + 1] << 8));
+            return DecodeBgr555(word);
+        }
+
+        internal GBOG.CPU.Color GetCgbObjPaletteColor(int paletteNumber, int colorNumber)
+        {
+            paletteNumber &= 0x07;
+            colorNumber &= 0x03;
+            int baseIndex = (paletteNumber * 8) + (colorNumber * 2);
+            ushort word = (ushort)(_cgbObjPaletteRam[baseIndex] | (_cgbObjPaletteRam[baseIndex + 1] << 8));
+            return DecodeBgr555(word);
+        }
+
+        internal void SetNr52Channel1Active(bool active)
+        {
+            if (active)
+            {
+                _memory[0xFF26] |= 0x01;
+            }
+            else
+            {
+                _memory[0xFF26] &= 0xFE;
+            }
+        }
+
+        private void InitialiseBootROM()
+        {
+            // The boot ROM is used to initialise the GameBoy.
+            // The boot ROM is mapped to the memory address 0x0000 - 0x00FF.
+            // The boot ROM is disabled after the GameBoy has been initialised.
+            var rom = File.ReadAllBytes("DMG_ROM.bin");
+            Array.Copy(rom, 0, _memory, 0, 0x100);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public byte ReadByte(ushort address)
+        {
+            if (_gameBoy.CpuMicroStepActive)
+            {
+                _gameBoy.AdvanceCpuCyclesWithinMCycle(targetCpuCycle: 2);
+            }
+
+            // During OAM DMA on DMG, the CPU can access only HRAM (FF80-FFFE) and typically IE (FFFF).
+            // Reads elsewhere return open bus ($FF).
+            if (_oamDmaActive && !_isCgb && address < 0xFF80)
+            {
+                return 0xFF;
+            }
+
+            // VRAM is inaccessible to the CPU during Mode 3.
+            if (address >= 0x8000 && address <= 0x9FFF && IsVramBlockedForCpu())
+            {
+                return 0xFF;
+            }
+
+            int newAddress;
+            if (address >= 0xFE00 && address <= 0xFEFF)
+            {
+                _gameBoy.MarkOamRead();
+                // OAM is inaccessible during Modes 2 and 3, and also during OAM DMA.
+                if (address <= 0xFE9F && (_oamDmaActive || IsOamBlockedForCpu()))
+                {
+                    return 0xFF;
+                }
+            }
+            if (address == 0xFF4D)
+            {
+                return _isCgb ? BuildKey1Value() : (byte)0xFF;
+            }
+            if (address == 0xFF4F)
+            {
+                // VBK (CGB only): bit0 selects VRAM bank; bits7-1 read as 1.
+                return _isCgb ? (byte)(0xFE | (_memory[0xFF4F] & 0x01)) : (byte)0xFF;
+            }
+            if (address == 0xFF70)
+            {
+                // SVBK (CGB only): bits0-2 select WRAM bank; bits7-3 read as 1.
+                return _isCgb ? (byte)(0xF8 | (_memory[0xFF70] & 0x07)) : (byte)0xFF;
+            }
+            if (address == 0xFF68)
+            {
+                return _isCgb ? (byte)(_memory[0xFF68] & 0xBF) : (byte)0xFF;
+            }
+            if (address == 0xFF69)
+            {
+                if (!_isCgb)
+                {
+                    return 0xFF;
+                }
+                // CGB: palette RAM is blocked during Mode 3; reads return open bus.
+                if (IsVramBlockedForCpu())
+                {
+                    return 0xFF;
+                }
+                return ReadCgbPaletteData(obj: false, index: _memory[0xFF68]);
+            }
+            if (address == 0xFF6A)
+            {
+                return _isCgb ? (byte)(_memory[0xFF6A] & 0xBF) : (byte)0xFF;
+            }
+            if (address == 0xFF6B)
+            {
+                if (!_isCgb)
+                {
+                    return 0xFF;
+                }
+                // CGB: palette RAM is blocked during Mode 3; reads return open bus.
+                if (IsVramBlockedForCpu())
+                {
+                    return 0xFF;
+                }
+                return ReadCgbPaletteData(obj: true, index: _memory[0xFF6A]);
+            }
+            if (address == 0xFF6C)
+            {
+                // OPRI (CGB only): bit0 selects OBJ priority mode; other bits read as 1.
+                return _isCgb ? (byte)(0xFE | (_memory[0xFF6C] & 0x01)) : (byte)0xFF;
+            }
+            if (address == 0xFF55)
+            {
+                // HDMA5 (CGB only): reads as $FF when inactive; while active bit7=0 and low7=remaining-1.
+                return ReadHdma5Value();
+            }
+            if (address >= 0xFF51 && address <= 0xFF55)
+            {
+                // HDMA registers (CGB only).
+                return _isCgb ? _memory[address] : (byte)0xFF;
+            }
+            if (address < 0x4000)
+            {
+                if (_mbc1)
+                {
+                    int bank = GetMbc1Bank0();
+                    newAddress = (bank * 0x4000) + address;
+                    return _cartRom[newAddress];
+                }
+                if (_mbc2)
+                {
+                    // MBC2: bank 0 is always mapped here.
+                    return _cartRom[address];
+                }
+                if (_mbc5)
+                {
+                    // MBC5: bank 0 is always mapped here.
+                    return _cartRom[address];
+                }
+                return _cartRom[address];
+            }
+            else if ((address >= 0x4000) && (address <= 0x7FFF))
+            {
+                if (_mbc1)
+                {
+                    int bank = GetMbc1Bank1();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc2)
+                {
+                    int bank = GetMbc2RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc3)
+                {
+                    int bank = GetMbc3RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc5)
+                {
+                    int bank = GetMbc5RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                return _memory[address];
+            }
+            else if (address >= 0x8000 && address <= 0x9FFF)
+            {
+                int bank = GetCpuVramBank();
+                int offset = address - 0x8000;
+                return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
+            }
+            else if ((address >= 0xA000) && (address <= 0xBFFF))
+            {
+                return ReadRam(address);
+            }
+            else if (address >= 0xC000 && address <= 0xFDFF)
+            {
+                int idx = MapWramAddress(address);
+                return idx >= 0 ? _wram[idx] : (byte)0xFF;
+            }
+            else if (address >= 0xFE00 && address <= 0xFE9F)
+            {
+                return _gameBoy._ppu.OAM[address - 0xFE00];
+            }
+            else if (address >= 0xFEA0 && address <= 0xFEFF)
+            {
+                return 0xFF;
+            }
+            else if (address >= 0xFF27 && address <= 0xFF2F)
+            {
+                // Unused sound register region always reads as 0xFF.
+                return 0xFF;
+            }
+            else if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
+            {
+                return _gameBoy.Apu.ReadRegister(address);
+            }
+            else if (0xFF00 == address)
+                return Joypad;
+            else
+            {
+                return _memory[address];
+            }
+        }
+
+        /// <summary>
+        /// Reads a byte without emulating CPU bus side-effects.
+        /// Intended for debug tooling (memory viewers, inspectors).
+        /// </summary>
+        public byte PeekByte(ushort address)
+        {
+            if (address >= 0xFF27 && address <= 0xFF2F)
+            {
+                return 0xFF;
+            }
+
+            // Prefer reflecting true register behavior for APU.
+            if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
+            {
+                return _gameBoy.Apu.ReadRegister(address);
+            }
+
+            // JOYP: compute the value without triggering interrupts.
+            if (address == 0xFF00)
+            {
+                return BuildJoypValue();
+            }
+
+            if (address == 0xFF4D)
+            {
+                return _isCgb ? BuildKey1Value() : (byte)0xFF;
+            }
+            if (address == 0xFF4F)
+            {
+                return _isCgb ? (byte)(0xFE | (_memory[0xFF4F] & 0x01)) : (byte)0xFF;
+            }
+            if (address == 0xFF70)
+            {
+                return _isCgb ? (byte)(0xF8 | (_memory[0xFF70] & 0x07)) : (byte)0xFF;
+            }
+            if (address == 0xFF68)
+            {
+                return _isCgb ? (byte)(_memory[0xFF68] & 0xBF) : (byte)0xFF;
+            }
+            if (address == 0xFF69)
+            {
+                return _isCgb ? ReadCgbPaletteData(obj: false, index: _memory[0xFF68]) : (byte)0xFF;
+            }
+            if (address == 0xFF6A)
+            {
+                return _isCgb ? (byte)(_memory[0xFF6A] & 0xBF) : (byte)0xFF;
+            }
+            if (address == 0xFF6B)
+            {
+                return _isCgb ? ReadCgbPaletteData(obj: true, index: _memory[0xFF6A]) : (byte)0xFF;
+            }
+            if (address >= 0xFF51 && address <= 0xFF55)
+            {
+                if (!_isCgb)
+                {
+                    return 0xFF;
+                }
+                if (address == 0xFF55)
+                {
+                    return ReadHdma5Value();
+                }
+                return _memory[address];
+            }
+
+            // Like ReadByteForDma: ignore CPU access restrictions and OAM-bug side effects.
+            int newAddress;
+            if (address < 0x4000)
+            {
+                if (_mbc1)
+                {
+                    int bank = GetMbc1Bank0();
+                    newAddress = (bank * 0x4000) + address;
+                    return _cartRom[newAddress];
+                }
+                if (_mbc2)
+                {
+                    return _cartRom[address];
+                }
+                if (_mbc5)
+                {
+                    // MBC5: bank 0 is always mapped here.
+                    return _cartRom[address];
+                }
+                return _cartRom[address];
+            }
+            if (address >= 0x4000 && address <= 0x7FFF)
+            {
+                if (_mbc1)
+                {
+                    int bank = GetMbc1Bank1();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc2)
+                {
+                    int bank = GetMbc2RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc3)
+                {
+                    int bank = GetMbc3RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                if (_mbc5)
+                {
+                    int bank = GetMbc5RomBank();
+                    newAddress = address - 0x4000 + (bank * 0x4000);
+                    return _cartRom[newAddress];
+                }
+                return _memory[address];
+            }
+            if (address >= 0x8000 && address <= 0x9FFF)
+            {
+                int bank = GetCpuVramBank();
+                int offset = address - 0x8000;
+                return _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset];
+            }
+            if (address >= 0xA000 && address <= 0xBFFF)
+            {
+                return ReadRam(address);
+            }
+            if (address >= 0xC000 && address <= 0xFDFF)
+            {
+                int idx = MapWramAddress(address);
+                return idx >= 0 ? _wram[idx] : (byte)0xFF;
+            }
+            if (address >= 0xFE00 && address <= 0xFE9F)
+            {
+                return _gameBoy._ppu.OAM[address - 0xFE00];
+            }
+
+            return _memory[address];
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetPpuMode() => _memory[0xFF41] & 0b11;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool IsVramBlockedForCpu()
+        {
+            if (!LCDEnabled)
+            {
+                return false;
+            }
+            return GetPpuMode() == 3;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool IsOamBlockedForCpu()
+        {
+            if (!LCDEnabled)
+            {
+                return false;
+            }
+            int mode = GetPpuMode();
+            return mode == 2 || mode == 3;
+        }
+
+        private byte ReadRam(ushort address)
+        {
+            int offset = address - 0xA000;
+            ushort newAddress;
+            if (_mbc1)
+            {
+                if (_ramEnabled)
+                {
+                    int ramBank = GetMbc1RamBank();
+                    if (_ramBankSize > 0)
+                    {
+                        ramBank %= _ramBankSize;
+                    }
+                    newAddress = (ushort)(ramBank * 0x2000 + offset);
+                    return RamBanks[newAddress];
+                }
+                return 0xFF;
+            }
+            else if (_mbc2)
+            {
+                if (!_ramEnabled)
+                {
+                    return 0xFF;
+                }
+                var ram = _mbc2Ram ??= new byte[0x200];
+                int index = GetMbc2RamIndex(address);
+                // Only low nibble is meaningful; upper nibble is undefined.
+                return (byte)(0xF0 | (ram[index] & 0x0F));
+            }
+            else if (_mbc3)
+            {
+                if (!_ramEnabled)
+                {
+                    return 0xFF;
+                }
+                byte sel = _mbc3RamBankOrRtcSelect;
+                if (sel <= 0x07)
+                {
+                    int bank = sel;
+                    if (_ramBankSize > 0)
+                    {
+                        bank %= _ramBankSize;
+                    }
+                    return RamBanks[offset + (bank * 0x2000)];
+                }
+                if (sel >= 0x08 && sel <= 0x0C)
+                {
+                    return Mbc3RtcReadSelected();
+                }
+                return 0xFF;
+            }
+            else if (_mbc5)
+            {
+                if (!_ramEnabled)
+                {
+                    return 0xFF;
+                }
+                int bank = _currentRamBank;
+                if (_ramBankSize > 0)
+                {
+                    bank %= _ramBankSize;
+                }
+                return RamBanks[offset + (bank * 0x2000)];
+            }
+            else
+            {
+                return 0xFF;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public sbyte ReadSByte(ushort address)
+        {
+            return (sbyte)ReadByte(address);
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ushort ReadUShort(ushort address)
+        {
+            byte lo = ReadByte(address);
+            byte hi = ReadByte((ushort)(address + 1));
+            return (ushort)((hi << 8) | lo);
+        }
+
+        public void WriteUShort(ushort address, ushort value)
+        {
+            if (address >= _memory.Length || address + 1 >= _memory.Length)
+            {
+                Debugger.Break();
+            }
+            else
+            {
+                WriteByte(address, (byte)(value & 0xFF));
+                WriteByte((ushort)(address + 1), (byte)((value & 0xFF00) >> 8));
+            }
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteByte(ushort address, byte value)
+        {
+            if (_gameBoy.CpuMicroStepActive)
+            {
+                _gameBoy.AdvanceCpuCyclesWithinMCycle(targetCpuCycle: 2);
+            }
+
+            // During OAM DMA on DMG, the CPU can access only HRAM (FF80-FFFE) and typically IE (FFFF).
+            // Writes elsewhere are ignored.
+            if (_oamDmaActive && !_isCgb && address < 0xFF80)
+            {
+                return;
+            }
+
+            // Audio registers and wave RAM are handled by the APU.
+            if ((address >= 0xFF10 && address <= 0xFF26) || (address >= 0xFF30 && address <= 0xFF3F))
+            {
+                _gameBoy.Apu.WriteRegister(address, value);
+                _memory[address] = value;
+                return;
+            }
+
+            // Unused sound registers: ignore writes.
+            if (address >= 0xFF27 && address <= 0xFF2F)
+            {
+                return;
+            }
+
+            if (address < 0x8000)
+            {
+                HandleBanking(address, value);
+            }
+            // 0x8000 - 0x9FFF (VRAM)
+            else if ((address >= 0x8000) && (address <= 0x9FFF))
+            {
+                // VRAM is inaccessible during Mode 3; writes are ignored.
+                if (IsVramBlockedForCpu())
+                {
+                    return;
+                }
+                _memory[address] = value;
+                int bank = GetCpuVramBank();
+                int offset = address - 0x8000;
+                _gameBoy._ppu.VideoRam[(bank * 0x2000) + offset] = value;
+                MarkVideoDebugDirty(address < 0x9800 ? VideoDebugDirtyFlags.TileData : VideoDebugDirtyFlags.TileMaps);
+                //_gameBoy.UpdateTile(address, value);
+            }
+            else if (address >= 0xA000 && address <= 0xBFFF)
+            {
+                if (_ramEnabled)
+                {
+                    WriteRam(address, value);
+                }
+            }
+            else if (address >= 0xC000 && address <= 0xFDFF)
+            {
+                // WRAM and its echo.
+                int idx = MapWramAddress(address);
+                if (idx >= 0)
+                {
+                    _wram[idx] = value;
+                }
+
+                _memory[address] = value;
+                if (address >= 0xE000)
+                {
+                    _memory[address - 0x2000] = value;
+                }
+                // Echo RAM mirrors WRAM; it is not cartridge RAM.
+            }
+            else if (address >= 0xFE00 && address < 0xFEA0)
+            {
+                _gameBoy.MarkOamWrite();
+                // OAM is inaccessible during Modes 2 and 3, and also during OAM DMA.
+                if (_oamDmaActive || IsOamBlockedForCpu())
+                {
+                    return;
+                }
+                _gameBoy._ppu.OAM[address - 0xFE00] = value;
+                _memory[address] = value;
+                MarkVideoDebugDirty(VideoDebugDirtyFlags.Oam);
+            }
+            else if (address >= 0xFEA0 && address <= 0xFEFF)
+            {
+                // Unusable region, but *attempted* access still participates in OAM corruption.
+                _gameBoy.MarkOamWrite();
+                return;
+            }
+            else if (address == 0xFF00)
+            {
+                Joypad = value;
+            }
+            else if (address == 0xFF02)
+            {
+                _serialControlWrites++;
+                _memory[address] = value;
+                if (value == 0x81)
+                {
+                    _serialTransferStarts++;
+                    Console.Write((char)_memory[0xFF01]);
+                    SerialDataReceived?.Invoke(this, (char)_memory[0xFF01]);
+                }
+            }
+            else if (address == 0xFF40)
+            {
+                // LCDC: turning LCD off has immediate side effects on LY/STAT timing.
+                byte old = _memory[0xFF40];
+                _memory[0xFF40] = value;
+                bool oldEnabled = (old & 0x80) != 0;
+                bool newEnabled = (value & 0x80) != 0;
+                if (oldEnabled && !newEnabled)
+                {
+                    // When LCD is disabled, LY is reset and STAT mode becomes 0.
+                    _memory[0xFF44] = 0;
+                    _memory[0xFF41] = (byte)(_memory[0xFF41] & 0b1111_1100);
+                    _gameBoy._ppu.OnLcdDisabled();
+                }
+                else if (!oldEnabled && newEnabled)
+                {
+                    _gameBoy._ppu.OnLcdEnabled();
+                }
+
+                // Any LCDC change can affect which tilemap/tiledata region is used.
+                MarkVideoDebugDirty(VideoDebugDirtyFlags.Lcdc | VideoDebugDirtyFlags.TileMaps);
+            }
+            else if (address == 0xFF41)
+            {
+                // STAT: only bits 3-6 are writable. Bits 0-2 are controlled by the PPU.
+                byte old = _memory[0xFF41];
+                byte preserved = (byte)(old & 0b1000_0111);
+                byte writable = (byte)(value & 0b0111_1000);
+                _memory[0xFF41] = (byte)(preserved | writable);
+            }
+            else if (address == 0xFF47 || address == 0xFF48 || address == 0xFF49)
+            {
+                // DMG palette registers (BGP/OBP0/OBP1). These affect how indices map to shades.
+                _memory[address] = value;
+                MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
+            }
+            else if (address == 0xFF4D)
+            {
+                WriteKey1(value);
+            }
+            else if (address == 0xFF4F)
+            {
+                // VBK (CGB only): bit0 selects VRAM bank.
+                if (_isCgb)
+                {
+                    _memory[0xFF4F] = (byte)(value & 0x01);
+                }
+            }
+            else if (address == 0xFF70)
+            {
+                // SVBK (CGB only): bits0-2 select WRAM bank (0 maps to bank 1).
+                if (_isCgb)
+                {
+                    _memory[0xFF70] = (byte)(value & 0x07);
+                }
+            }
+            else if (address == 0xFF68)
+            {
+                // BCPS (CGB only): bit7 auto-increment, bits0-5 index; bit6 unused.
+                if (_isCgb)
+                {
+                    _memory[0xFF68] = (byte)(value & 0xBF);
+                }
+            }
+            else if (address == 0xFF69)
+            {
+                // BCPD (CGB only): palette data.
+                if (_isCgb)
+                {
+                    // CGB: palette RAM is blocked during Mode 3; writes are ignored but auto-increment still applies.
+                    if (IsVramBlockedForCpu())
+                    {
+                        AutoIncrementCgbPaletteIndex(obj: false);
+                        return;
+                    }
+                    WriteCgbPaletteData(obj: false, value);
+                    MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
+                }
+            }
+            else if (address == 0xFF6A)
+            {
+                // OCPS (CGB only): bit7 auto-increment, bits0-5 index; bit6 unused.
+                if (_isCgb)
+                {
+                    _memory[0xFF6A] = (byte)(value & 0xBF);
+                }
+            }
+            else if (address == 0xFF6B)
+            {
+                // OCPD (CGB only): palette data.
+                if (_isCgb)
+                {
+                    // CGB: palette RAM is blocked during Mode 3; writes are ignored but auto-increment still applies.
+                    if (IsVramBlockedForCpu())
+                    {
+                        AutoIncrementCgbPaletteIndex(obj: true);
+                        return;
+                    }
+                    WriteCgbPaletteData(obj: true, value);
+                    MarkVideoDebugDirty(VideoDebugDirtyFlags.Palette);
+                }
+            }
+            else if (address == 0xFF6C)
+            {
+                // OPRI (CGB only): bit0 selects OBJ priority mode.
+                if (_isCgb)
+                {
+                    _memory[0xFF6C] = (byte)(value & 0x01);
+                }
+            }
+            else if (address == 0xFF51)
+            {
+                // HDMA1 (CGB only): source high.
+                if (_isCgb)
+                {
+                    _memory[0xFF51] = value;
+                }
+            }
+            else if (address == 0xFF52)
+            {
+                // HDMA2 (CGB only): source low, lower 4 bits ignored.
+                if (_isCgb)
+                {
+                    _memory[0xFF52] = (byte)(value & 0xF0);
+                }
+            }
+            else if (address == 0xFF53)
+            {
+                // HDMA3 (CGB only): destination high (bits 0-4), dest is 0x8000-0x9FF0.
+                if (_isCgb)
+                {
+                    _memory[0xFF53] = (byte)(value & 0x1F);
+                }
+            }
+            else if (address == 0xFF54)
+            {
+                // HDMA4 (CGB only): destination low, lower 4 bits ignored.
+                if (_isCgb)
+                {
+                    _memory[0xFF54] = (byte)(value & 0xF0);
+                }
+            }
+            else if (address == 0xFF55)
+            {
+                // HDMA5 (CGB only): start GDMA/HDMA or stop an active HBlank DMA.
+                if (_isCgb)
+                {
+                    // If an HBlank DMA is active, writing with bit7=0 stops it.
+                    if (_hdmaActive && _hdmaHblankMode && (value & 0x80) == 0)
+                    {
+                        _hdmaActive = false;
+                        _hdmaHblankMode = false;
+                        _hdmaRemainingBlocks = 0;
+                        UpdateHdmaRegsFromState();
+                        _memory[0xFF55] = 0xFF;
+                    }
+                    else
+                    {
+                        StartGdmaOrHdma(value);
+                    }
+                }
+            }
+            else if (address == 0xFF04)
+            {
+                _gameBoy.DIVCounter = 0;
+                _memory[address] = 0;
                 // When DIV is reset, the internal counter for TIMA should also be affected because TIMA is derived from the system clock which DIV also counts.
                 // In this implementation, _mClockCount represents the "cycles until next TIMA increment".
                 // Resetting DIV effectively resets the internal divider.
                 // So we should reset _mClockCount to the full period.
                 _gameBoy.ResetTimerCounter();
-			}
-			else if (address == 0xFF05) // TIMA
-			{
-				_memory[address] = value;
-			}
-			else if (address == 0xFF07) // TAC
-			{
-				_memory[address] = value;
-				_gameBoy.SetClockFrequency();
-			}
-			else if (address == 0xFF44)
-			{
-				_memory[address] = 0;
-			}
-			else if (address == 0xFF46)
-			{
-				StartOamDma(value);
-			}
-			else
-			{
-				_memory[address] = value;
-			}
+            }
+            else if (address == 0xFF05) // TIMA
+            {
+                _memory[address] = value;
+            }
+            else if (address == 0xFF07) // TAC
+            {
+                _memory[address] = value;
+                _gameBoy.SetClockFrequency();
+            }
+            else if (address == 0xFF44)
+            {
+                _memory[address] = 0;
+            }
+            else if (address == 0xFF46)
+            {
+                StartOamDma(value);
+            }
+            else
+            {
+                _memory[address] = value;
+            }
 
-		}
+        }
 
-		private void WriteRam(ushort address, byte value)
-		{
-			if (_mbc1)
-			{
-				if (!_ramEnabled) return;
-				int ramBank = GetMbc1RamBank();
-				if (_ramBankSize > 0)
-				{
-					ramBank %= _ramBankSize;
-				}
-				RamBanks[address - 0xA000 + (ramBank * 0x2000)] = value;
-				MarkSaveDirtyIfBatteryBackedSave();
+        private void WriteRam(ushort address, byte value)
+        {
+            if (_mbc1)
+            {
+                if (!_ramEnabled) return;
+                int ramBank = GetMbc1RamBank();
+                if (_ramBankSize > 0)
+                {
+                    ramBank %= _ramBankSize;
+                }
+                RamBanks[address - 0xA000 + (ramBank * 0x2000)] = value;
+                MarkSaveDirtyIfBatteryBackedSave();
 
-			}
-			if (_mbc2)
-			{
-				if (!_ramEnabled) return;
-				var ram = _mbc2Ram ??= new byte[0x200];
-				int index = GetMbc2RamIndex(address);
-				ram[index] = (byte)(value & 0x0F);
-				MarkSaveDirtyIfBatteryBackedSave();
-				return;
-			}
-			if (_mbc3)
-			{
-				if (!_ramEnabled) return;
-				byte sel = _mbc3RamBankOrRtcSelect;
-				if (sel <= 0x07)
-				{
-					int bank = sel;
-					if (_ramBankSize > 0)
-					{
-						bank %= _ramBankSize;
-					}
-					RamBanks[(bank * 0x2000) + (address - 0xA000)] = value;
-					MarkSaveDirtyIfBatteryBackedSave();
-					return;
-				}
-				if (sel >= 0x08 && sel <= 0x0C)
-				{
-					Mbc3RtcWriteSelected(value);
-					return;
-				}
-				return;
-			}
-			if (_mbc5)
-			{
-				if (!_ramEnabled)
-				{
-					return;
-				}
-				int bank = _currentRamBank;
-				if (_ramBankSize > 0)
-				{
-					bank %= _ramBankSize;
-				}
-				RamBanks[(bank * 0x2000) + (address - 0xA000)] = value;
-				MarkSaveDirtyIfBatteryBackedSave();
-			}
-		}
+            }
+            if (_mbc2)
+            {
+                if (!_ramEnabled) return;
+                var ram = _mbc2Ram ??= new byte[0x200];
+                int index = GetMbc2RamIndex(address);
+                ram[index] = (byte)(value & 0x0F);
+                MarkSaveDirtyIfBatteryBackedSave();
+                return;
+            }
+            if (_mbc3)
+            {
+                if (!_ramEnabled) return;
+                byte sel = _mbc3RamBankOrRtcSelect;
+                if (sel <= 0x07)
+                {
+                    int bank = sel;
+                    if (_ramBankSize > 0)
+                    {
+                        bank %= _ramBankSize;
+                    }
+                    RamBanks[(bank * 0x2000) + (address - 0xA000)] = value;
+                    MarkSaveDirtyIfBatteryBackedSave();
+                    return;
+                }
+                if (sel >= 0x08 && sel <= 0x0C)
+                {
+                    Mbc3RtcWriteSelected(value);
+                    return;
+                }
+                return;
+            }
+            if (_mbc5)
+            {
+                if (!_ramEnabled)
+                {
+                    return;
+                }
+                int bank = _currentRamBank;
+                if (_ramBankSize > 0)
+                {
+                    bank %= _ramBankSize;
+                }
+                RamBanks[(bank * 0x2000) + (address - 0xA000)] = value;
+                MarkSaveDirtyIfBatteryBackedSave();
+            }
+        }
 
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void HandleBanking(ushort address, byte value)
-		{
-			if (_mbc2 && address < 0x4000)
-			{
-				HandleMbc2RegisterWrite(address, value);
-				return;
-			}
-			switch (address)
-			{
-				case < 0x2000 when !_mbc2:
-					if (_mbc1 || _mbc3 || _mbc5)
-					{
-						RamBankEnable(address, value);
-					}
-					break;
-				case < 0x4000 when !_mbc2:
-					if (_mbc1 || _mbc3)
-					{
-						LowRomBankSelect(address, value);
-					}
-					if (_mbc5)
-					{
-						if (address < 0x3000) { LowRomBankSelect(address, value); }
-						else if (address < 0x4000)
-						{
-							HighRomBankSelect(address, value);
-						}
-					}
-					break;
-				case < 0x6000:
-					if (_mbc1)
-					{
-						// MBC1: 0x4000-0x5FFF selects RAM bank (mode 1) or upper ROM bank bits (mode 0).
-						// We store the raw 2-bit register here; mapping depends on _romBankingMode.
-						_currentRamBank = (byte)(value & 0x03);
-						break;
-					}
-					if (_mbc3)
-					{
-						// MBC3: 0x4000-0x5FFF selects RAM bank (00-07) or RTC register (08-0C)
-						_mbc3RamBankOrRtcSelect = value;
-						_RTCEnabled = value >= 0x08 && value <= 0x0C;
-						break;
-					}
-					RamBankSelect(address, value);
-					break;
-				case < 0x8000:
-					if (_mbc1)
-					{
-						RomRamModeSelect(value);
-					}
-					else if (_mbc3)
-					{
-						// MBC3: 0x6000-0x7FFF latch clock data on 00->01 sequence.
-						if (value == 0x00)
-						{
-							_mbc3LatchArmed = true;
-						}
-						else if (value == 0x01)
-						{
-							if (_mbc3LatchArmed)
-							{
-								Mbc3RtcLatch();
-							}
-							_mbc3LatchArmed = false;
-						}
-					}
-					break;
-			}
-		}
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void HandleBanking(ushort address, byte value)
+        {
+            if (_mbc2 && address < 0x4000)
+            {
+                HandleMbc2RegisterWrite(address, value);
+                return;
+            }
+            switch (address)
+            {
+                case < 0x2000 when !_mbc2:
+                    if (_mbc1 || _mbc3 || _mbc5)
+                    {
+                        RamBankEnable(address, value);
+                    }
+                    break;
+                case < 0x4000 when !_mbc2:
+                    if (_mbc1 || _mbc3)
+                    {
+                        LowRomBankSelect(address, value);
+                    }
+                    if (_mbc5)
+                    {
+                        if (address < 0x3000) { LowRomBankSelect(address, value); }
+                        else if (address < 0x4000)
+                        {
+                            HighRomBankSelect(address, value);
+                        }
+                    }
+                    break;
+                case < 0x6000:
+                    if (_mbc1)
+                    {
+                        // MBC1: 0x4000-0x5FFF selects RAM bank (mode 1) or upper ROM bank bits (mode 0).
+                        // We store the raw 2-bit register here; mapping depends on _romBankingMode.
+                        _currentRamBank = (byte)(value & 0x03);
+                        break;
+                    }
+                    if (_mbc3)
+                    {
+                        // MBC3: 0x4000-0x5FFF selects RAM bank (00-07) or RTC register (08-0C)
+                        _mbc3RamBankOrRtcSelect = value;
+                        _RTCEnabled = value >= 0x08 && value <= 0x0C;
+                        break;
+                    }
+                    RamBankSelect(address, value);
+                    break;
+                case < 0x8000:
+                    if (_mbc1)
+                    {
+                        RomRamModeSelect(value);
+                    }
+                    else if (_mbc3)
+                    {
+                        // MBC3: 0x6000-0x7FFF latch clock data on 00->01 sequence.
+                        if (value == 0x00)
+                        {
+                            _mbc3LatchArmed = true;
+                        }
+                        else if (value == 0x01)
+                        {
+                            if (_mbc3LatchArmed)
+                            {
+                                Mbc3RtcLatch();
+                            }
+                            _mbc3LatchArmed = false;
+                        }
+                    }
+                    break;
+            }
+        }
 
-		private void HandleMbc2RegisterWrite(ushort address, byte value)
-		{
-			// Pan Docs: Bit 8 of the address selects between RAM enable (A8=0) and ROM bank select (A8=1).
-			if ((address & 0x0100) == 0)
-			{
-				_ramEnabled = (value & 0x0F) == 0x0A;
-				return;
-			}
-			_currentRomBank = (byte)(value & 0x0F);
-			if ((_currentRomBank & 0x0F) == 0)
-			{
-				_currentRomBank = 1;
-			}
-		}
+        private void HandleMbc2RegisterWrite(ushort address, byte value)
+        {
+            // Pan Docs: Bit 8 of the address selects between RAM enable (A8=0) and ROM bank select (A8=1).
+            if ((address & 0x0100) == 0)
+            {
+                _ramEnabled = (value & 0x0F) == 0x0A;
+                return;
+            }
+            _currentRomBank = (byte)(value & 0x0F);
+            if ((_currentRomBank & 0x0F) == 0)
+            {
+                _currentRomBank = 1;
+            }
+        }
 
-		private void RomRamModeSelect(byte value)
-		{
-			var newData = (byte)(value & 0x01);
-			if (_mbc1)
-			{
-				_romBankingMode = newData;
-				return;
-			}
-			return;
-		}
+        private void RomRamModeSelect(byte value)
+        {
+            var newData = (byte)(value & 0x01);
+            if (_mbc1)
+            {
+                _romBankingMode = newData;
+                return;
+            }
+            return;
+        }
 
-		private void RamBankSelect(ushort address, byte value)
-		{
-			if (_mbc1)
-			{
-				_currentRamBank = (byte)(value & 0x03);
-			}
-			else if (_mbc2)
-			{
-				_currentRamBank = (byte)(value & 0x0F);
-			}
-			else if (_mbc3)
-			{
-				_currentRamBank = value;
-			}
-			else if (_mbc5)
-			{
-				if (_mbc5HasRumble)
-				{
-					// Rumble carts use bit 3 for motor control; only bits 0-2 select RAM bank.
-					_mbc5Rumble = (value & 0x08) != 0;
-					_currentRamBank = (byte)(value & 0x07);
-				}
-				else
-				{
-					_currentRamBank = (byte)(value & 0x0F);
-				}
-				if (_ramBankSize > 0)
-				{
-					_currentRamBank %= (byte)_ramBankSize;
-				}
-			}
-		}
+        private void RamBankSelect(ushort address, byte value)
+        {
+            if (_mbc1)
+            {
+                _currentRamBank = (byte)(value & 0x03);
+            }
+            else if (_mbc2)
+            {
+                _currentRamBank = (byte)(value & 0x0F);
+            }
+            else if (_mbc3)
+            {
+                _currentRamBank = value;
+            }
+            else if (_mbc5)
+            {
+                if (_mbc5HasRumble)
+                {
+                    // Rumble carts use bit 3 for motor control; only bits 0-2 select RAM bank.
+                    _mbc5Rumble = (value & 0x08) != 0;
+                    _currentRamBank = (byte)(value & 0x07);
+                }
+                else
+                {
+                    _currentRamBank = (byte)(value & 0x0F);
+                }
+                if (_ramBankSize > 0)
+                {
+                    _currentRamBank %= (byte)_ramBankSize;
+                }
+            }
+        }
 
-		private void HighRomBankSelect(ushort address, byte value)
-		{
-			if (_mbc5)
-			{
-				// MBC5: 0x3000-0x3FFF sets bit 8 of the ROM bank.
-				_mbc5RomBank = (ushort)((_mbc5RomBank & 0x00FF) | ((value & 0x01) << 8));
-				return;
-			}
+        private void HighRomBankSelect(ushort address, byte value)
+        {
+            if (_mbc5)
+            {
+                // MBC5: 0x3000-0x3FFF sets bit 8 of the ROM bank.
+                _mbc5RomBank = (ushort)((_mbc5RomBank & 0x00FF) | ((value & 0x01) << 8));
+                return;
+            }
 
-			if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
-			{
-				Log.Debug($"BEGIN HIGH BITS - Current ROM Bank: {_currentRomBank}");
-			}
-			if (value == 0)
-			{
-				_currentRomBank = 1;
-			}
-			else
-			{
-				_currentRomBank = (byte)(value & 0x1F);
-				if (_currentRomBank == 0)
-					_currentRomBank = 1;
-			}
-			if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
-			{
-				Log.Debug($"END HIGH BITS - Current ROM Bank: {_currentRomBank}");
-			}
-		}
+            if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
+            {
+                Log.Debug($"BEGIN HIGH BITS - Current ROM Bank: {_currentRomBank}");
+            }
+            if (value == 0)
+            {
+                _currentRomBank = 1;
+            }
+            else
+            {
+                _currentRomBank = (byte)(value & 0x1F);
+                if (_currentRomBank == 0)
+                    _currentRomBank = 1;
+            }
+            if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
+            {
+                Log.Debug($"END HIGH BITS - Current ROM Bank: {_currentRomBank}");
+            }
+        }
 
-		private void LowRomBankSelect(ushort address, byte value)
-		{
-			if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
-			{
-				Log.Debug($"BEGIN - Current ROM Bank: {_currentRomBank}");
-			}
-			if (_mbc2)
-			{
-				_currentRomBank = (byte)(value & 0x0F);
-				if (_currentRomBank == 0)
-				{
-					_currentRomBank = 1;
-				}
-			}
-			else if (_mbc3)
-			{
-				_currentRomBank = (byte)(value & 0x7F);
-				if (_currentRomBank == 0)
-				{
-					_currentRomBank = 1;
-				}
-			}
-			else if (_mbc5)
-			{
-				// MBC5: 0x2000-0x2FFF sets the low 8 bits of the ROM bank.
-				_mbc5RomBank = (ushort)((_mbc5RomBank & 0x0100) | value);
-				_currentRomBank = value;
+        private void LowRomBankSelect(ushort address, byte value)
+        {
+            if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
+            {
+                Log.Debug($"BEGIN - Current ROM Bank: {_currentRomBank}");
+            }
+            if (_mbc2)
+            {
+                _currentRomBank = (byte)(value & 0x0F);
+                if (_currentRomBank == 0)
+                {
+                    _currentRomBank = 1;
+                }
+            }
+            else if (_mbc3)
+            {
+                _currentRomBank = (byte)(value & 0x7F);
+                if (_currentRomBank == 0)
+                {
+                    _currentRomBank = 1;
+                }
+            }
+            else if (_mbc5)
+            {
+                // MBC5: 0x2000-0x2FFF sets the low 8 bits of the ROM bank.
+                _mbc5RomBank = (ushort)((_mbc5RomBank & 0x0100) | value);
+                _currentRomBank = value;
 
-			}
-			else
-			{
-				// MBC1: store the raw lower 5 bits. The effective bank number is
-				// computed on reads (including the "lower bits == 0 => +1" quirk).
-				_currentRomBank = (byte)(value & 0x1F);
-			}
-			if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
-			{
-				Log.Debug($"END - Current ROM Bank: {_currentRomBank}");
-			}
-		}
+            }
+            else
+            {
+                // MBC1: store the raw lower 5 bits. The effective bank number is
+                // computed on reads (including the "lower bits == 0 => +1" quirk).
+                _currentRomBank = (byte)(value & 0x1F);
+            }
+            if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug))
+            {
+                Log.Debug($"END - Current ROM Bank: {_currentRomBank}");
+            }
+        }
 
-		private void RamBankEnable(ushort address, byte value)
-		{
-			if (_mbc2)
-			{
-				// if bit 4 of address is set, ignore
-				if ((address & 0x10) == 0x10)
-				{
-					return;
-				}
-			}
-			if ((value & 0x0F) == 0x0A)
-			{
-				_ramEnabled = true;
-			}
-			else
-			{
-				_ramEnabled = false;
-			}
-		}
+        private void RamBankEnable(ushort address, byte value)
+        {
+            if (_mbc2)
+            {
+                // if bit 4 of address is set, ignore
+                if ((address & 0x10) == 0x10)
+                {
+                    return;
+                }
+            }
+            if ((value & 0x0F) == 0x0A)
+            {
+                _ramEnabled = true;
+            }
+            else
+            {
+                _ramEnabled = false;
+            }
+        }
 
-		private void InitialiseIORegisters()
-		{
-			// The I/O registers are used to control the GameBoy.
-			_memory[0xFF00] = 0xCF; // JOYP
-			_memory[0xFF01] = 0x00; // SB
-			_memory[0xFF02] = 0x7E; // SC
-			_memory[0xFF04] = 0x00; // DIV
+        private void InitialiseIORegisters()
+        {
+            // The I/O registers are used to control the GameBoy.
+            _memory[0xFF00] = 0xCF; // JOYP
+            _memory[0xFF01] = 0x00; // SB
+            _memory[0xFF02] = 0x7E; // SC
+            _memory[0xFF04] = 0x00; // DIV
 
-			_memory[0xFF08] = 0xF8; // TAC
-			_memory[0xFF0F] = 0x01; // IF
+            _memory[0xFF08] = 0xF8; // TAC
+            _memory[0xFF0F] = 0x01; // IF
 
-			// Sound 1
-			_memory[0xFF10] = 0x80; // ENT1
-			_memory[0xFF11] = 0xBF; // LEN1
-			_memory[0xFF12] = 0xF3; // ENV1
-			_memory[0xFF13] = 0xC1; // FREQ1
-			_memory[0xFF14] = 0xBF; // KIK1
+            // Sound 1
+            _memory[0xFF10] = 0x80; // ENT1
+            _memory[0xFF11] = 0xBF; // LEN1
+            _memory[0xFF12] = 0xF3; // ENV1
+            _memory[0xFF13] = 0xC1; // FREQ1
+            _memory[0xFF14] = 0xBF; // KIK1
 
-			_memory[0xFF15] = 0xFF; // N/A
-			_memory[0xFF16] = 0x3F; // LEN2
-			_memory[0xFF19] = 0xBF; // KIK2
+            _memory[0xFF15] = 0xFF; // N/A
+            _memory[0xFF16] = 0x3F; // LEN2
+            _memory[0xFF19] = 0xBF; // KIK2
 
-			_memory[0xFF1A] = 0x7F;
-			_memory[0xFF1B] = 0xFF;
-			_memory[0xFF1C] = 0x9F;
-			_memory[0xFF1E] = 0xBF;
-			_memory[0xFF20] = 0xFF;
+            _memory[0xFF1A] = 0x7F;
+            _memory[0xFF1B] = 0xFF;
+            _memory[0xFF1C] = 0x9F;
+            _memory[0xFF1E] = 0xBF;
+            _memory[0xFF20] = 0xFF;
 
-			_memory[0xFF23] = 0xBF;
-			_memory[0xFF24] = 0x77;
-			_memory[0xFF25] = 0xF3;
-			_memory[0xFF26] = 0xF1;
+            _memory[0xFF23] = 0xBF;
+            _memory[0xFF24] = 0x77;
+            _memory[0xFF25] = 0xF3;
+            _memory[0xFF26] = 0xF1;
 
-			// graphics
-			_memory[0xFF40] = 0x91; // LCDC
-			_memory[0xFF41] = 0x85; // STAT
-			_memory[0xFF46] = 0xFF; // DMA
-			_memory[0xFF47] = 0xFC; // BGP
-			_memory[0xFF48] = 0xFF; // OBP0
-			_memory[0xFF49] = 0xFF; // OBP1
-			_memory[0xFF4D] = 0xFF; // KEY1 (DMG reads 0xFF; CGB value is set when ROM is loaded)
-			_memory[0xFF4F] = 0xFF; // VBK
-			_memory[0xFF70] = 0xFF; // SVBK
+            // graphics
+            _memory[0xFF40] = 0x91; // LCDC
+            _memory[0xFF41] = 0x85; // STAT
+            _memory[0xFF46] = 0xFF; // DMA
+            _memory[0xFF47] = 0xFC; // BGP
+            _memory[0xFF48] = 0xFF; // OBP0
+            _memory[0xFF49] = 0xFF; // OBP1
+            _memory[0xFF4D] = 0xFF; // KEY1 (DMG reads 0xFF; CGB value is set when ROM is loaded)
+            _memory[0xFF4F] = 0xFF; // VBK
+            _memory[0xFF70] = 0xFF; // SVBK
 
-			_memory[0xFFFF] = 0x00;
-		}
+            _memory[0xFFFF] = 0x00;
+        }
 
-		public void InitialiseGame(byte[] rom, bool preferCgbWhenSupported = false)
-		{
-			_saveDirtyVersion = 0;
-			_cartType = rom.Length > 0x147 ? rom[0x147] : (byte)0;
-			_ramSizeCode = rom.Length > 0x149 ? rom[0x149] : (byte)0;
-			_hasBatteryBackedSave = _cartType is 0x03 or 0x06 or 0x09 or 0x0F or 0x10 or 0x13 or 0x1B or 0x1E;
+        public void InitialiseGame(byte[] rom, bool preferCgbWhenSupported = false)
+        {
+            _saveDirtyVersion = 0;
+            _cartType = rom.Length > 0x147 ? rom[0x147] : (byte)0;
+            _ramSizeCode = rom.Length > 0x149 ? rom[0x149] : (byte)0;
+            _hasBatteryBackedSave = _cartType is 0x03 or 0x06 or 0x09 or 0x0F or 0x10 or 0x13 or 0x1B or 0x1E;
 
-			// Reset mapper state for the newly loaded cartridge.
-			_currentRomBank = 1;
-			_currentRamBank = 0;
-			_romBankingMode = 0;
-			_ramEnabled = false;
-			_mbc1 = _mbc2 = _mbc3 = _mbc5 = false;
-			_mbc5RomBank = 1;
-			_mbc5HasRumble = false;
-			_mbc5Rumble = false;
-			_RTCEnabled = false;
-			_multicart = false;
-			_mbc1m = false;
-			_mbc2Ram = null;
-			_mbc3RamBankOrRtcSelect = 0;
-			_mbc3LatchArmed = false;
-			_mbc3Latched = false;
-			_mbc3RtcSubCycleCounter = 0;
-			_mbc3RtcSeconds = 0;
-			_mbc3RtcMinutes = 0;
-			_mbc3RtcHours = 0;
-			_mbc3RtcDays = 0;
-			_mbc3RtcHalt = false;
-			_mbc3RtcCarry = false;
-			_mbc3RtcLatchedS = 0;
-			_mbc3RtcLatchedM = 0;
-			_mbc3RtcLatchedH = 0;
-			_mbc3RtcLatchedDL = 0;
-			_mbc3RtcLatchedDH = 0;
+            // Reset mapper state for the newly loaded cartridge.
+            _currentRomBank = 1;
+            _currentRamBank = 0;
+            _romBankingMode = 0;
+            _ramEnabled = false;
+            _mbc1 = _mbc2 = _mbc3 = _mbc5 = false;
+            _mbc5RomBank = 1;
+            _mbc5HasRumble = false;
+            _mbc5Rumble = false;
+            _RTCEnabled = false;
+            _multicart = false;
+            _mbc1m = false;
+            _mbc2Ram = null;
+            _mbc3RamBankOrRtcSelect = 0;
+            _mbc3LatchArmed = false;
+            _mbc3Latched = false;
+            _mbc3RtcSubCycleCounter = 0;
+            _mbc3RtcSeconds = 0;
+            _mbc3RtcMinutes = 0;
+            _mbc3RtcHours = 0;
+            _mbc3RtcDays = 0;
+            _mbc3RtcHalt = false;
+            _mbc3RtcCarry = false;
+            _mbc3RtcLatchedS = 0;
+            _mbc3RtcLatchedM = 0;
+            _mbc3RtcLatchedH = 0;
+            _mbc3RtcLatchedDL = 0;
+            _mbc3RtcLatchedDH = 0;
 
-			// CGB support flag at 0x0143: 0x80 = supports CGB, 0xC0 = CGB only.
-			// Allow user to choose DMG vs CGB for dual-mode (0x80) cartridges.
-			byte cgbFlag = rom.Length > 0x143 ? rom[0x143] : (byte)0x00;
-			_cartRequiresCgb = cgbFlag == 0xC0;
-			_cartSupportsCgb = cgbFlag == 0x80 || _cartRequiresCgb;
-			_isCgb = _cartRequiresCgb || (_cartSupportsCgb && preferCgbWhenSupported);
-			_gameBoy.Apu.IsCgb = _isCgb;
-			_key1PrepareSpeedSwitch = false;
-			_memory[0xFF4D] = _isCgb ? BuildKey1Value() : (byte)0xFF;
+            // CGB support flag at 0x0143: 0x80 = supports CGB, 0xC0 = CGB only.
+            // Allow user to choose DMG vs CGB for dual-mode (0x80) cartridges.
+            byte cgbFlag = rom.Length > 0x143 ? rom[0x143] : (byte)0x00;
+            _cartRequiresCgb = cgbFlag == 0xC0;
+            _cartSupportsCgb = cgbFlag == 0x80 || _cartRequiresCgb;
+            _isCgb = _cartRequiresCgb || (_cartSupportsCgb && preferCgbWhenSupported);
+            _gameBoy.Apu.IsCgb = _isCgb;
+            _key1PrepareSpeedSwitch = false;
+            _memory[0xFF4D] = _isCgb ? BuildKey1Value() : (byte)0xFF;
 
-			// Clear/init CGB backing stores. (Without a boot ROM, games expect a sane default.)
-			CgbBgPaletteWriteCount = 0;
-			CgbObjPaletteWriteCount = 0;
-			_hdmaActive = false;
-			_hdmaHblankMode = false;
-			_hdmaRemainingBlocks = 0;
-			_hdmaSrc = 0;
-			_hdmaDst = 0;
-			Array.Clear(_wram, 0, _wram.Length);
-			Array.Fill(_cgbBgPaletteRam, (byte)0xFF);
-			Array.Fill(_cgbObjPaletteRam, (byte)0xFF);
+            // Clear/init CGB backing stores. (Without a boot ROM, games expect a sane default.)
+            CgbBgPaletteWriteCount = 0;
+            CgbObjPaletteWriteCount = 0;
+            _hdmaActive = false;
+            _hdmaHblankMode = false;
+            _hdmaRemainingBlocks = 0;
+            _hdmaSrc = 0;
+            _hdmaDst = 0;
+            Array.Clear(_wram, 0, _wram.Length);
+            Array.Fill(_cgbBgPaletteRam, (byte)0xFF);
+            Array.Fill(_cgbObjPaletteRam, (byte)0xFF);
 
-			// CGB-only registers read as $FF in DMG mode.
-			if (_isCgb)
-			{
-				// VBK: bit0 selects VRAM bank; other bits read as 1.
-				_memory[0xFF4F] = 0xFE;
-				// SVBK: bits0-2 select WRAM bank; other bits read as 1. Default bank=1.
-				_memory[0xFF70] = 0xF9;
-				// Palette specs start at index 0.
-				_memory[0xFF68] = 0x00;
-				_memory[0xFF6A] = 0x00;
-				// OPRI defaults to 0 (OAM priority). Stored bits are masked; read returns 0xFE|bit0.
-				_memory[0xFF6C] = 0x00;
-				// HDMA registers.
-				_memory[0xFF51] = 0xFF;
-				_memory[0xFF52] = 0xFF;
-				_memory[0xFF53] = 0xFF;
-				_memory[0xFF54] = 0xFF;
-				_memory[0xFF55] = 0xFF;
-			}
-			else
-			{
-				_memory[0xFF4F] = 0xFF;
-				_memory[0xFF70] = 0xFF;
-				_memory[0xFF68] = 0xFF;
-				_memory[0xFF69] = 0xFF;
-				_memory[0xFF6A] = 0xFF;
-				_memory[0xFF6B] = 0xFF;
-				_memory[0xFF51] = 0xFF;
-				_memory[0xFF52] = 0xFF;
-				_memory[0xFF53] = 0xFF;
-				_memory[0xFF54] = 0xFF;
-				_memory[0xFF55] = 0xFF;
-			}
+            // CGB-only registers read as $FF in DMG mode.
+            if (_isCgb)
+            {
+                // VBK: bit0 selects VRAM bank; other bits read as 1.
+                _memory[0xFF4F] = 0xFE;
+                // SVBK: bits0-2 select WRAM bank; other bits read as 1. Default bank=1.
+                _memory[0xFF70] = 0xF9;
+                // Palette specs start at index 0.
+                _memory[0xFF68] = 0x00;
+                _memory[0xFF6A] = 0x00;
+                // OPRI defaults to 0 (OAM priority). Stored bits are masked; read returns 0xFE|bit0.
+                _memory[0xFF6C] = 0x00;
+                // HDMA registers.
+                _memory[0xFF51] = 0xFF;
+                _memory[0xFF52] = 0xFF;
+                _memory[0xFF53] = 0xFF;
+                _memory[0xFF54] = 0xFF;
+                _memory[0xFF55] = 0xFF;
+            }
+            else
+            {
+                _memory[0xFF4F] = 0xFF;
+                _memory[0xFF70] = 0xFF;
+                _memory[0xFF68] = 0xFF;
+                _memory[0xFF69] = 0xFF;
+                _memory[0xFF6A] = 0xFF;
+                _memory[0xFF6B] = 0xFF;
+                _memory[0xFF51] = 0xFF;
+                _memory[0xFF52] = 0xFF;
+                _memory[0xFF53] = 0xFF;
+                _memory[0xFF54] = 0xFF;
+                _memory[0xFF55] = 0xFF;
+            }
 
-			var type = _cartType;
-			switch (type)
-			{
-				case 0:
-				case 8:
-				case 9:
-					// ROM only
-					break;
-				case 1:
-				// MBC1
-				case 2:
-				// MBC1+RAM
-				case 3:
-					// MBC1+RAM+BATTERY
-					_mbc1 = true;
-					break;
-				case 5:
-				// MBC2
-				case 6:
-					// MBC2+RAM
-					_mbc2 = true;
-					break;
-				case 0x0F:
-				// MBC3+TIMER+BATTERY
-				case 0x10:
-				// MBC3+TIMER+RAM+BATTERY
-				case 0x11:
-				// MBC3
-				case 0x12:
-				// MBC3+RAM
-				case 0x13:
-					// MBC3+RAM+BATTERY
-					_mbc3 = true;
-					_mbc3HasTimer = type is 0x0F or 0x10;
-					break;
-				case 0x19:
-				// MBC5
-				case 0x1A:
-				// MBC5+RAM
-				case 0x1B:
-					// MBC5+RAM+BATTERY
-					_mbc5 = true;
-					_mbc5HasRumble = false;
-					break;
-				case 0x1C:
-				// MBC5+RUMBLE
-				case 0x1D:
-				// MBC5+RUMBLE+RAM
-				case 0x1E:
-					// MBC5+RUMBLE+RAM+BATTERY
-					_mbc5 = true;
-					_mbc5HasRumble = true;
-					break;
-			}
+            var type = _cartType;
+            switch (type)
+            {
+                case 0:
+                case 8:
+                case 9:
+                    // ROM only
+                    break;
+                case 1:
+                // MBC1
+                case 2:
+                // MBC1+RAM
+                case 3:
+                    // MBC1+RAM+BATTERY
+                    _mbc1 = true;
+                    break;
+                case 5:
+                // MBC2
+                case 6:
+                    // MBC2+RAM
+                    _mbc2 = true;
+                    break;
+                case 0x0F:
+                // MBC3+TIMER+BATTERY
+                case 0x10:
+                // MBC3+TIMER+RAM+BATTERY
+                case 0x11:
+                // MBC3
+                case 0x12:
+                // MBC3+RAM
+                case 0x13:
+                    // MBC3+RAM+BATTERY
+                    _mbc3 = true;
+                    _mbc3HasTimer = type is 0x0F or 0x10;
+                    break;
+                case 0x19:
+                // MBC5
+                case 0x1A:
+                // MBC5+RAM
+                case 0x1B:
+                    // MBC5+RAM+BATTERY
+                    _mbc5 = true;
+                    _mbc5HasRumble = false;
+                    break;
+                case 0x1C:
+                // MBC5+RUMBLE
+                case 0x1D:
+                // MBC5+RUMBLE+RAM
+                case 0x1E:
+                    // MBC5+RUMBLE+RAM+BATTERY
+                    _mbc5 = true;
+                    _mbc5HasRumble = true;
+                    break;
+            }
 
-			// Detect special MBC1 wiring used by multi-game compilation carts (MBC1M).
-			if (_mbc1 && DetectMbc1mMulticart(rom))
-			{
-				_mbc1m = true;
-			}
-			if (_mbc2)
-			{
-				_mbc2Ram = new byte[0x200];
-				for (int i = 0; i < _mbc2Ram.Length; i++)
-				{
-					_mbc2Ram[i] = 0x0F;
-				}
-			}
-			if (_mbc3)
-			{
-				// Default: ROM bank = 1, RAM/RTC disabled.
-				_mbc3RtcSubCycleCounter = 0;
-			}
+            // Detect special MBC1 wiring used by multi-game compilation carts (MBC1M).
+            if (_mbc1 && DetectMbc1mMulticart(rom))
+            {
+                _mbc1m = true;
+            }
+            if (_mbc2)
+            {
+                _mbc2Ram = new byte[0x200];
+                for (int i = 0; i < _mbc2Ram.Length; i++)
+                {
+                    _mbc2Ram[i] = 0x0F;
+                }
+            }
+            if (_mbc3)
+            {
+                // Default: ROM bank = 1, RAM/RTC disabled.
+                _mbc3RtcSubCycleCounter = 0;
+            }
 
-			// ROM bank size
-			var romBankSize = rom[0x148];
-			switch (romBankSize)
-			{
-				case 0x00:
-					// 32KByte (no ROM banking)
-					_romBankSize = 0x8000;
-					_romBankCount = 2;
-					break;
-				case 0x01:
-					// 64KByte (4 banks)
-					_romBankSize = 0x10000;
-					_romBankCount = 4;
-					break;
-				case 0x02:
-					// 128KByte (8 banks)
-					_romBankSize = 0x20000;
-					_romBankCount = 8;
-					break;
-				case 0x03:
-					// 256KByte (16 banks)
-					_romBankSize = 0x40000;
-					_romBankCount = 16;
-					break;
-				case 0x04:
-					// 512KByte (32 banks)
-					_romBankSize = 0x80000;
-					_romBankCount = 32;
-					break;
-				case 0x05:
-					// 1MByte (64 banks)  -  only 63 banks used by MBC1
-					_romBankSize = 0x100000;
-					_romBankCount = 64;
-					break;
-				case 0x06:
-					// 2MByte (128 banks) - only 125 banks used by MBC1
-					_romBankSize = 0x200000;
-					_romBankCount = 128;
-					break;
-				case 0x07:
-					// 4MByte (256 banks)
-					_romBankSize = 0x400000;
-					_romBankCount = 256;
-					break;
-				case 0x08:
-					// 8MByte (512 banks)
-					_romBankSize = 0x800000;
-					_romBankCount = 512;
-					break;
-			}
+            // ROM bank size
+            var romBankSize = rom[0x148];
+            switch (romBankSize)
+            {
+                case 0x00:
+                    // 32KByte (no ROM banking)
+                    _romBankSize = 0x8000;
+                    _romBankCount = 2;
+                    break;
+                case 0x01:
+                    // 64KByte (4 banks)
+                    _romBankSize = 0x10000;
+                    _romBankCount = 4;
+                    break;
+                case 0x02:
+                    // 128KByte (8 banks)
+                    _romBankSize = 0x20000;
+                    _romBankCount = 8;
+                    break;
+                case 0x03:
+                    // 256KByte (16 banks)
+                    _romBankSize = 0x40000;
+                    _romBankCount = 16;
+                    break;
+                case 0x04:
+                    // 512KByte (32 banks)
+                    _romBankSize = 0x80000;
+                    _romBankCount = 32;
+                    break;
+                case 0x05:
+                    // 1MByte (64 banks)  -  only 63 banks used by MBC1
+                    _romBankSize = 0x100000;
+                    _romBankCount = 64;
+                    break;
+                case 0x06:
+                    // 2MByte (128 banks) - only 125 banks used by MBC1
+                    _romBankSize = 0x200000;
+                    _romBankCount = 128;
+                    break;
+                case 0x07:
+                    // 4MByte (256 banks)
+                    _romBankSize = 0x400000;
+                    _romBankCount = 256;
+                    break;
+                case 0x08:
+                    // 8MByte (512 banks)
+                    _romBankSize = 0x800000;
+                    _romBankCount = 512;
+                    break;
+            }
 
-			// Load the ROM into the memory at the right location
-			_cartRom = new byte[_romBankSize];
-			Array.Copy(rom, 0, _cartRom, 0, rom.Length);
-			Array.Copy(rom, 0, _memory, 0, Math.Min(0x8000, rom.Length));
+            // Load the ROM into the memory at the right location
+            _cartRom = new byte[_romBankSize];
+            Array.Copy(rom, 0, _cartRom, 0, rom.Length);
+            Array.Copy(rom, 0, _memory, 0, Math.Min(0x8000, rom.Length));
 
-			var ramSize = _ramSizeCode;
-			switch (ramSize)
-			{
-				case 0x00:
-					// None
-					_ramBankSize = 1;
-					break;
-				case 0x01:
-					// 2 KBytes
-					_ramBankSize = 1;
-					break;
-				case 0x02:
-					// 8 Kbytes
-					_ramBankSize = 1;
-					break;
-				case 0x03:
-					// 32 KBytes (4 banks of 8KBytes each)
-					_ramBankSize = 4;
-					break;
-				case 0x04:
-					// 128 KBytes (16 banks of 8KBytes each)
-					_ramBankSize = 16;
-					break;
-				case 0x05:
-					// 64 KBytes (8 banks of 8KBytes each)
-					_ramBankSize = 8;
-					break;
-				default:
-					// Unknown
-					_ramBankSize = 1;
-					break;
-			}
-			RamBanks = new byte[_ramBankSize * 0x2000];
-			for (var i = 0; i < RamBanks.Length; i++)
-			{
-				RamBanks[i] = 0xff;
-			}
-		}
+            var ramSize = _ramSizeCode;
+            switch (ramSize)
+            {
+                case 0x00:
+                    // None
+                    _ramBankSize = 1;
+                    break;
+                case 0x01:
+                    // 2 KBytes
+                    _ramBankSize = 1;
+                    break;
+                case 0x02:
+                    // 8 Kbytes
+                    _ramBankSize = 1;
+                    break;
+                case 0x03:
+                    // 32 KBytes (4 banks of 8KBytes each)
+                    _ramBankSize = 4;
+                    break;
+                case 0x04:
+                    // 128 KBytes (16 banks of 8KBytes each)
+                    _ramBankSize = 16;
+                    break;
+                case 0x05:
+                    // 64 KBytes (8 banks of 8KBytes each)
+                    _ramBankSize = 8;
+                    break;
+                default:
+                    // Unknown
+                    _ramBankSize = 1;
+                    break;
+            }
+            RamBanks = new byte[_ramBankSize * 0x2000];
+            for (var i = 0; i < RamBanks.Length; i++)
+            {
+                RamBanks[i] = 0xff;
+            }
+        }
 
-		public byte[] GetTileData()
-		{
-			return GetTileDataBank(0);
-		}
+        public byte[] GetTileData()
+        {
+            return GetTileDataBank(0);
+        }
 
-		internal byte[] GetTileDataBank(int bank)
-		{
-			// 8000-97FF from the selected VRAM bank.
-			bank = bank != 0 ? 1 : 0;
-			var tileData = new byte[0x1800];
-			GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
-			int src = (bank * 0x2000) + 0x0000; // 0x8000 within VRAM
-			Array.Copy(vram, src, tileData, 0, 0x1800);
-			return tileData;
-		}
+        internal byte[] GetTileDataBank(int bank)
+        {
+            // 8000-97FF from the selected VRAM bank.
+            bank = bank != 0 ? 1 : 0;
+            var tileData = new byte[0x1800];
+            GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
+            int src = (bank * 0x2000) + 0x0000; // 0x8000 within VRAM
+            Array.Copy(vram, src, tileData, 0, 0x1800);
+            return tileData;
+        }
 
-		public byte[] GetTileMap()
-		{
-			return GetTileMap(0x9800);
-		}
+        public byte[] GetTileMap()
+        {
+            return GetTileMap(0x9800);
+        }
 
-		public byte[] GetTileMap(ushort baseAddress)
-		{
-			// 9800-9BFF or 9C00-9FFF
-			if (baseAddress != 0x9800 && baseAddress != 0x9C00)
-			{
-				throw new ArgumentOutOfRangeException(nameof(baseAddress), "Tile map base must be 0x9800 or 0x9C00");
-			}
+        public byte[] GetTileMap(ushort baseAddress)
+        {
+            // 9800-9BFF or 9C00-9FFF
+            if (baseAddress != 0x9800 && baseAddress != 0x9C00)
+            {
+                throw new ArgumentOutOfRangeException(nameof(baseAddress), "Tile map base must be 0x9800 or 0x9C00");
+            }
 
-			var tileMap = new byte[0x400];
-			GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
-			int src = baseAddress - 0x8000; // VRAM bank 0
-			Array.Copy(vram, src, tileMap, 0, 0x400);
-			return tileMap;
-		}
+            var tileMap = new byte[0x400];
+            GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
+            int src = baseAddress - 0x8000; // VRAM bank 0
+            Array.Copy(vram, src, tileMap, 0, 0x400);
+            return tileMap;
+        }
 
-		internal byte[] GetCgbTileMapAttributes(ushort baseAddress)
-		{
-			// Attributes are stored in VRAM bank 1 at the same map index.
-			if (baseAddress != 0x9800 && baseAddress != 0x9C00)
-			{
-				throw new ArgumentOutOfRangeException(nameof(baseAddress), "Tile map base must be 0x9800 or 0x9C00");
-			}
+        internal byte[] GetCgbTileMapAttributes(ushort baseAddress)
+        {
+            // Attributes are stored in VRAM bank 1 at the same map index.
+            if (baseAddress != 0x9800 && baseAddress != 0x9C00)
+            {
+                throw new ArgumentOutOfRangeException(nameof(baseAddress), "Tile map base must be 0x9800 or 0x9C00");
+            }
 
-			var attrs = new byte[0x400];
-			if (!_isCgb)
-			{
-				return attrs;
-			}
+            var attrs = new byte[0x400];
+            if (!_isCgb)
+            {
+                return attrs;
+            }
 
-			int src = 0x2000 + (baseAddress - 0x8000);
-			GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
-			Array.Copy(vram, src, attrs, 0, 0x400);
-			return attrs;
-		}
+            int src = 0x2000 + (baseAddress - 0x8000);
+            GetVideoDebugSnapshot(out var vram, out _, out _, out _, out _);
+            Array.Copy(vram, src, attrs, 0, 0x400);
+            return attrs;
+        }
 
-		internal void WriteOamByteDirect(int oamIndex, byte value)
-		{
-			if ((uint)oamIndex >= 0xA0u)
-			{
-				return;
-			}
-			_memory[0xFE00 + oamIndex] = value;
-			_gameBoy._ppu.OAM[oamIndex] = value;
-		}
-	}
+        internal void WriteOamByteDirect(int oamIndex, byte value)
+        {
+            if ((uint)oamIndex >= 0xA0u)
+            {
+                return;
+            }
+            _memory[0xFE00 + oamIndex] = value;
+            _gameBoy._ppu.OAM[oamIndex] = value;
+        }
+    }
 }

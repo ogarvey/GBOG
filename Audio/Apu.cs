@@ -269,7 +269,7 @@ public sealed class Apu
         if (_ch4.Active) status |= 0x08;
 
         return status;
-    }
+    }   
 
     public void WriteRegister(ushort address, byte value)
     {
