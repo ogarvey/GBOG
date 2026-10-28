@@ -1,8 +1,9 @@
-﻿using GBOG.CPU.Opcodes;
+using GBOG.CPU.Opcodes;
 using GBOG.Audio;
 using GBOG.Graphics;
 using GBOG.Memory;
 using GBOG.Utils;
+using GBOG.Cheats;
 using Serilog;
 using System;
 using System.Diagnostics;
@@ -47,6 +48,7 @@ namespace GBOG.CPU
 
         public GBMemory _memory { get; }
         public PPU _ppu { get; }
+        public CheatManager CheatManager { get; } = new();
         public bool EnableCpuTrace { get; set; } = false;
 
     #if DEBUG
@@ -468,6 +470,9 @@ namespace GBOG.CPU
                     Array.Copy(_physicalJoypadKeys, keys, 8);
                     MacroExecutor.Update(keys);
                     _memory.NotifyJoypadStateChanged();
+
+                    // Apply active GameShark cheats for the frame
+                    CheatManager.ApplyGameSharkRamFrame(_memory);
 
                     // For frame advance, we want to stop at the start of the next VBlank (LY=144).
                     // If the LCD is off, we just run a standard frame's worth of cycles.
@@ -996,6 +1001,10 @@ namespace GBOG.CPU
         {
             byte req = (byte)(_memory.IF | 0xE0);
             _memory.IF = (byte)(req | 1 << (int)interrupt);
+            if (interrupt == Interrupt.VBlank)
+            {
+                CheatManager.ApplyGameSharkRamFrame(_memory);
+            }
         }
 
         public void LoadRom(string path)

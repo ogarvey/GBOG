@@ -104,6 +104,72 @@ namespace GBOG.Memory
 
         public int RomSize => _cartRom?.Length ?? 0;
 
+        public string GetRomTitle()
+        {
+            if (_cartRom == null || _cartRom.Length < 0x150)
+            {
+                return string.Empty;
+            }
+
+            var bytes = new ReadOnlySpan<byte>(_cartRom, 0x0134, 16);
+            int len = 0;
+            while (len < 16 && bytes[len] != 0 && bytes[len] >= 32 && bytes[len] <= 126)
+            {
+                len++;
+            }
+            return System.Text.Encoding.ASCII.GetString(bytes.Slice(0, len)).Trim();
+        }
+
+        public void WriteRamCheat(ushort address, byte value, byte bank)
+        {
+            if (address >= 0xC000 && address <= 0xFDFF)
+            {
+                int idx = MapWramAddress(address);
+                if (idx >= 0 && idx < _wram.Length)
+                {
+                    _wram[idx] = value;
+                }
+                if (address < _memory.Length)
+                {
+                    _memory[address] = value;
+                }
+                if (address >= 0xE000 && (address - 0x2000) < _memory.Length)
+                {
+                    _memory[address - 0x2000] = value;
+                }
+            }
+            else if (address >= 0xA000 && address <= 0xBFFF)
+            {
+                if (RamBanks != null && RamBanks.Length > 0)
+                {
+                    int effectiveBank = bank > 0 && _ramBankSize > 0 ? (bank % _ramBankSize) : 0;
+                    int offset = (effectiveBank * 0x2000) + (address - 0xA000);
+                    if (offset >= 0 && offset < RamBanks.Length)
+                    {
+                        RamBanks[offset] = value;
+                    }
+                }
+            }
+            else if (address >= 0x8000 && address <= 0x9FFF)
+            {
+                int vramBank = GetCpuVramBank();
+                int offset = address - 0x8000;
+                int idx = (vramBank * 0x2000) + offset;
+                if (idx >= 0 && idx < _gameBoy._ppu.VideoRam.Length)
+                {
+                    _gameBoy._ppu.VideoRam[idx] = value;
+                }
+                if (address < _memory.Length)
+                {
+                    _memory[address] = value;
+                }
+            }
+            else if (address < _memory.Length)
+            {
+                _memory[address] = value;
+            }
+        }
+
         /// <summary>
         /// True when the loaded cartridge both has a battery and declares SRAM.
         /// (RTC-only battery carts like MBC3 type 0x0F will return false here.)
@@ -2186,51 +2252,71 @@ namespace GBOG.Memory
             }
             if (address < 0x4000)
             {
+                byte val;
                 if (_mbc1)
                 {
                     int bank = GetMbc1Bank0();
                     newAddress = (bank * 0x4000) + address;
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                if (_mbc2)
+                else if (_mbc2)
                 {
                     // MBC2: bank 0 is always mapped here.
-                    return _cartRom[address];
+                    val = _cartRom[address];
                 }
-                if (_mbc5)
+                else if (_mbc5)
                 {
                     // MBC5: bank 0 is always mapped here.
-                    return _cartRom[address];
+                    val = _cartRom[address];
                 }
-                return _cartRom[address];
+                else
+                {
+                    val = _cartRom[address];
+                }
+
+                if (_gameBoy.CheatManager.HasActiveGameGenie)
+                {
+                    return _gameBoy.CheatManager.ApplyGameGenie(address, val);
+                }
+                return val;
             }
             else if ((address >= 0x4000) && (address <= 0x7FFF))
             {
+                byte val;
                 if (_mbc1)
                 {
                     int bank = GetMbc1Bank1();
                     newAddress = address - 0x4000 + (bank * 0x4000);
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                if (_mbc2)
+                else if (_mbc2)
                 {
                     int bank = GetMbc2RomBank();
                     newAddress = address - 0x4000 + (bank * 0x4000);
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                if (_mbc3)
+                else if (_mbc3)
                 {
                     int bank = GetMbc3RomBank();
                     newAddress = address - 0x4000 + (bank * 0x4000);
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                if (_mbc5)
+                else if (_mbc5)
                 {
                     int bank = GetMbc5RomBank();
                     newAddress = address - 0x4000 + (bank * 0x4000);
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                return _memory[address];
+                else
+                {
+                    val = _memory[address];
+                }
+
+                if (_gameBoy.CheatManager.HasActiveGameGenie)
+                {
+                    return _gameBoy.CheatManager.ApplyGameGenie(address, val);
+                }
+                return val;
             }
             else if (address >= 0x8000 && address <= 0x9FFF)
             {
@@ -2240,12 +2326,22 @@ namespace GBOG.Memory
             }
             else if ((address >= 0xA000) && (address <= 0xBFFF))
             {
-                return ReadRam(address);
+                byte val = ReadRam(address);
+                if (_gameBoy.CheatManager.HasActiveGameShark)
+                {
+                    return _gameBoy.CheatManager.ApplyGameSharkRead(address, val);
+                }
+                return val;
             }
             else if (address >= 0xC000 && address <= 0xFDFF)
             {
                 int idx = MapWramAddress(address);
-                return idx >= 0 ? _wram[idx] : (byte)0xFF;
+                byte val = idx >= 0 ? _wram[idx] : (byte)0xFF;
+                if (_gameBoy.CheatManager.HasActiveGameShark)
+                {
+                    return _gameBoy.CheatManager.ApplyGameSharkRead(address, val);
+                }
+                return val;
             }
             else if (address >= 0xFE00 && address <= 0xFE9F)
             {
@@ -2268,7 +2364,12 @@ namespace GBOG.Memory
                 return Joypad;
             else
             {
-                return _memory[address];
+                byte val = _memory[address];
+                if (_gameBoy.CheatManager.HasActiveGameShark && address >= 0x8000)
+                {
+                    return _gameBoy.CheatManager.ApplyGameSharkRead(address, val);
+                }
+                return val;
             }
         }
 
@@ -2340,50 +2441,70 @@ namespace GBOG.Memory
             int newAddress;
             if (address < 0x4000)
             {
+                byte val;
                 if (_mbc1)
                 {
                     int bank = GetMbc1Bank0();
                     newAddress = (bank * 0x4000) + address;
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                if (_mbc2)
+                else if (_mbc2)
                 {
-                    return _cartRom[address];
+                    val = _cartRom[address];
                 }
-                if (_mbc5)
+                else if (_mbc5)
                 {
                     // MBC5: bank 0 is always mapped here.
-                    return _cartRom[address];
+                    val = _cartRom[address];
                 }
-                return _cartRom[address];
+                else
+                {
+                    val = _cartRom[address];
+                }
+
+                if (_gameBoy.CheatManager.HasActiveGameGenie)
+                {
+                    return _gameBoy.CheatManager.ApplyGameGenie(address, val);
+                }
+                return val;
             }
             if (address >= 0x4000 && address <= 0x7FFF)
             {
+                byte val;
                 if (_mbc1)
                 {
                     int bank = GetMbc1Bank1();
                     newAddress = address - 0x4000 + (bank * 0x4000);
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                if (_mbc2)
+                else if (_mbc2)
                 {
                     int bank = GetMbc2RomBank();
                     newAddress = address - 0x4000 + (bank * 0x4000);
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                if (_mbc3)
+                else if (_mbc3)
                 {
                     int bank = GetMbc3RomBank();
                     newAddress = address - 0x4000 + (bank * 0x4000);
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                if (_mbc5)
+                else if (_mbc5)
                 {
                     int bank = GetMbc5RomBank();
                     newAddress = address - 0x4000 + (bank * 0x4000);
-                    return _cartRom[newAddress];
+                    val = _cartRom[newAddress];
                 }
-                return _memory[address];
+                else
+                {
+                    val = _memory[address];
+                }
+
+                if (_gameBoy.CheatManager.HasActiveGameGenie)
+                {
+                    return _gameBoy.CheatManager.ApplyGameGenie(address, val);
+                }
+                return val;
             }
             if (address >= 0x8000 && address <= 0x9FFF)
             {
@@ -2393,19 +2514,34 @@ namespace GBOG.Memory
             }
             if (address >= 0xA000 && address <= 0xBFFF)
             {
-                return ReadRam(address);
+                byte val = ReadRam(address);
+                if (_gameBoy.CheatManager.HasActiveGameShark)
+                {
+                    return _gameBoy.CheatManager.ApplyGameSharkRead(address, val);
+                }
+                return val;
             }
             if (address >= 0xC000 && address <= 0xFDFF)
             {
                 int idx = MapWramAddress(address);
-                return idx >= 0 ? _wram[idx] : (byte)0xFF;
+                byte val = idx >= 0 ? _wram[idx] : (byte)0xFF;
+                if (_gameBoy.CheatManager.HasActiveGameShark)
+                {
+                    return _gameBoy.CheatManager.ApplyGameSharkRead(address, val);
+                }
+                return val;
             }
             if (address >= 0xFE00 && address <= 0xFE9F)
             {
                 return _gameBoy._ppu.OAM[address - 0xFE00];
             }
 
-            return _memory[address];
+            byte defaultVal = _memory[address];
+            if (_gameBoy.CheatManager.HasActiveGameShark && address >= 0x8000)
+            {
+                return _gameBoy.CheatManager.ApplyGameSharkRead(address, defaultVal);
+            }
+            return defaultVal;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

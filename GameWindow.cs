@@ -10,6 +10,7 @@ using Hexa.NET.OpenGL;
 using HexaGen.Runtime;
 using GBOG.Utils;
 using GBOG.Graphics.UI;
+using GBOG.Cheats;
 using System.Reflection;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -88,11 +89,13 @@ namespace GBOG
         private bool _showJoypadMacroWindow;
         private bool _showLibraryWindow;
         private bool _showSettingsWindow;
+        private bool _showCheatsWindow;
 
         private string _macroText = string.Empty;
         private string _macroError = string.Empty;
 
         private readonly ImGuiTileMapViewerWindow _tileViewer = new();
+        private readonly ImGuiCheatsWindow _cheatsWindow = new();
         private Library.LibraryManager _libraryManager = null!;
         private Library.LibraryWindow _libraryWindow = null!;
 
@@ -511,6 +514,8 @@ namespace GBOG
 
             _gb = gb;
 
+            _cheatsWindow.LoadCheatsForRom(gb, _loadedRomPath, _loadedRomName);
+
             _tileViewer.InvalidateAll();
             ClearDisplayTexture();
         }
@@ -614,6 +619,11 @@ namespace GBOG
                     if (ImGui.MenuItem("Game Library", string.Empty, _showLibraryWindow, true))
                     {
                         _showLibraryWindow = !_showLibraryWindow;
+                    }
+
+                    if (ImGui.MenuItem("Cheats", string.Empty, _showCheatsWindow, true))
+                    {
+                        _showCheatsWindow = !_showCheatsWindow;
                     }
 
                     ImGui.Separator();
@@ -830,6 +840,7 @@ namespace GBOG
             RenderTileDataViewerWindow();
             RenderJoypadMacroWindow();
             RenderSettingsWindow();
+            _cheatsWindow.Render(ref _showCheatsWindow, _gb, _loadedRomName, _loadedRomPath);
             _libraryWindow.Render(ref _showLibraryWindow, path =>
             {
                 // If a ROM is currently running/paused, stop and clear state before switching.
